@@ -66,11 +66,15 @@ def plist_path(node: str) -> Path:
 
 def powershell(script: str, values: dict | None = None, check: bool = True):
     # No execution-policy override; paths are environment data, never script text.
-    return subprocess.run(
+    result = subprocess.run(
         ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
          "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); " + script],
-        env={**os.environ, **(values or {})}, capture_output=True, text=True, encoding="utf-8", check=check,
+        env={**os.environ, **(values or {})}, capture_output=True, text=True, encoding="utf-8", check=False,
     )
+    if check and result.returncode:
+        # These commands only receive paths/task names, never credentials or config contents.
+        raise ValueError("Windows 后台任务或文件权限操作失败：" + result.stderr.strip()[:2000])
+    return result
 
 
 def protect_path(path: Path) -> None:
