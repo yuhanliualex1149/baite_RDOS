@@ -165,7 +165,8 @@ class RagSnapshotTest(unittest.TestCase):
         self.assertEqual(db.rag_state()["active_snapshot_id"], snapshot_id)
 
     def test_project_folder_may_be_empty(self) -> None:
-        source = FeishuRagSource()
+        with patch("server.rag_sync.shutil.which", return_value="/test-only/lark-cli"):
+            source = FeishuRagSource()
         with patch.object(source, "_run", return_value={"data": {"files": []}}):
             files, ignored = source.fetch_project("empty-project-folder")
         self.assertEqual(files, [])
