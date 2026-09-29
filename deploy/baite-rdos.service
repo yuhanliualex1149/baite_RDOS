@@ -1,0 +1,30 @@
+[Unit]
+Description=Baite RDOS Control Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=baite-rdos
+Group=baite-rdos
+WorkingDirectory=/opt/baite-rdos/current
+EnvironmentFile=/etc/baite-rdos/rdos.env
+EnvironmentFile=/opt/baite-rdos/current/release.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/var/lib/baite-rdos
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PATH=/opt/baite-rdos/tools/bin:/usr/local/bin:/usr/bin:/bin
+# Shell append works on the existing Alibaba Linux systemd 239 (append: needs 240).
+ExecStart=/bin/sh -c 'exec /opt/baite-rdos/current/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8010 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1 >> /var/log/baite-rdos/panel.log 2>&1'
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/baite-rdos /var/log/baite-rdos
+
+[Install]
+WantedBy=multi-user.target

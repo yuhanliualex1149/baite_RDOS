@@ -1,227 +1,179 @@
-# RDOS Web Server 部署说明
+# RDOS 云端测试部署与恢复
 
-本文用于把当前 RDOS Control Panel 部署到一台 Linux Web Server 做实际测试。推荐拓扑：
+目标：`https://rdos.yjmt.cn`。云端只运行 Panel/API/SQLite；Mac 运行 Runner、Workspace、Agent。是否上线以验收记录为准，模板存在不代表部署成功。
+
+## 发布边界
+
+- 云端全新数据库，不复制本地凭证、数据库、测试记录或 Workspace。
+- Human 使用 `shared_admin`；本轮仅显示名称为 `yuhan` 的测试节点，Runner ID 动态生成，独立 Token。
+- Python 3.12 独立环境，单 worker，监听 `127.0.0.1:8010`；独立 Nginx 站点提供 443。
+- 外部同步先关闭。日报只写用户指定测试文件夹的 `RDOS 项目进展/` 子目录。
+- 本次 schema 4：旧回执没有内容 Hash 时，重试返回 409。Server 和 Runner 必须一起更新到新协议。
+- 不改官网、YXXZ、福雀来的路由，不关已有维护入口；不包含 Windows、OSS 或正式人员接入。
+
+## 1. 只读预检
+
+运行 `bash deploy/preflight.sh` 并保存带时间的输出。核对系统、资源、8010、sudo、Nginx 全部 include、证书工具、DNS 管理权。8010 占用则停止，不抢占端口。
+
+现有 Alibaba Linux 3 / systemd 239 可用本模板；日志通过 shell append，未使用需要 systemd 240 的 `StandardOutput=append:`。不替换系统 Python，单独安装 3.12；依据实际官方软件仓库选择安装方式，不升级整机。
+
+保存并在发布后重复检查状态码、跳转和页面关键内容：
+
+- `https://yjmt.cn/`
+- `https://yjmt.cn/yxxz/`
+- `https://yjmt.cn/fuquelai/`
+- `https://yjmt.cn/fuquelai/api/health`（按真实既有基线判断，不假定必须 200）
+
+## 2. 发布准备与首次启动
+
+在审核过的发布代码目录运行，使用指定 GitHub 仓库的完整提交 SHA：
+
+```bash
+sudo bash deploy/prepare_release.sh <40位提交SHA>
+```
+
+脚本创建系统用户、固定 SHA 的 release 和虚拟环境，运行全部单元测试及 E2E。成功才写 `.verified`；只准备代码，不切换服务或修改 Nginx。
 
 ```text
-管理员浏览器 / 各地 Local Runner
-              ↓ HTTPS
-            Nginx
-              ↓ 127.0.0.1:8010
-      FastAPI Control Panel
-              ↓
-     SQLite 持久目录 + 飞书 OAuth
+/opt/baite-rdos/releases/<SHA>/   代码、.venv、release.env，root 所有
+/opt/baite-rdos/current          当前 release 的符号链接
+/opt/baite-rdos/previous         上次 release 的符号链接
+/opt/baite-rdos/tools/bin/       已验证并固定版本的 lark-cli
+/etc/baite-rdos/rdos.env         root:baite-rdos 0640
+/etc/baite-rdos/tls/             HTTPS 证书和私钥
+/var/lib/baite-rdos/baite.db     持久数据库
+/var/lib/baite-rdos/backups/     0700 目录，0600 备份
+/var/log/baite-rdos/             0700 日志目录
 ```
 
-Web Server 只运行 Control Panel。Local Runner 应继续运行在各自的研发电脑上，不要把 Runner 和研发 Workspace 一起迁到服务器。
-
-## 1. 部署前确认
-
-- Linux 服务器可使用 Python 3.9 或更高版本、Git、Nginx 和 systemd。
-- 已准备独立 HTTPS 域名。若部署到现有 `yjmt.cn` 服务器，推荐使用 `rdos.yjmt.cn`，不要把 `/bt/rdos/` 当作低成本的等价方案。
-- 防火墙只向公网开放 80/443；不要直接暴露 8010。
-- 服务器具有持久磁盘和 SQLite 备份目录。
-- 如需真实飞书同步，运行 RDOS 的系统用户必须已经安装并完成 `lark-cli` 个人 OAuth；Runner 不持有飞书 OAuth。
-- 不要把本机的 `.env.local`、数据库、Runner 配置或 `workspace/` 上传到服务器。
-
-## 2. 创建独立系统用户与目录
-
-以下命令以 Ubuntu 为例：
-
-```bash
-sudo useradd --system --create-home \
-  --home-dir /var/lib/baite-rdos \
-  --shell /usr/sbin/nologin baite-rdos
-
-sudo install -d -o baite-rdos -g baite-rdos /opt/baite-rdos
-sudo install -d -o baite-rdos -g baite-rdos /var/lib/baite-rdos/backups
-sudo install -d -o root -g baite-rdos -m 0750 /etc/baite-rdos
-```
-
-## 3. 拉取代码并安装依赖
-
-```bash
-sudo -u baite-rdos git clone \
-  https://github.com/yuhanliualex1149/baite_RDOS.git \
-  /opt/baite-rdos/app
-
-sudo -u baite-rdos python3 -m venv /opt/baite-rdos/app/.venv
-sudo -u baite-rdos /opt/baite-rdos/app/.venv/bin/pip install \
-  -r /opt/baite-rdos/app/requirements.txt
-```
-
-部署前运行测试：
-
-```bash
-cd /opt/baite-rdos/app
-sudo -u baite-rdos .venv/bin/python -m unittest \
-  tests.test_api tests.test_projects tests.test_runner tests.test_rag_sync -v
-```
-
-## 4. 创建服务器环境配置
-
-先生成 Session Secret：
-
-```bash
-openssl rand -hex 32
-```
-
-创建 `/etc/baite-rdos/rdos.env`，权限必须为 `0640 root:baite-rdos`：
-
-```text
-BAITE_DB_PATH=/var/lib/baite-rdos/baite.db
-BAITE_SESSION_SECRET=<粘贴上一步生成的随机值>
-BAITE_ADMIN_USERNAME=admin
-BAITE_ADMIN_PASSWORD=<首次部署使用的长随机密码>
-BAITE_COOKIE_SECURE=true
-BAITE_PUBLIC_URL=https://rdos.yjmt.cn
-BAITE_HOST=127.0.0.1
-BAITE_PORT=8010
-BAITE_SELECTED_RAG_FOLDER_TOKEN=KQjyf6KrxlZ24MdkHirc9TP0n2d
-BAITE_TIMEZONE=Asia/Shanghai
-BAITE_SESSION_HOURS=12
-BAITE_ONLINE_WINDOW_SECONDS=10
-```
+把 `deploy/server.env.example` 复制到 `/etc/baite-rdos/rdos.env`。使用安全终端录入独立随机 Session Secret（至少 32 字节）和初始管理员密码，不能进入 Git、聊天记录或命令历史。保持外部同步关闭、Secure Cookie 开启、Offline 窗口 60 秒。
 
 ```bash
 sudo chown root:baite-rdos /etc/baite-rdos/rdos.env
 sudo chmod 0640 /etc/baite-rdos/rdos.env
-```
-
-注意：
-
-- 不要把真实密码或 Session Secret 写回 Git 仓库。
-- `BAITE_ADMIN_PASSWORD` 只用于空数据库首次创建管理员。首次登录成功后，从服务器环境文件中删除这一行，再重启服务。
-- 正式 HTTPS 环境必须保持 `BAITE_COOKIE_SECURE=true`。
-- 如暂时没有配置飞书 OAuth，部署测试阶段可以临时加入 `BAITE_DISABLE_EXTERNAL_SYNC=true`；这只能用于隔离测试，配置 OAuth 后必须移除。
-
-## 5. 配置 systemd
-
-创建 `/etc/systemd/system/baite-rdos.service`：
-
-```ini
-[Unit]
-Description=Baite AI RDOS Control Panel
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=baite-rdos
-Group=baite-rdos
-WorkingDirectory=/opt/baite-rdos/app
-EnvironmentFile=/etc/baite-rdos/rdos.env
-ExecStart=/opt/baite-rdos/app/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8010 --proxy-headers --forwarded-allow-ips=127.0.0.1
-Restart=on-failure
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启动：
-
-```bash
+sudo install -m 0644 deploy/baite-rdos.service /etc/systemd/system/
+sudo install -m 0644 deploy/baite-rdos-backup.service /etc/systemd/system/
+sudo install -m 0644 deploy/baite-rdos-backup.timer /etc/systemd/system/
+sudo install -m 0644 deploy/rdos.logrotate /etc/logrotate.d/baite-rdos
 sudo systemctl daemon-reload
-sudo systemctl enable --now baite-rdos
-sudo systemctl status baite-rdos --no-pager
-curl -fsS http://127.0.0.1:8010/api/health
+sudo bash deploy/activate_release.sh <40位提交SHA>
 ```
 
-预期健康检查返回：
+激活检查 `/api/health` 的 `app_release`。更新前脚本先停服，使用旧 release 的配置额外备份，再原子切换 `current`。健康检查失败会停服并保留旧版本/备份，避免直接用旧代码打开不兼容的新库。
 
-```json
-{"status":"ok"}
-```
+首次登录后修改密码，确认旧会话失效，移除环境文件中的 `BAITE_ADMIN_PASSWORD` 并重启。Session Secret 必须保留，改变它也会使 Runner Token 的校验失效。
 
-## 6. 配置 Nginx 与 HTTPS
+## 3. DNS、证书与独立反向代理
 
-在现有 HTTPS `server` 块中增加：
+核实真实公网 IP 后添加 `rdos` A 记录，并检查是否有错误 AAAA。采用 DNS-01 签发证书，自动续期必须可实际执行；每次人工补 TXT 不算自动续期。
 
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:8010;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_read_timeout 120s;
-    client_max_body_size 2m;
-}
-```
+优先沿用已核实的证书工具，DNS API 使用所需域名的最小权限、root-only 配置，不放入 RDOS 服务环境或 Git。若 DNS 权限或续期条件不具备，HTTPS 阶段保持未完成。
 
-应用配置前必须先检查：
+`deploy/rdos.nginx.conf` 是 **http 级 include 的独立完整站点**，包含 `limit_req_zone`。不要塞进既有 `server`，更不能覆盖官网 `location /`。宝塔通常使用 `/www/server/panel/vhost/nginx/rdos.yjmt.cn.conf`，须先核实 include；只调整 RDOS 的证书路径。
 
 ```bash
-sudo nginx -t
-sudo systemctl reload nginx
+sudo /www/server/nginx/sbin/nginx -t
+sudo /www/server/nginx/sbin/nginx -s reload
 curl -fsS https://rdos.yjmt.cn/api/health
 ```
 
-不要直接复制覆盖服务器现有 Nginx 配置。若目标服务器是当前 `yjmt.cn` 主机，应先检查磁盘、内存、监听端口、证书和全部 Nginx include；发布后至少回归检查 `/`、`/yxxz/` 和 `/fuquelai/`。
+不新增 RDOS 80 监听；DNS-01 无需开放 80，已有网站端口保持原样。8010 不加入安全组，必须公网实测不可达。代理头仅信任本机 Nginx；Nginx 覆写客户端转发头。
 
-## 7. 首次登录与 Runner 接入
+Nginx 登录限速为每 IP 每分钟 5 次、额外突发 5 次、超限 429。所有浏览器管理/认证写操作要求 Origin 精确匹配 `BAITE_PUBLIC_URL`，同站不同子域也拒绝；维护脚本调用也要带正确 Origin 和 Human Cookie。
 
-1. 打开实际配置的 HTTPS 地址（例如 `https://rdos.yjmt.cn`），使用环境文件中的初始管理员账号登录。
-2. 修改管理员密码。
-3. 从 `/etc/baite-rdos/rdos.env` 删除 `BAITE_ADMIN_PASSWORD`，执行 `sudo systemctl restart baite-rdos`。
-4. 在 Runners 页面创建节点并下载一次性配置。
-5. 把配置安全地放到对应研发电脑，确认其中的 `control_url` 是公网 HTTPS 地址。
-6. 在研发电脑运行：
+## 4. Mac Runner
 
-```bash
-python runner/runner.py --config /安全路径/runner-config.json
+新建 `/Users/alexliu/Documents/baite-rdos-cloud-test`：
+
+```text
+releases/<SHA>/   与云端一致的代码和 .venv
+current          当前发布符号链接
+config/yuhan.json 一次性节点配置，0600
+workspace/       全新 Workspace
+logs/            按日轮转，最多 30 份历史日志
 ```
 
-7. 在工作台确认 Runner Online、心跳和项目同步正常。
-
-## 8. 飞书同步边界
-
-- Control Server 使用自己的飞书 OAuth 读取 Selected RAG 和项目文件夹。
-- 项目正文只读；Server 只能在项目文件夹的 `RDOS 项目进展/` 子目录重建 Runner 日报。
-- Local Runner 不持有飞书 OAuth。
-- 首次真实写入测试必须使用管理员明确指定的测试项目文件夹，不能使用 Workflow 来源文件或 Selected RAG 正式文件夹。
-
-如果飞书认证尚未完成，先验收登录、Runner 注册、HTTPS、数据库持久化和项目本地上报，不要把“Control Panel 已上线”误认为“飞书同步已验收”。
-
-## 9. 数据备份、更新与回滚
-
-SQLite 备份应使用 SQLite 自带备份命令，不要在运行中只复制单个 `.db` 文件：
+云端注册显示名称 `yuhan`，Workspace 填上述绝对路径；下载一次性 JSON，核实 `control_url=https://rdos.yjmt.cn`，不用旧 Token。安装代码固定 SHA，Python 3.12 独立环境。
 
 ```bash
-sudo -u baite-rdos sqlite3 /var/lib/baite-rdos/baite.db \
-  ".backup '/var/lib/baite-rdos/backups/baite-$(date +%Y%m%d-%H%M%S).db'"
+python3 deploy/install_macos_runner.py \
+  --python /Users/alexliu/Documents/baite-rdos-cloud-test/current/.venv/bin/python \
+  --code /Users/alexliu/Documents/baite-rdos-cloud-test/current \
+  --config /Users/alexliu/Documents/baite-rdos-cloud-test/config/yuhan.json \
+  --logs /Users/alexliu/Documents/baite-rdos-cloud-test/logs
 ```
 
-更新代码：
+安装器生成 `~/Library/LaunchAgents/cn.yjmt.rdos.runner.yuhan.plist`，仅引用配置路径，不嵌入 Token。用户登录启动、异常退出重启、每 5 秒轮询。`--render-only` 只生成和校验，不启动。
 
 ```bash
-cd /opt/baite-rdos/app
-sudo -u baite-rdos git fetch origin
-sudo -u baite-rdos git checkout <已确认的提交 SHA>
-sudo -u baite-rdos .venv/bin/pip install -r requirements.txt
-sudo systemctl restart baite-rdos
-curl -fsS http://127.0.0.1:8010/api/health
+launchctl print gui/$(id -u)/cn.yjmt.rdos.runner.yuhan
+launchctl kickstart -k gui/$(id -u)/cn.yjmt.rdos.runner.yuhan
+launchctl bootout gui/$(id -u)/cn.yjmt.rdos.runner.yuhan
 ```
 
-数据库迁移在启动时自动执行，并在 schema 变化前生成备份。仍建议每次更新前另做一次上述人工备份。
+分别检查、重启、停止。再次启动用 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/cn.yjmt.rdos.runner.yuhan.plist`。若 macOS 要求 Documents 访问授权，由用户允许该 Python，不能关闭系统隐私保护。
 
-回滚时切回上一提交并重启；如果新版本已经改变数据库且无法向后兼容，再停止服务并恢复更新前的 SQLite 备份。
+合盖/休眠超过 60 秒 Offline 是预期，唤醒自动重连。轮换 Token 后旧凭证应 401，替换 JSON 并重启。不要托管与手动运行同一 Workspace，Runner 使用排他锁。
 
-## 10. 部署验收清单
+共享和项目的 `shared`、`control` 通过单一 `.runner/current` 指针切换。完整快照和本地文件清单在启动时复核，损坏回到可验证的上一版。自动日报先 fsync 到 outbox 再联网；ACK 必须为 true 且 event_id 匹配才归档。网络失败保留待传，400/409/422 进入 rejected。
 
-- [ ] 本机 `127.0.0.1:8010/api/health` 返回 200。
-- [ ] 公网 HTTPS `/api/health` 返回 200，HTTP 自动跳转 HTTPS。
-- [ ] 8010 端口未向公网开放。
-- [ ] 未登录无法访问管理 API。
-- [ ] 管理员可以登录、改密码和重新登录。
-- [ ] 重启服务后管理员、Runner、项目和记录仍存在。
-- [ ] 创建一个测试 Runner，公网心跳正常。
-- [ ] 创建测试项目后，只有项目成员能获得项目资料。
-- [ ] Gate 确认或退回不会阻断 Runner 后续上报。
-- [ ] 停止 Runner 超过在线窗口后显示 Offline，恢复后自动补传。
-- [ ] 如启用飞书：只读资料同步正常，日报只写入保留子目录。
-- [ ] Nginx 日志与 `journalctl -u baite-rdos` 没有持续错误。
-- [ ] 已完成一次备份和恢复演练。
+## 5. 飞书闭环
+
+1. 云端服务用户单独安装已验证的固定版本 `lark-cli`，root 管理二进制；不复制 Mac OAuth 缓存。
+2. 以 `baite-rdos` 身份及独立 HOME，由雨寒完成 OAuth。核实 headless 凭证存储路径和权限 0700/0600。
+3. 用与 systemd 一致的身份/HOME/PATH 只读列目录，确认重启后授权可用，再设置 `BAITE_DISABLE_EXTERNAL_SYNC=false` 并重启。禁用期间后台和人工触发都不访问飞书。
+4. Selected RAG 只读已确认文件夹第一层 Markdown/docx，依据实际清单与内容 Hash 验收，不假设固定 6 个文件。
+5. 测试项目路径解析为唯一 folder token 后才创建项目、分配 yuhan；日报仅其 `RDOS 项目进展/`，不改源资料。
+6. 用明确标注“测试”的 Proposal 验证 Shared Skill 发布；正式共享内容不预置。
+7. 受控模拟授权/写回失败，保留旧快照和 DB 报告，恢复后继续同步。不要为测试删除真实 OAuth 或破坏正式目录权限。
+8. Gate 确认和退回后都可继续上报。
+
+## 6. 备份、恢复与回滚
+
+每天北京时间 03:00 一致性备份，错过后启动补跑，保留 14 天；更新前额外备份也按 14 天保留，因此回滚窗口最长 14 天。使用 [SQLite Online Backup API](https://www.sqlite.org/backup.html)，包含已提交 WAL，不复制正在使用的单个 DB 文件。
+
+```bash
+sudo systemctl start baite-rdos-backup.service
+sudo systemctl list-timers baite-rdos-backup.timer
+sudo journalctl -u baite-rdos-backup.service --since today
+```
+
+每份 DB 旁 JSON 记录 UTC 时间、schema_version、app_release。同机备份不能抵御整机/磁盘丢失，本测试阶段接受重建。logrotate 每日轮转保留 30 天，copytruncate 的小窗口日志丢失不能作为事务凭据。
+
+### 隔离恢复演练
+
+1. 选择具体 DB 备份及匹配 JSON，核实 SHA/版本，复制到新的私有临时演练目录，绝不指向 live DB。
+2. 用对应 release 和原 Session Secret；覆盖 `BAITE_DB_PATH` 为临时 DB、外部同步为 true 禁用、`BAITE_PUBLIC_URL=http://127.0.0.1:18010`、`BAITE_COOKIE_SECURE=false`。
+3. 只监听本机 18010，不加公网代理。验收 integrity_check、管理员登录、已有测试 Token 认证、共享/项目 snapshot_hash。
+4. 用临时 Workspace 拉取快照并比较备份前 Hash。停止演练进程，保留结果，不把演练 DB 切回在线环境。
+
+自动测试覆盖 WAL 恢复及保留 Session Secret 后的身份/快照；不能替代云主机真实演练。
+
+### 回滚操作
+
+1. 明确旧 SHA、匹配备份、时间窗口；告知恢复点之后的新记录可能需要补传/补录，暂停新提交。
+2. 停服务与备份 timer；再备份当前库留作恢复窗口内数据的依据。
+3. schema 向后兼容时可只切代码；不兼容则恢复备份到 **新文件名**（如 `/var/lib/baite-rdos/restore-<时间>.db`），不覆盖原 DB/WAL，检查 integrity、所有者和 0600。
+4. 安全编辑环境中 DB 路径，保留原 Session Secret，先禁用外部同步防止旧状态写回飞书。
+5. 临时符号链接加 `mv -Tf` 原子切回旧 release。启动并核实 app_release、认证、快照后恢复 timer；核对远端日报及 outbox 重试影响后再启用外部同步。
+6. 不删除原库和旧 release；记录数据影响与补传结果。每次恢复演练用新的临时 DB。
+
+## 7. 必须逐项记录的验收
+
+每项保存时间、发布 SHA、动作、预期/实际结果；未执行写“未验收”。
+
+- [ ] HTTPS、证书续期、独立站点、公网 8010 不通。
+- [ ] 未登录拒绝、Cookie 属性、改密使旧会话失效、异源拒绝、限速 429。
+- [ ] Runner 不能管理、停用/轮换失效、跨节点事件冲突 409。
+- [ ] Cold Start、Panel 重启、Runner 重启、断网恢复、重复 Event。
+- [ ] 提交后 ACK 丢失不重复写、错误 ACK 不归档、日报离线持久化。
+- [ ] 共享/项目快照被改或缺文件不替换好版本，启动重新校验。
+- [ ] Mac 不依赖终端、登录启动、崩溃重启、休眠唤醒。
+- [ ] 飞书清单/Hash/快照/Mac 一致，日报仅指定目录，失败可恢复。
+- [ ] Gate 退回不阻断继续上报。
+- [ ] 定时备份、真实恢复、上一版本回滚；首次无旧云版本须受控演练，不能当作通过。
+- [ ] 官网、YXXZ、福雀来页面和既有 API 回归。
+
+交付地址、已部署 SHA、CLI 版本、Mac 维护说明、逐项证据和未完成项。全部通过后才称“云端＋Mac 测试闭环已验收”。
+
+参考：[FastAPI 反向代理](https://fastapi.tiangolo.com/advanced/behind-a-proxy/)、[DNS-01 验证](https://letsencrypt.org/docs/challenge-types/)。

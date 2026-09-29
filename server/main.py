@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Type
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response, status
-from fastapi.responses import FileResponse
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -18,7 +18,7 @@ from server.project_sync import (
     scheduler as project_scheduler,
     sync_project,
 )
-from server.rag_sync import scheduler, sync_selected_rag
+from server.rag_sync import external_sync_disabled, scheduler, sync_selected_rag
 from server.workflow_reference import (
     DELIVERY_SCALES,
     DEVELOPMENT_MODES,
@@ -32,7 +32,7 @@ from server.workflow_reference import (
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SESSION_COOKIE = "baite_admin_session"
 SESSION_HOURS = int(os.environ.get("BAITE_SESSION_HOURS", "12"))
-ONLINE_WINDOW_SECONDS = float(os.environ.get("BAITE_ONLINE_WINDOW_SECONDS", "10"))
+ONLINE_WINDOW_SECONDS = float(os.environ.get("BAITE_ONLINE_WINDOW_SECONDS", "60"))
 
 
 @asynccontextmanager
@@ -58,6 +58,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def admin_origin_guard(request: Request, call_next):
+    protected = request.url.path.startswith(("/api/admin/", "/api/auth/"))
+    if protected and request.method not in ("GET", "HEAD", "OPTIONS"):
+        if request.headers.get("origin") != _public_url():
+            return JSONResponse({"detail": "管理操作必须来自本控制台"}, status_code=403)
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def require_external_sync() -> None:
+    if external_sync_disabled():
+        raise HTTPException(status_code=503, detail="外部同步已关闭，请先配置云端飞书授权并启用同步")
 
 
 class StrictModel(BaseModel):
@@ -316,7 +333,7 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "app_release": os.environ.get("BAITE_APP_RELEASE", "development")}
 
 
 @app.post("/api/auth/login")
@@ -493,6 +510,7 @@ def selected_rag(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
 
 @app.post("/api/admin/selected-rag/sync")
 async def synchronize_rag(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    require_external_sync()
     result = await asyncio.to_thread(sync_selected_rag, None, True)
     if not result.get("ok"):
         code = 409 if result.get("busy") else 502
@@ -596,6 +614,7 @@ async def synchronize_project(
 ) -> Dict[str, Any]:
     if not db.get_project(project_id):
         raise HTTPException(status_code=404, detail="项目不存在")
+    require_external_sync()
     result = await asyncio.to_thread(sync_project, project_id, None, True)
     if not result.get("ok"):
         code = 409 if result.get("busy") else 502
@@ -649,6 +668,7 @@ async def retry_project_writeback(
     runner_id: Optional[str] = None,
     _: Dict[str, Any] = Depends(require_admin),
 ) -> Dict[str, Any]:
+    require_external_sync()
     try:
         db.retry_project_export(project_id, runner_id)
     except LookupError as exc:
@@ -713,7 +733,7 @@ def runner_event(
         result, duplicate = db.process_runner_event(runner["id"], validated)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"ack": True, "duplicate": duplicate, "result": result}
+    return {"ack": True, "event_id": validated["event_id"], "duplicate": duplicate, "result": result}
 
 
 @app.post("/api/runner/sync-status")

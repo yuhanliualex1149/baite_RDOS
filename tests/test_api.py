@@ -26,6 +26,7 @@ class ApiFlowTest(unittest.TestCase):
 
         self.context = TestClient(app)
         self.client = self.context.__enter__()
+        self.client.headers["Origin"] = "http://127.0.0.1:8000"
 
     def tearDown(self) -> None:
         self.context.__exit__(None, None, None)
@@ -119,6 +120,7 @@ class ApiFlowTest(unittest.TestCase):
         from server.main import app
 
         with TestClient(app) as token_only:
+            token_only.headers["Origin"] = "http://127.0.0.1:8000"
             token_cannot_admin = token_only.get(
                 "/api/admin/overview", headers=self.headers(runners[0])
             )
@@ -172,6 +174,7 @@ class ApiFlowTest(unittest.TestCase):
         from server.main import app
 
         with TestClient(app) as token_only:
+            token_only.headers["Origin"] = "http://127.0.0.1:8000"
             self.assertEqual(
                 token_only.put(
                     "/api/admin/global-rules",

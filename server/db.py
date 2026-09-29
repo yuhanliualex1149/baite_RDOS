@@ -7,13 +7,16 @@ import json
 import os
 import re
 import secrets
-import shutil
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+from rdos_protocol import content_hash, seal_snapshot
+from server.backup import backup_database
 
 from server.workflow_reference import (
     WORKFLOW_SOURCE_HASH,
@@ -26,6 +29,7 @@ from server.workflow_reference import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "baite.db"
 PASSWORD_ITERATIONS = 310_000
+_SNAPSHOT_CONNECTION: ContextVar = ContextVar("snapshot_connection", default=None)
 DEFAULT_RULE = """# 全局工作规则
 
 - 优先使用当前已同步的 Selected RAG；
@@ -90,6 +94,10 @@ def verify_password(password: str, encoded: str) -> bool:
 
 @contextmanager
 def connection() -> Iterator[sqlite3.Connection]:
+    existing = _SNAPSHOT_CONNECTION.get()
+    if existing is not None:
+        yield existing
+        return
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=20)
@@ -104,6 +112,17 @@ def connection() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
+
+
+@contextmanager
+def consistent_snapshot() -> Iterator[None]:
+    with connection() as conn:
+        conn.execute("BEGIN")
+        token = _SNAPSHOT_CONNECTION.set(conn)
+        try:
+            yield
+        finally:
+            _SNAPSHOT_CONNECTION.reset(token)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -153,7 +172,7 @@ def _backup_legacy_database() -> None:
     backup_dir.mkdir(parents=True, exist_ok=True)
     destination = backup_dir / f"pre-admin-workbench-{path.stat().st_mtime_ns}.db"
     if not destination.exists():
-        shutil.copy2(path, destination)
+        backup_database(path, destination)
 
 
 def _backup_database_for_schema(target_version: int) -> None:
@@ -179,7 +198,7 @@ def _backup_database_for_schema(target_version: int) -> None:
     backup_dir.mkdir(parents=True, exist_ok=True)
     destination = backup_dir / f"pre-schema-v{target_version}-{path.stat().st_mtime_ns}.db"
     if not destination.exists():
-        shutil.copy2(path, destination)
+        backup_database(path, destination)
 
 
 def _rename_legacy_tables(conn: sqlite3.Connection) -> None:
@@ -220,7 +239,7 @@ def next_workday_nine() -> str:
 
 def init_db() -> None:
     _backup_legacy_database()
-    _backup_database_for_schema(3)
+    _backup_database_for_schema(4)
     with connection() as conn:
         if _table_exists(conn, "settings"):
             _rename_legacy_tables(conn)
@@ -330,6 +349,7 @@ def init_db() -> None:
                 event_id TEXT PRIMARY KEY,
                 runner_id TEXT NOT NULL REFERENCES runner_nodes(id),
                 event_type TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
                 response_json TEXT NOT NULL,
                 received_at TEXT NOT NULL
             );
@@ -549,6 +569,10 @@ def init_db() -> None:
             )
 
         now = utc_now()
+        receipt_columns = {row["name"] for row in conn.execute("PRAGMA table_info(event_receipts)")}
+        if "payload_hash" not in receipt_columns:
+            # Historical receipts cannot safely acknowledge an unknown payload.
+            conn.execute("ALTER TABLE event_receipts ADD COLUMN payload_hash TEXT NOT NULL DEFAULT ''")
         conn.execute(
             "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES ('current_rule', ?, ?)",
             (DEFAULT_RULE, now),
@@ -618,7 +642,7 @@ def init_db() -> None:
             """,
             (workflow_token, workflow_url, workflow_hash),
         )
-        _set_setting(conn, "schema_version", "3")
+        _set_setting(conn, "schema_version", "4")
 
 
 def _import_legacy_rag(conn: sqlite3.Connection) -> None:
@@ -1088,11 +1112,15 @@ def process_runner_event(runner_id: str, event: Dict[str, Any]) -> Tuple[Dict[st
     event_id = str(event["event_id"])
     event_type = str(event["type"])
     now = utc_now()
+    payload_hash = content_hash(event)
     with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         receipt = conn.execute(
-            "SELECT response_json FROM event_receipts WHERE event_id = ?", (event_id,)
+            "SELECT runner_id, payload_hash, response_json FROM event_receipts WHERE event_id = ?", (event_id,)
         ).fetchone()
         if receipt:
+            if receipt["runner_id"] != runner_id or receipt["payload_hash"] != payload_hash:
+                raise ValueError("event_id_conflict")
             return json.loads(receipt["response_json"]), True
 
         response: Dict[str, Any]
@@ -1217,10 +1245,10 @@ def process_runner_event(runner_id: str, event: Dict[str, Any]) -> Tuple[Dict[st
 
         conn.execute(
             """
-            INSERT INTO event_receipts(event_id, runner_id, event_type, response_json, received_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO event_receipts(event_id, runner_id, event_type, payload_hash, response_json, received_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (event_id, runner_id, event_type, json.dumps(response), now),
+            (event_id, runner_id, event_type, payload_hash, json.dumps(response), now),
         )
     return response, False
 
@@ -1384,6 +1412,11 @@ def rag_sync_due() -> bool:
 
 
 def shared_snapshot(runner_id: str) -> Dict[str, Any]:
+    with consistent_snapshot():
+        return seal_snapshot(_shared_snapshot(runner_id))
+
+
+def _shared_snapshot(runner_id: str) -> Dict[str, Any]:
     runner = get_runner(runner_id)
     if not runner or not runner["enabled"]:
         raise LookupError("runner_not_found")
@@ -2284,6 +2317,11 @@ def project_sync_token(runner_id: str) -> str:
 
 
 def runner_project_snapshot(runner_id: str) -> Dict[str, Any]:
+    with consistent_snapshot():
+        return seal_snapshot(_runner_project_snapshot(runner_id))
+
+
+def _runner_project_snapshot(runner_id: str) -> Dict[str, Any]:
     token = project_sync_token(runner_id)
     with connection() as conn:
         ids = [
@@ -2310,7 +2348,7 @@ def runner_project_snapshot(runner_id: str) -> Dict[str, Any]:
             )
             project.pop("reports", None)
             project.pop("audit", None)
-            items.append(project)
+            items.append(seal_snapshot(project))
     return {"sync_token": token, "projects": items}
 
 

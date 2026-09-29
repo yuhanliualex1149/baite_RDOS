@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from rdos_protocol import seal_snapshot
+
 from runner.runner import (
     apply_project_snapshot,
     apply_snapshot,
@@ -38,7 +40,7 @@ def rag_item(content: str, runtime_name: str = "Context.md") -> dict:
 
 
 def snapshot(revision: int, content: str = "# Context\n") -> dict:
-    return {
+    return seal_snapshot({
         "revision": revision,
         "global_rules": {"content": "# Global Rules\n\nLocal Agent 自主决定。"},
         "shared_skills": [
@@ -67,7 +69,7 @@ def snapshot(revision: int, content: str = "# Context\n") -> dict:
             }
         ],
         "collaborations": [],
-    }
+    })
 
 
 class RunnerSyncTest(unittest.TestCase):
@@ -166,7 +168,7 @@ class RunnerSyncTest(unittest.TestCase):
                 "gate_records": [],
                 "content_files": [rag_item("# Brief\n", "brief.md")],
             }
-            apply_project_snapshot(workspace, project)
+            apply_project_snapshot(workspace, seal_snapshot(project))
             root = workspace / "projects" / project["id"]
             self.assertIn("Project A", (root / "control" / "project.md").read_text())
             self.assertEqual((root / "shared" / "brief.md").read_text(), "# Brief\n")

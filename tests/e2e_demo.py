@@ -36,6 +36,8 @@ def request(
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     actual_headers = {"Content-Type": "application/json"} if body else {}
     actual_headers.update(headers or {})
+    if path.startswith(("/api/auth/", "/api/admin/")):
+        actual_headers["Origin"] = base_url
     req = urllib.request.Request(
         base_url + path, data=body, headers=actual_headers, method=method
     )

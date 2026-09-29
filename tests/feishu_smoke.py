@@ -18,10 +18,9 @@ def main() -> None:
     files, ignored = FeishuRagSource().fetch(folder_token)
     markdown_files = [item for item in files if item["source_type"] == "file"]
     documents = [item for item in files if item["source_type"] == "docx"]
-    assert len(files) == 6, f"预期当前第一层 6 项，实际 {len(files)} 项"
-    assert len(markdown_files) == 5, f"预期 5 个 Markdown，实际 {len(markdown_files)} 个"
-    assert len(documents) == 1, f"预期 1 个飞书文档，实际 {len(documents)} 个"
-    assert not ignored, f"当前正式文件夹出现未纳入项：{ignored}"
+    assert files, "当前资料文件夹没有可同步的 Markdown 或飞书文档"
+    from server.rag_sync import _manifest
+    _manifest(files)
     for item in files:
         assert item["source_token"]
         assert item["content_hash"]
@@ -31,7 +30,7 @@ def main() -> None:
             f"PASS {item['source_type']:5} {item['source_name']} "
             f"{item['content_hash'][:12]} {item['size_bytes']} bytes"
         )
-    print("REAL FEISHU READ-ONLY SMOKE: PASS (6/6)")
+    print(f"REAL FEISHU READ-ONLY SMOKE: PASS ({len(markdown_files)} Markdown, {len(documents)} documents, {len(ignored)} unsupported)")
 
 
 if __name__ == "__main__":

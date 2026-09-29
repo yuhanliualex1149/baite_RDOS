@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
+from logging.handlers import TimedRotatingFileHandler
 import os
 import re
 import shutil
@@ -17,6 +19,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rdos_protocol import content_hash, verify_snapshot
 
 
 def api_request(
@@ -69,7 +74,10 @@ def load_config(path: Path) -> Dict[str, str]:
 def write_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(content, encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as output:
+        output.write(content)
+        output.flush()
+        os.fsync(output.fileno())
     os.replace(temporary, path)
 
 
@@ -258,20 +266,72 @@ def _validate_content(item: Dict[str, Any]) -> bytes:
     return encoded
 
 
-def _switch_shared_link(workspace: Path, shared_directory: Path) -> None:
-    current = workspace / "shared"
-    if current.exists() and not current.is_symlink():
-        legacy = workspace / ".runner" / f"legacy-shared-{int(time.time())}"
-        legacy.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(current, legacy)
-    temporary = workspace / ".shared-next"
-    if temporary.exists() or temporary.is_symlink():
-        temporary.unlink()
-    os.symlink(shared_directory, temporary, target_is_directory=True)
-    os.replace(temporary, current)
+def _activate_release(root: Path, release: Path) -> None:
+    """Shared content and control documents switch through one pointer."""
+    internal = root / ".runner"
+    internal.mkdir(parents=True, exist_ok=True)
+    for name in ("shared", "control"):
+        public = root / name
+        target = internal / "current" / name
+        if public.is_symlink() and os.readlink(public) == str(target):
+            continue
+        if public.exists() and not public.is_symlink():
+            os.replace(public, internal / f"legacy-{name}-{time.time_ns()}")
+        temporary = root / f".{name}-next"
+        temporary.unlink(missing_ok=True)
+        os.symlink(target, temporary, target_is_directory=True)
+        os.replace(temporary, public)
+    temporary = internal / ".current-next"
+    temporary.unlink(missing_ok=True)
+    os.symlink(release, temporary, target_is_directory=True)
+    os.replace(temporary, internal / "current")
+
+
+def _store_release(staging: Path, snapshot: dict) -> None:
+    write_atomic(staging / "snapshot.json", json.dumps(snapshot, ensure_ascii=False))
+    files = {str(path.relative_to(staging)): _file_sha256(path)
+             for folder in ("shared", "control") for path in (staging / folder).rglob("*") if path.is_file()}
+    write_atomic(staging / "local-manifest.json", json.dumps(files, sort_keys=True))
+
+
+def _validate_release(release: Path) -> dict:
+    snapshot = json.loads((release / "snapshot.json").read_text(encoding="utf-8"))
+    verify_snapshot(snapshot)
+    expected = json.loads((release / "local-manifest.json").read_text(encoding="utf-8"))
+    actual = {}
+    for folder in ("shared", "control"):
+        for path in (release / folder).rglob("*"):
+            if path.is_symlink():
+                raise ValueError("快照中不允许嵌套符号链接")
+            if path.is_file() and path.relative_to(release).as_posix() != "control/membership_ended.md":
+                actual[str(path.relative_to(release))] = _file_sha256(path)
+    if actual != expected:
+        raise ValueError("本地快照文件不完整或已损坏")
+    return snapshot
+
+
+def recover_release(root: Path, releases: Path) -> Optional[dict]:
+    current = root / ".runner" / "current"
+    candidates = []
+    if current.is_symlink():
+        active = current.resolve()
+        if active.parent == releases.resolve():
+            candidates.append(active)
+    candidates.extend(sorted(releases.glob("revision-*"), key=lambda path: path.stat().st_mtime_ns, reverse=True))
+    for candidate in candidates:
+        if not candidate.is_dir() or candidate.is_symlink():
+            continue
+        try:
+            snapshot = _validate_release(candidate)
+            _activate_release(root, candidate)
+            return snapshot
+        except (OSError, ValueError, KeyError):
+            continue
+    return None
 
 
 def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) -> Path:
+    verify_snapshot(snapshot)
     revision = int(snapshot["revision"])
     releases = workspace / ".runner" / "releases"
     releases.mkdir(parents=True, exist_ok=True)
@@ -322,21 +382,22 @@ def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) ->
             staging / "manifest.json",
             json.dumps(manifest, ensure_ascii=False, indent=2),
         )
-        final = releases / f"revision-{revision}-{int(time.time() * 1000)}"
-        os.replace(staging, final)
-        _switch_shared_link(workspace, final / "shared")
         write_atomic(
-            workspace / "control" / "collaboration.md",
+            staging / "control" / "collaboration.md",
             render_collaborations(runner_id, snapshot["collaborations"]),
         )
         write_atomic(
-            workspace / "control" / "skill_proposals.md",
+            staging / "control" / "skill_proposals.md",
             render_skill_proposals(snapshot.get("skill_proposals", [])),
         )
         write_atomic(
-            workspace / "control" / "sync.json",
+            staging / "control" / "sync.json",
             json.dumps(manifest, ensure_ascii=False, indent=2),
         )
+        _store_release(staging, snapshot)
+        final = releases / f"revision-{revision}-{time.time_ns()}"
+        os.replace(staging, final)
+        _activate_release(workspace, final)
         return final
     except Exception:
         if staging.exists():
@@ -351,19 +412,20 @@ def _project_path(workspace: Path, project_id: str) -> Path:
 
 
 def apply_project_snapshot(workspace: Path, project: Dict[str, Any]) -> Path:
+    verify_snapshot(project)
     project_id = str(project["id"])
     root = _project_path(workspace, project_id)
     control = root / "control"
     work = root / "work"
     files_root = work / "files"
     releases = workspace / ".runner" / "project-releases" / project_id
-    control.mkdir(parents=True, exist_ok=True)
     files_root.mkdir(parents=True, exist_ok=True)
     releases.mkdir(parents=True, exist_ok=True)
 
     staging = Path(
         tempfile.mkdtemp(prefix=f"revision-{project['revision']}-", dir=releases)
     )
+    control = staging / "control"
     try:
         shared = staging / "shared"
         shared.mkdir(parents=True)
@@ -397,10 +459,6 @@ def apply_project_snapshot(workspace: Path, project: Dict[str, Any]) -> Path:
                 indent=2,
             ),
         )
-        final = releases / f"revision-{project['revision']}-{int(time.time() * 1000)}"
-        os.replace(staging, final)
-        _switch_shared_link(root, final / "shared")
-
         public_project = json.loads(json.dumps(project, ensure_ascii=False))
         for item in public_project.get("content_files", []):
             item.pop("content", None)
@@ -416,9 +474,10 @@ def apply_project_snapshot(workspace: Path, project: Dict[str, Any]) -> Path:
             control / "gate_records.md",
             render_project_gates(project.get("gate_records", [])),
         )
-        ended = control / "membership_ended.md"
-        if ended.exists():
-            ended.unlink()
+        _store_release(staging, project)
+        final = releases / f"revision-{project['revision']}-{time.time_ns()}"
+        os.replace(staging, final)
+        _activate_release(root, final)
         return final
     except Exception:
         if staging.exists():
@@ -447,7 +506,8 @@ def prepare_workspace(workspace: Path) -> None:
         workspace / ".runner" / "project-releases",
         workspace / "projects",
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        if not directory.is_symlink():
+            directory.mkdir(parents=True, exist_ok=True)
 
 
 def archive_acknowledged(path: Path, sent: Path) -> None:
@@ -473,8 +533,8 @@ def submit_outbox(config: Dict[str, str], workspace: Path) -> None:
         try:
             payload = json.loads(event_path.read_text(encoding="utf-8"))
             response = api_request(config, "/api/runner/events", "POST", payload)
-            if not response.get("ack"):
-                raise RuntimeError("Control Panel 未返回 ACK")
+            if response.get("ack") is not True or response.get("event_id") != payload.get("event_id"):
+                raise RuntimeError("Control Panel 未返回匹配当前事件的 ACK")
             archive_acknowledged(event_path, sent)
             print(f"[{config['runner_id']}] 已回传 {event_path.name}", flush=True)
         except json.JSONDecodeError as exc:
@@ -489,6 +549,8 @@ def submit_outbox(config: Dict[str, str], workspace: Path) -> None:
                     file=sys.stderr,
                     flush=True,
                 )
+        except (urllib.error.URLError, TimeoutError, ConnectionError, RuntimeError) as exc:
+            print(f"[{config['runner_id']}] 事件保留待重试：{exc}", file=sys.stderr, flush=True)
 
 
 def _file_sha256(path: Path) -> str:
@@ -636,18 +698,7 @@ def submit_project_report(
         root, project, load_project_status(root)
     )
     manifest = scan_project_files(root, status_payload["file_notes"])
-    report_basis = {
-        "runner_id": config["runner_id"],
-        "project_id": project["id"],
-        "date": _project_local_date(project),
-        "status_hash": status_payload["source_hash"],
-        "file_manifest": manifest,
-    }
-    event_id = "project-" + hashlib.sha256(
-        json.dumps(report_basis, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
     payload = {
-        "event_id": event_id,
         "type": "project_update",
         "project_id": project["id"],
         "summary": status_payload["summary"],
@@ -658,9 +709,11 @@ def submit_project_report(
         "file_manifest": manifest,
         "gate_claim": status_payload["gate_claim"],
     }
-    response = api_request(config, "/api/runner/events", "POST", payload)
-    if not response.get("ack"):
-        raise RuntimeError("项目日报未获得 Control Panel ACK")
+    event_id = "project-" + content_hash({"runner_id": config["runner_id"], "date": _project_local_date(project), "payload": payload})
+    payload["event_id"] = event_id
+    event_path = workspace / "outbox" / f"{event_id}.json"
+    if not event_path.exists() and not (workspace / "outbox" / "sent" / event_path.name).exists():
+        write_atomic(event_path, json.dumps(payload, ensure_ascii=False))
     state.setdefault("project_status_hashes", {})[project["id"]] = status_payload[
         "source_hash"
     ]
@@ -671,7 +724,16 @@ def submit_project_report(
         project
     )
     _save_state(workspace, state)
-    return response
+    return {"queued": True, "event_id": event_id}
+
+
+def queue_project_reports(config: dict, workspace: Path, projects: list, state: dict) -> None:
+    for project in projects:
+        root = _project_path(workspace, project["id"])
+        status = load_project_status(root)
+        changed = status["source_hash"] != "missing" and state["project_status_hashes"].get(project["id"]) != status["source_hash"]
+        if changed or project_daily_report_due(project, state):
+            submit_project_report(config, workspace, project, state)
 
 
 def _load_state(workspace: Path) -> Dict[str, Any]:
@@ -709,13 +771,26 @@ def run(config_path: Path, poll_seconds: float) -> None:
     config = load_config(config_path)
     workspace = Path(config["workspace"])
     prepare_workspace(workspace)
+    import fcntl
+    process_lock = (workspace / ".runner" / "runner.lock").open("a")
+    try:
+        fcntl.flock(process_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("此 Workspace 已有 Runner 正在运行")
     state = _load_state(workspace)
+    recovered = recover_release(workspace, workspace / ".runner" / "releases")
+    state["revision"] = int(recovered["revision"]) if recovered else -1
     state.setdefault("project_token", "")
     state.setdefault("active_projects", [])
     state.setdefault("project_status_hashes", {})
     state.setdefault("project_manifest_hashes", {})
     state.setdefault("project_daily_reports", {})
     project_cache: List[Dict[str, Any]] = []
+    for project_id in state["active_projects"]:
+        root = _project_path(workspace, project_id)
+        recovered_project = recover_release(root, workspace / ".runner" / "project-releases" / project_id)
+        if recovered_project:
+            project_cache.append(recovered_project)
     # Always fetch the complete project assignment once after process start.
     known_project_token = ""
     print(
@@ -724,6 +799,7 @@ def run(config_path: Path, poll_seconds: float) -> None:
     )
     while True:
         try:
+            queue_project_reports(config, workspace, project_cache, state)
             api_request(config, "/api/runner/heartbeat", "POST")
             query = urllib.parse.urlencode({"known_revision": int(state["revision"])})
             snapshot = api_request(config, f"/api/runner/sync?{query}")
@@ -766,7 +842,10 @@ def run(config_path: Path, poll_seconds: float) -> None:
                 config, f"/api/runner/projects/sync?{project_query}"
             )
             if project_snapshot.get("changed"):
+                verify_snapshot(project_snapshot)
                 incoming = project_snapshot.get("projects", [])
+                for project in incoming:
+                    verify_snapshot(project)
                 for project in incoming:
                     apply_project_snapshot(workspace, project)
                 previous = set(state.get("active_projects", []))
@@ -782,28 +861,7 @@ def run(config_path: Path, poll_seconds: float) -> None:
                     flush=True,
                 )
 
-            for project in project_cache:
-                project_root = _project_path(workspace, project["id"])
-                current_status = load_project_status(project_root)
-                status_changed = (
-                    current_status["source_hash"] != "missing"
-                    and state["project_status_hashes"].get(project["id"])
-                    != current_status["source_hash"]
-                )
-                if status_changed or project_daily_report_due(project, state):
-                    try:
-                        submit_project_report(config, workspace, project, state)
-                        print(
-                            f"[{config['runner_id']}] 已回传项目日报：{project['name']}",
-                            flush=True,
-                        )
-                    except urllib.error.HTTPError as exc:
-                        detail = exc.read().decode("utf-8", errors="replace")
-                        print(
-                            f"[{config['runner_id']}] 项目日报失败：HTTP {exc.code} {detail}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
+            queue_project_reports(config, workspace, project_cache, state)
             submit_outbox(config, workspace)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -823,11 +881,37 @@ def run(config_path: Path, poll_seconds: float) -> None:
         time.sleep(poll_seconds)
 
 
+class _LogStream:
+    def __init__(self, logger: logging.Logger, level: int):
+        self.logger, self.level = logger, level
+
+    def write(self, message: str) -> int:
+        if message.strip():
+            self.logger.log(self.level, message.rstrip())
+        return len(message)
+
+    def flush(self) -> None:
+        for handler in self.logger.handlers:
+            handler.flush()
+
+
 def main() -> None:
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description="Baite AI R&D OS Local Runner")
     parser.add_argument("--config", type=Path, required=True, help="Runner 配置 JSON")
-    parser.add_argument("--poll-seconds", type=float, default=2.0)
+    parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument("--log-directory", type=Path, help="按日轮转日志，保留 30 天")
     args = parser.parse_args()
+    if args.poll_seconds <= 0:
+        parser.error("poll-seconds 必须大于 0")
+    if args.log_directory:
+        args.log_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        logger = logging.getLogger("rdos.runner")
+        logger.setLevel(logging.INFO)
+        handler = TimedRotatingFileHandler(args.log_directory / "runner.log", when="midnight", backupCount=30, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        sys.stdout, sys.stderr = _LogStream(logger, logging.INFO), _LogStream(logger, logging.ERROR)
     try:
         run(args.config, args.poll_seconds)
     except (ValueError, json.JSONDecodeError) as exc:

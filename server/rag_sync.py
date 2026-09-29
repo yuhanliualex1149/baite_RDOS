@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Protocol, Tuple
 
 from server import db
+
+
+def external_sync_disabled() -> bool:
+    return os.environ.get("BAITE_DISABLE_EXTERNAL_SYNC", "false").lower() in ("1", "true", "yes")
 
 
 class _LarkMarkdownParser(HTMLParser):
@@ -370,6 +375,8 @@ def _manifest(files: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
 
 
 def sync_selected_rag(source: RagSource | None = None, manual: bool = False) -> Dict[str, Any]:
+    if source is None and external_sync_disabled():
+        return {"ok": False, "disabled": True, "error": "外部同步已关闭"}
     if not _SYNC_LOCK.acquire(blocking=False):
         return {"ok": False, "busy": True, "state": db.rag_state()}
     try:
@@ -395,7 +402,7 @@ def sync_selected_rag(source: RagSource | None = None, manual: bool = False) -> 
 async def scheduler(stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
-            if db.rag_sync_due():
+            if not external_sync_disabled() and db.rag_sync_due():
                 await asyncio.to_thread(sync_selected_rag)
         except Exception:
             # The sync function records actionable errors; the scheduler must stay alive.

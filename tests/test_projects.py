@@ -82,6 +82,7 @@ class ProjectFlowTest(unittest.TestCase):
 
         self.context = TestClient(app)
         self.client = self.context.__enter__()
+        self.client.headers["Origin"] = "http://127.0.0.1:8000"
         login = self.client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "AdminPassword123!"},

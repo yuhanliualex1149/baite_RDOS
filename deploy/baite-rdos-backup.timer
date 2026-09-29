@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily RDOS backup at 03:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Shanghai
+Persistent=true
+Unit=baite-rdos-backup.service
+
+[Install]
+WantedBy=timers.target

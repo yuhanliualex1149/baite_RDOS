@@ -1,6 +1,6 @@
 # Baite AI R&D OS — 系统管理员工作台原型
 
-这是一个为云端发布做边界准备的本地原型。它验证系统管理员发布组织共享信息、任意数量的 Local Runner 安全同步、Local Agent 通过 outbox 回传结构化事件，以及项目资料与研发进度的双向协作。
+这是一个支持单机云端测试部署的轻量协作系统。它验证系统管理员发布组织共享信息、任意数量的 Local Runner 安全同步、Local Agent 通过 outbox 回传结构化事件，以及项目资料与研发进度的双向协作。云端与 Mac 服务安装、HTTPS、备份恢复和逐项验收见 [部署手册](DEPLOYMENT.md)；代码就绪不代表云端已经验收。
 
 当前不是 Workflow Engine，也不会远程操纵 Agent。
 
@@ -39,7 +39,7 @@ tests/                  API、快照、Runner 和 E2E 自测
 
 ## 安装
 
-需要 Python 3.9+。Selected RAG 真实同步还需要本机已安装并完成个人 OAuth 登录的 `lark-cli`。
+本次云端测试统一使用 Python 3.12。Selected RAG 真实同步需要 Panel 所在主机已安装并完成个人 OAuth 登录的 `lark-cli`。
 
 ```bash
 git clone https://github.com/yuhanliualex1149/baite_RDOS.git
@@ -117,7 +117,8 @@ workspace/user1/
     collaboration.md
     skill_proposals.md
     sync.json
-  shared -> .runner/releases/<revision>/shared
+  shared -> .runner/current/shared
+  control -> .runner/current/control
   outbox/
     sent/
     rejected/
@@ -127,9 +128,9 @@ workspace/user1/
     releases/
 ```
 
-Runner 会先把整个 revision 写入新的 release，校验 RAG 的 Hash 和大小，再原子切换 `shared`。下载失败、内容损坏或重名冲突时继续使用 last-known-good，不会留下半套 Runtime。
+Runner 先校验完整 `snapshot_hash` 及各资料 Hash/大小，把内容和 control 写入新 release，再原子切换 `.runner/current`。启动时复核本地文件清单，损坏则回到 last-known-good。下载失败或内容冲突不替换可用 Runtime。
 
-本地内容校验连续失败 10 次后暂停，管理员点击“重新同步”才会继续。普通网络断开不计入这 10 次，Runner 会持续重连。只有 Control Panel 返回 ACK 的 outbox 文件才进入 `sent/`；格式或业务校验失败的文件进入 `rejected/` 并附错误说明。
+共享内容校验连续失败 10 次后暂停，管理员点击“重新同步”才继续。网络断开不计入这 10 次，Runner 持续重连。只有 ACK 为 true 且 event_id 匹配才进入 `sent/`；来源或内容冲突返回 409，格式/业务错误进入 `rejected/`。自动日报也先持久写入 outbox，重试不重复创建业务记录。
 
 ## Projects：立项、资料与日报
 
@@ -144,7 +145,8 @@ workspace/user1/projects/<project_id>/
     project.json
     todos.md
     gate_records.md
-  shared -> .runner/project-releases/<snapshot_id>/shared
+  shared -> .runner/current/shared
+  control -> .runner/current/control
   work/
     project_status.json
     files/

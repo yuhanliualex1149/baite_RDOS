@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Protocol, Tuple
 
 from server import db
-from server.rag_sync import FeishuRagSource, _manifest
+from server.rag_sync import FeishuRagSource, _manifest, external_sync_disabled
 
 
 PROGRESS_FOLDER_NAME = "RDOS 项目进展"
@@ -166,6 +166,8 @@ def _project_manifest(
 def sync_project(
     project_id: str, source: ProjectSource | None = None, manual: bool = False
 ) -> Dict[str, Any]:
+    if source is None and external_sync_disabled():
+        return {"ok": False, "disabled": True, "error": "外部同步已关闭"}
     if not _PROJECT_SYNC_LOCK.acquire(blocking=False):
         return {"ok": False, "busy": True}
     try:
@@ -192,6 +194,8 @@ def sync_project(
 
 
 def export_pending_progress(writer: ProjectWriter | None = None) -> List[Dict[str, Any]]:
+    if writer is None and external_sync_disabled():
+        return [{"ok": False, "disabled": True, "error": "外部同步已关闭"}]
     if not _EXPORT_LOCK.acquire(blocking=False):
         return []
     results: List[Dict[str, Any]] = []
@@ -228,6 +232,8 @@ def export_pending_progress(writer: ProjectWriter | None = None) -> List[Dict[st
 
 
 def check_workflow_reference(source: ProjectSource | None = None) -> Dict[str, Any]:
+    if source is None and external_sync_disabled():
+        return {"ok": False, "disabled": True, "error": "外部同步已关闭"}
     state = db.workflow_reference_state()
     try:
         content = (source or FeishuRagSource()).download_raw(state["source_token"])
