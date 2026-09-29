@@ -84,6 +84,22 @@ class CloudApiTest(unittest.TestCase):
         self.assertTrue(response["duplicate"])
         self.assertEqual(response["event_id"], event["event_id"])
 
+    def test_project_poll_detects_writeback_state_without_revision_change(self):
+        self.login()
+        runner = self.create_runner("writeback-test")
+        project = self.create_project([runner])
+        event = {"event_id": "project-writeback-state-test", "type": "project_update", "project_id": project["id"], "summary": "Test", "complete": True}
+        self.assertEqual(self.client.post("/api/runner/events", headers=self.headers(runner), json=event).status_code, 200)
+        before = self.client.get("/api/runner/projects/sync", headers=self.headers(runner)).json()
+        db.record_project_export_success(project["id"], runner["id"])
+        after = self.client.get("/api/runner/projects/sync", params={"known_token": before["sync_token"]}, headers=self.headers(runner)).json()
+        self.assertTrue(after["changed"])
+        self.assertNotEqual(before["sync_token"], after["sync_token"])
+        self.assertEqual(before["projects"][0]["revision"], after["projects"][0]["revision"])
+        verify_snapshot(after)
+        unchanged = self.client.get("/api/runner/projects/sync", params={"known_token": after["sync_token"]}, headers=self.headers(runner)).json()
+        self.assertFalse(unchanged["changed"])
+
     def test_commit_before_ack_loss_retries_once_and_wrong_ack_stays_pending(self):
         self.login()
         runner = self.create_runner("test")

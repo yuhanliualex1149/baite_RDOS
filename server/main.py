@@ -702,10 +702,10 @@ def runner_heartbeat(runner: Dict[str, Any] = Depends(require_runner)) -> Dict[s
 def runner_projects_sync(
     known_token: str = "", runner: Dict[str, Any] = Depends(require_runner)
 ) -> Dict[str, Any]:
-    current = db.project_sync_token(runner["id"])
+    snapshot = db.runner_project_snapshot(runner["id"])
+    current = snapshot["sync_token"]
     if known_token and known_token == current:
         return {"changed": False, "sync_token": current}
-    snapshot = db.runner_project_snapshot(runner["id"])
     snapshot["changed"] = True
     return snapshot
 

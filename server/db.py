@@ -2299,30 +2299,12 @@ def _process_project_update(
     }
 
 
-def project_sync_token(runner_id: str) -> str:
-    with connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT p.id, p.revision, p.active_snapshot_id
-            FROM projects p JOIN project_members m ON m.project_id = p.id
-            WHERE m.runner_id = ? AND m.active = 1
-            ORDER BY p.id
-            """,
-            (runner_id,),
-        ).fetchall()
-    payload = [dict(row) for row in rows]
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-
 def runner_project_snapshot(runner_id: str) -> Dict[str, Any]:
     with consistent_snapshot():
         return seal_snapshot(_runner_project_snapshot(runner_id))
 
 
 def _runner_project_snapshot(runner_id: str) -> Dict[str, Any]:
-    token = project_sync_token(runner_id)
     with connection() as conn:
         ids = [
             row["id"]
@@ -2349,6 +2331,8 @@ def _runner_project_snapshot(runner_id: str) -> Dict[str, Any]:
             project.pop("reports", None)
             project.pop("audit", None)
             items.append(seal_snapshot(project))
+    # Include export health, membership and date-derived state as well as revision.
+    token = content_hash([item["snapshot_hash"] for item in items])
     return {"sync_token": token, "projects": items}
 
 
