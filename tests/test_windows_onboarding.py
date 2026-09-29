@@ -11,10 +11,12 @@ import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from deploy import install_runner as installer
 from runner.platform_support import is_linklike, workspace_lock
-from runner.runner import apply_snapshot, runtime_directory, scan_project_files
+from runner.runner import apply_snapshot, runtime_directory, scan_project_files, project_daily_report_due
 from rdos_protocol import seal_snapshot
 from server import db
 from tests import test_api
@@ -95,6 +97,26 @@ class OnboardingApiTest(unittest.TestCase):
 
 
 class PortableFilesystemTest(unittest.TestCase):
+    def test_default_workspace_and_shanghai_workdays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            config = base / "config.json"
+            config.write_text(json.dumps({"control_url": "https://example.invalid/rdos", "runner_id": "rnr_default_test",
+                                          "runner_token": "fake-token-not-a-real-secret", "workspace": ""}), encoding="utf-8")
+            with patch.object(Path, "home", return_value=base):
+                loaded = installer.load_config(config, None)
+            self.assertEqual(loaded["workspace"], str(base / "RDOS-Workspace/rnr_default_test"))
+        project = {"id": "prj_daily", "status": "active", "start_date": "2026-09-01", "end_date": "2026-09-30", "timezone": "Asia/Shanghai"}
+        with patch("runner.runner.datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 29, 18, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertTrue(project_daily_report_due(project, {}))
+            self.assertFalse(project_daily_report_due(project, {"project_daily_reports": {"prj_daily": "2026-09-29"}}))
+            self.assertFalse(project_daily_report_due({**project, "status": "paused"}, {}))
+            clock.now.return_value = datetime(2026, 9, 27, 18, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertFalse(project_daily_report_due(project, {}))
+            clock.now.return_value = datetime(2026, 10, 1, 18, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertFalse(project_daily_report_due(project, {}))
+
     def test_native_lock_blocks_second_process_and_releases_on_close(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp).resolve() / "中文 space/runner.lock"

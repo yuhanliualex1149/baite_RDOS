@@ -131,14 +131,28 @@ def main():
                     installer.stop_service(node)
                     assert not installer.status(node, root)["running"]
                     installer.start_service(node)
-                    wait_for(lambda: installer.status(node, root)["running"], "Restart failed")
+                    try:
+                        wait_for(lambda: installer.status(node, root)["running"], "Restart failed")
+                    except AssertionError:
+                        print(json.dumps(installer.status(node, root), ensure_ascii=False))
+                        print((directory / "logs/runner.log").read_text(encoding="utf-8")[-4000:].replace(token, "[redacted]"))
+                        raise
+                    # Rotate only this fake API's credential, then reinstall the same node.
+                    old_token = token
+                    token = "rotated-test-token-" + uuid.uuid4().hex
+                    payload = json.loads(config.read_text(encoding="utf-8"))
+                    payload["runner_token"] = token
+                    installer.atomic_write(config, json.dumps(payload).encode())
+                    installer.install(config, None, root)
+                    wait_for(lambda: installer.status(node, root)["running"], "Credential update restart failed")
                     event_id = "installer-smoke-" + uuid.uuid4().hex
                     event = {"event_id": event_id, "type": "progress", "current_focus": "installer test",
                              "status": "working", "summary": "Isolated test", "needs_collaboration": ""}
                     installer.atomic_write(work / "outbox" / (event_id + ".json"), json.dumps(event).encode())
                     wait_for(lambda: (work / "outbox/sent" / (event_id + ".json")).is_file(), "No ACK")
                     assert events.count(event_id) == 1
-                    assert token not in (directory / "logs/runner.log").read_text()
+                    log = (directory / "logs/runner.log").read_text(encoding="utf-8")
+                    assert token not in log and old_token not in log
                     installer.uninstall(node, root)
                     assert not directory.exists() and (work / "work/keep.md").is_file()
                     print("PASS: verified runtime, isolated venv, native background task, sync, repeat/instance, stop/start, ACK, credential redaction, uninstall preserving work")

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -121,6 +122,18 @@ def check_workspace_idle(work: Path) -> None:
             raise ValueError("Workspace 有手动运行的 Runner，请先停止，不修改或卸载安装") from None
 
 
+def wait_workspace_idle(work: Path) -> None:
+    # bootout/Task.Stop can return before the terminating process releases its handles.
+    for attempt in range(50):
+        try:
+            check_workspace_idle(work)
+            return
+        except ValueError:
+            if attempt == 49:
+                raise
+            time.sleep(0.1)
+
+
 def require_ntfs(path: Path) -> None:
     import ctypes
     anchor = path.anchor
@@ -175,7 +188,7 @@ def windows_task(node: str, action: str, xml: Path | None = None, check: bool = 
         "register": "$xml=[IO.File]::ReadAllText($env:RDOS_TASK_XML); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $null=$f.RegisterTask($n,$xml,6,$sid,$null,3,$null)",
         "status": "$t=$f.GetTask($n); $instances=$t.GetInstances(0); $instance=$null; if($instances.Count -gt 0){$instance=$instances.Item(1).InstanceGuid}; @{running=($t.State -eq 4); instance_id=$instance; enabled=$t.Enabled; config=$t.Definition.RegistrationInfo.Description; last_result=$t.LastTaskResult} | ConvertTo-Json -Compress",
         "start": "$t=$f.GetTask($n); $t.Enabled=$true; if ($t.State -ne 4) { $null=$t.Run($null) }",
-        "stop": "$t=$f.GetTask($n); $t.Enabled=$false; $t.Stop(0); for($i=0; $i -lt 50 -and $t.State -eq 4; $i++){Start-Sleep -Milliseconds 100}; if($t.State -eq 4){throw 'Task did not stop'}",
+        "stop": "$t=$f.GetTask($n); $t.Enabled=$false; $t.Stop(0); for($i=0; $i -lt 50 -and $t.GetInstances(0).Count -gt 0; $i++){Start-Sleep -Milliseconds 100}; if($t.GetInstances(0).Count -gt 0){throw 'Task did not stop'}",
         "delete": "$f.DeleteTask($n,0)",
     }
     return powershell(prefix + commands[action], {"RDOS_TASK_NAME": service_label(node),
@@ -205,7 +218,7 @@ def uninstall(node: str, root: Path) -> None:
             raise ValueError("后台任务属于其他安装；不执行卸载")
         stop_service(node)
         path.unlink(missing_ok=True)
-    check_workspace_idle(work)
+    wait_workspace_idle(work)
     # Exact validated installation only; Workspace and downloaded original config are untouched.
     shutil.rmtree(directory)
     print(f"已移除后台任务、程序和安装内凭证；保留 Workspace：{work}。云端 Token 未撤销，原始下载配置需另行保管或移除。")
@@ -309,7 +322,13 @@ def service_info(node: str) -> subprocess.CompletedProcess:
 
 def stop_service(node: str) -> None:
     if WINDOWS:
+        info = service_info(node)
         windows_task(node, "stop", check=True)
+        if info.returncode == 0:
+            config = json.loads(Path(json.loads(info.stdout)["config"]).read_text(encoding="utf-8"))
+            if config.get("runner_id") != node:
+                raise ValueError("后台任务的配置身份不匹配")
+            wait_workspace_idle(Path(config["workspace"]))
         return
     target = f"gui/{os.getuid()}/{service_label(node)}"
     subprocess.run(["launchctl", "disable", target], check=True, capture_output=True)
@@ -400,6 +419,7 @@ def install(config_path: Path, workspace: Path | None, root: Path, start: bool =
     unchanged = (previous == config and path.exists() and path.read_bytes() == service)
     if not unchanged and service_info(node).returncode == 0:
         stop_service(node)
+        wait_workspace_idle(work)
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     if WINDOWS:
         protect_path(work)
@@ -425,6 +445,7 @@ def status(node: str, root: Path) -> dict:
     result = {"runner_id": node, "installed": installed, "service_loaded": info.returncode == 0,
               "running": task.get("running", bool(pid)), "pid": int(pid.group(1)) if pid else None,
               "instance_id": task.get("instance_id"),
+              "last_task_result": task.get("last_result"),
               "logs": str(directory / "logs"),
               "note": "本机进程状态不是云端 Online 或同步成功证明；请同时查看 Panel 心跳和同步健康"}
     if installed:
