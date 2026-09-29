@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RDOS 系统管理员工作台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <section id="login-view" class="login-shell">
+      <form id="login-form" class="login-card">
+        <div class="brand-mark">B</div>
+        <p class="eyebrow">Baite AI R&amp;D OS</p>
+        <h1>系统管理员工作台</h1>
+        <p class="muted">管理组织共享信息、Local Runner 与需要人工介入的事项。</p>
+        <label>管理员账号<input id="login-username" autocomplete="username" required /></label>
+        <label>密码<input id="login-password" type="password" autocomplete="current-password" required /></label>
+        <button class="primary wide" type="submit">登录</button>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </form>
+    </section>
+
+    <div id="app-view" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark small">B</span><div><b>RDOS</b><small>Admin Console</small></div></div>
+        <nav id="main-nav">
+          <button class="nav-item active" data-page="overview">Overview</button>
+          <button class="nav-item" data-page="projects">Projects <span id="project-badge" class="badge hidden">0</span></button>
+          <button class="nav-item" data-page="queue">Work Queue <span id="queue-badge" class="badge hidden">0</span></button>
+          <button class="nav-item" data-page="runners">Runners</button>
+          <button class="nav-item" data-page="rules">Global Rules</button>
+          <button class="nav-item" data-page="skills">Shared Skills</button>
+          <button class="nav-item" data-page="rag">Selected RAG</button>
+        </nav>
+        <div class="boundary-note">
+          <b>职责边界</b>
+          <p>Panel 管协作<br />Runner 管同步<br />Local Agent 管具体工作</p>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div><p class="eyebrow">SYSTEM ADMINISTRATOR</p><h2 id="page-title">运行概览</h2></div>
+          <div class="admin-actions"><span id="admin-name"></span><button id="change-password" class="text-button">修改密码</button><button id="logout" class="text-button">退出</button></div>
+        </header>
+
+        <section id="page-overview" class="page active">
+          <div id="overview-metrics" class="metrics"></div>
+          <div class="two-column">
+            <article class="panel"><div class="panel-head"><div><p class="eyebrow">RUNNERS</p><h3>节点状态</h3></div><button class="secondary go-page" data-page="runners">管理节点</button></div><div id="overview-runners"></div></article>
+            <article class="panel"><div class="panel-head"><div><p class="eyebrow">CURRENT FOCUS</p><h3>当前重点与进度</h3></div></div><div id="overview-progress"></div></article>
+          </div>
+          <div class="two-column">
+            <article class="panel"><div class="panel-head"><div><p class="eyebrow">ACTIVITY</p><h3>最近工作方法元数据</h3></div></div><div id="overview-activities"></div></article>
+            <article class="panel"><div class="panel-head"><div><p class="eyebrow">SHARED CONTEXT</p><h3>共享状态</h3></div></div><div id="overview-shared"></div></article>
+          </div>
+        </section>
+
+        <section id="page-projects" class="page">
+          <div class="split-heading"><div><h3>项目管理</h3><p>汇总项目协作事实、研发节点和 Gate 记录，不规定 Local Agent 的执行步骤。</p></div><button id="show-project-form" class="primary">新建项目</button></div>
+          <div class="project-layout">
+            <aside class="panel project-list-panel"><div id="project-list"></div></aside>
+            <div id="project-detail" class="project-detail"></div>
+          </div>
+        </section>
+
+        <section id="page-queue" class="page">
+          <div class="section-intro"><h3>只把真正需要管理员行动的事项放在这里</h3><p>日常进度和普通节点协作不会进入待办。</p></div>
+          <div class="queue-grid">
+            <article class="panel"><p class="eyebrow orange">待发布</p><h3>规则与 Shared Skill</h3><div id="queue-publish"></div></article>
+            <article class="panel"><p class="eyebrow blue">待判断</p><h3>风险、Gate 与升级协作</h3><div id="queue-judgments"></div></article>
+            <article class="panel"><p class="eyebrow red">异常需处理</p><h3>同步与内容异常</h3><div id="queue-incidents"></div></article>
+          </div>
+        </section>
+
+        <section id="page-runners" class="page">
+          <div class="split-heading"><div><h3>Local Runner 节点</h3><p>节点数量不固定。每个节点使用独立 Token 和 Workspace。</p></div><button id="show-runner-form" class="primary">创建节点</button></div>
+          <form id="runner-form" class="panel compact-form hidden">
+            <label>显示名<input id="runner-name" placeholder="例如：user1" required /></label>
+            <label class="grow">Workspace 绝对路径<input id="runner-workspace" placeholder="/absolute/path/to/workspace/user1" required /></label>
+            <button class="primary" type="submit">创建并生成配置</button>
+          </form>
+          <div id="runner-list" class="card-grid"></div>
+        </section>
+
+        <section id="page-rules" class="page">
+          <div class="section-intro"><h3>Global Rules</h3><p>这里只规定组织规则和协作边界，不规定 Local Agent 使用什么 Skill、Workflow 或执行步骤。</p></div>
+          <article class="panel editor-panel">
+            <div class="panel-head"><div><p id="rule-revision" class="eyebrow"></p><h3>当前正式规则</h3></div><span id="rule-updated" class="muted"></span></div>
+            <textarea id="rule-content" rows="18"></textarea>
+            <div class="actions"><button id="save-rules" class="primary">发布并同步</button></div>
+          </article>
+        </section>
+
+        <section id="page-skills" class="page">
+          <div class="section-intro"><h3>Shared Skills</h3><p>正式版本由系统管理员发布；候选内容来自 Local Agent Proposal。</p></div>
+          <div class="two-column align-start">
+            <article class="panel"><p class="eyebrow">OFFICIAL</p><h3>正式版本</h3><div id="skill-list"></div></article>
+            <article class="panel"><p class="eyebrow orange">PROPOSALS</p><h3>候选版本与差异</h3><div id="proposal-list"></div></article>
+          </div>
+        </section>
+
+        <section id="page-rag" class="page">
+          <div class="split-heading"><div><h3>Selected RAG</h3><p>只读同步飞书云空间指定文件夹。正文不能在本工作台新增、修改或删除。</p></div><button id="sync-rag" class="primary">立即同步</button></div>
+          <div id="rag-state" class="status-banner"></div>
+          <article class="panel table-panel"><div class="panel-head"><div><p class="eyebrow">ACTIVE SNAPSHOT</p><h3>当前生效文件</h3></div></div><div class="table-wrap"><table><thead><tr><th>文件</th><th>类型</th><th>更新时间</th><th>Hash</th><th>状态</th></tr></thead><tbody id="rag-files"></tbody></table></div></article>
+          <article class="panel"><p class="eyebrow">NOT IN RUNTIME</p><h3>未纳入项</h3><div id="rag-ignored"></div></article>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="config-dialog">
+      <form method="dialog" class="dialog-card">
+        <p class="eyebrow">ONE-TIME SECRET</p><h3>保存 Runner 配置</h3>
+        <p>Token 只在本次显示。下载后请妥善保管，Runner 首次读取时会自动限制文件权限。</p>
+        <pre id="config-json"></pre>
+        <div class="actions"><a id="download-config" class="primary" href="#" download>下载配置</a><button class="secondary" value="close">我已保存</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="password-dialog">
+      <form id="password-form" class="dialog-card">
+        <p class="eyebrow">ADMIN ACCOUNT</p><h3>修改管理员密码</h3>
+        <label>当前密码<input id="current-password" type="password" required /></label>
+        <label>新密码<input id="new-password" type="password" minlength="10" required /></label>
+        <div class="actions"><button class="primary" type="submit">修改并重新登录</button><button id="cancel-password" class="secondary" type="button">取消</button></div>
+      </form>
+    </dialog>
+    <dialog id="project-dialog">
+      <form id="project-form" class="dialog-card project-form">
+        <input id="project-id" type="hidden" />
+        <p class="eyebrow">PROJECT SETUP</p><h3 id="project-form-title">新建项目</h3>
+        <div class="form-grid">
+          <label class="full">项目名称<input id="project-name" required maxlength="300" /></label>
+          <label class="full">项目说明<textarea id="project-description" rows="3"></textarea></label>
+          <label>开始日期<input id="project-start" type="date" required /></label>
+          <label>结束日期<input id="project-end" type="date" required /></label>
+          <label>每日上报截止<input id="project-cutoff" type="time" value="18:00" required /></label>
+          <label>生命周期<select id="project-status"><option value="active">进行中</option><option value="paused">暂停</option><option value="completed">已完成</option></select></label>
+          <label class="full">飞书项目文件夹链接<input id="project-folder" required /></label>
+          <label class="full">研发模式<select id="project-mode" required></select></label>
+        </div>
+        <fieldset><legend>参与 Runner</legend><div id="project-members" class="check-grid"></div></fieldset>
+        <fieldset><legend>产品类型</legend><div id="project-types" class="check-grid"></div></fieldset>
+        <fieldset><legend>交付规模</legend><div id="project-scales" class="check-grid"></div></fieldset>
+        <div class="actions"><button id="cancel-project" class="secondary" type="button">取消</button><button class="primary" type="submit">保存项目</button></div>
+      </form>
+    </dialog>
+    <dialog id="gate-return-dialog">
+      <form id="gate-return-form" class="dialog-card">
+        <input id="gate-return-project" type="hidden" />
+        <input id="gate-return-record" type="hidden" />
+        <p class="eyebrow">GATE RECORD</p><h3>退回核实</h3>
+        <p>请说明还需要补充核实什么。退回只影响这条记录，不会阻断 Runner 继续工作。</p>
+        <label>反馈<textarea id="gate-return-feedback" rows="4" required></textarea></label>
+        <div class="actions"><button id="cancel-gate-return" class="secondary" type="button">取消</button><button class="primary" type="submit">退回核实</button></div>
+      </form>
+    </dialog>
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
