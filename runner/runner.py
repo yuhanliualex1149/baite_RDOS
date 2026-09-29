@@ -312,7 +312,15 @@ def _activate_release(root: Path, release: Path) -> None:
 
 def runtime_directory(root: Path) -> Path:
     """Read once per batch; callers keep this path until all batch reads finish."""
-    entry = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
+    for attempt in range(5):
+        try:
+            entry = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
+            break
+        except PermissionError:
+            # NTFS can briefly deny new opens while another process replaces the entry.
+            if not WINDOWS or attempt == 4:
+                raise
+            time.sleep(0.02)
     if entry.get("layout_version") != 1:
         raise ValueError("不支持的本地布局版本")
     return owned_release(root, Path(entry["snapshot_dir"]))

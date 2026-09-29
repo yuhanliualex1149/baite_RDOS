@@ -24,6 +24,7 @@ jobs:
           python-version: '3.13'
           architecture: ${{ startsWith(matrix.os, 'windows') && 'x64' || 'arm64' }}
       - name: Install test and timezone dependencies
+        id: dependencies
         run: |
           python -m pip install -r requirements.txt
           python -m pip install --require-hashes --only-binary=:all: -r runner/requirements.lock
@@ -32,8 +33,11 @@ jobs:
       - name: API, filesystem, installer and existing regression tests
         run: python -m unittest discover -s tests -v
       - name: Three isolated Runners, offline recovery, ACK and credential rotation
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python tests/e2e_demo.py
       - name: Native installer and background task isolated acceptance
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python tests/macos_installer_smoke.py --local-runtime
       - name: Browser onboarding and one-time credential UI
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python tests/browser_onboarding.py

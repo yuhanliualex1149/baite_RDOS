@@ -87,6 +87,8 @@ Windows 任务设置：忽略重复启动、失败重试、无限运行时间、
 
 Agent **每批先读取一次入口，并在该 snapshot_dir 中完成该批读取**：
 
+Windows 切换入口时，NTFS 可能短暂拒绝同时打开该文件；读取失败时稍后重读入口（内置读取函数最多尝试 5 次），不要改权限、拼接不同版本或删除快照。持续失败应报告。
+
 - 全局 `shared/global_rules.md`、`shared/skills/`、`shared/selected_rag/`、`control/`。
 - 项目 `shared/`、`control/project.json`、`control/todos.md`、`control/gate_records.md`。
 - Agent 可写的工作区仍为 Workspace `work/`、`outbox/`，以及项目 `work/project_status.json`、`work/files/`，不在快照中写研发文件。

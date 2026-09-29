@@ -52,7 +52,7 @@ def wait_until(check: Callable[[], bool], message: str, timeout: float = 15) -> 
         try:
             if check():
                 return
-        except (urllib.error.URLError, urllib.error.HTTPError, FileNotFoundError, KeyError):
+        except (urllib.error.URLError, urllib.error.HTTPError, FileNotFoundError, PermissionError, KeyError):
             pass
         time.sleep(0.1)
     raise AssertionError(message)
