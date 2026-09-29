@@ -6,6 +6,8 @@
 
 Windows / 自助接入候选版：见 [跨平台 Runner 接入说明](docs/runner_onboarding.md)。新增统一安装器、runtime.json 入口、可选 Workspace、心跳运行信息，以及节点交付窗口的安全接入指令；仍需 Windows 10/11 和 WorkBuddy 实机验收，未发布正式云端。
 
+双平台自动测试已通过，证据与实机待验收边界见 [候选版本验证报告](docs/windows_candidate_verification.md)。
+
 ## 系统边界
 
 | 组件 | 负责 | 不负责 |
