@@ -6,7 +6,7 @@
 管理员浏览器 / 各地 Local Runner
               ↓ HTTPS
             Nginx
-              ↓ 127.0.0.1:8000
+              ↓ 127.0.0.1:8010
       FastAPI Control Panel
               ↓
      SQLite 持久目录 + 飞书 OAuth
@@ -17,8 +17,8 @@ Web Server 只运行 Control Panel。Local Runner 应继续运行在各自的研
 ## 1. 部署前确认
 
 - Linux 服务器可使用 Python 3.9 或更高版本、Git、Nginx 和 systemd。
-- 已准备 HTTPS 域名，例如 `rdos.example.com`。
-- 防火墙只向公网开放 80/443；不要直接暴露 8000。
+- 已准备独立 HTTPS 域名。若部署到现有 `yjmt.cn` 服务器，推荐使用 `rdos.yjmt.cn`，不要把 `/bt/rdos/` 当作低成本的等价方案。
+- 防火墙只向公网开放 80/443；不要直接暴露 8010。
 - 服务器具有持久磁盘和 SQLite 备份目录。
 - 如需真实飞书同步，运行 RDOS 的系统用户必须已经安装并完成 `lark-cli` 个人 OAuth；Runner 不持有飞书 OAuth。
 - 不要把本机的 `.env.local`、数据库、Runner 配置或 `workspace/` 上传到服务器。
@@ -73,9 +73,9 @@ BAITE_SESSION_SECRET=<粘贴上一步生成的随机值>
 BAITE_ADMIN_USERNAME=admin
 BAITE_ADMIN_PASSWORD=<首次部署使用的长随机密码>
 BAITE_COOKIE_SECURE=true
-BAITE_PUBLIC_URL=https://rdos.example.com
+BAITE_PUBLIC_URL=https://rdos.yjmt.cn
 BAITE_HOST=127.0.0.1
-BAITE_PORT=8000
+BAITE_PORT=8010
 BAITE_SELECTED_RAG_FOLDER_TOKEN=KQjyf6KrxlZ24MdkHirc9TP0n2d
 BAITE_TIMEZONE=Asia/Shanghai
 BAITE_SESSION_HOURS=12
@@ -110,7 +110,7 @@ User=baite-rdos
 Group=baite-rdos
 WorkingDirectory=/opt/baite-rdos/app
 EnvironmentFile=/etc/baite-rdos/rdos.env
-ExecStart=/opt/baite-rdos/app/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+ExecStart=/opt/baite-rdos/app/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8010 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -126,7 +126,7 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable --now baite-rdos
 sudo systemctl status baite-rdos --no-pager
-curl -fsS http://127.0.0.1:8000/api/health
+curl -fsS http://127.0.0.1:8010/api/health
 ```
 
 预期健康检查返回：
@@ -141,7 +141,7 @@ curl -fsS http://127.0.0.1:8000/api/health
 
 ```nginx
 location / {
-    proxy_pass http://127.0.0.1:8000;
+    proxy_pass http://127.0.0.1:8010;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -157,14 +157,14 @@ location / {
 ```bash
 sudo nginx -t
 sudo systemctl reload nginx
-curl -fsS https://rdos.example.com/api/health
+curl -fsS https://rdos.yjmt.cn/api/health
 ```
 
-不要直接复制覆盖服务器现有 Nginx 配置。若服务器还承载其他网站或路径，应先读取当前配置，增加独立域名或独立 `location`，并回归检查原有应用。
+不要直接复制覆盖服务器现有 Nginx 配置。若目标服务器是当前 `yjmt.cn` 主机，应先检查磁盘、内存、监听端口、证书和全部 Nginx include；发布后至少回归检查 `/`、`/yxxz/` 和 `/fuquelai/`。
 
 ## 7. 首次登录与 Runner 接入
 
-1. 打开 `https://rdos.example.com`，使用环境文件中的初始管理员账号登录。
+1. 打开实际配置的 HTTPS 地址（例如 `https://rdos.yjmt.cn`），使用环境文件中的初始管理员账号登录。
 2. 修改管理员密码。
 3. 从 `/etc/baite-rdos/rdos.env` 删除 `BAITE_ADMIN_PASSWORD`，执行 `sudo systemctl restart baite-rdos`。
 4. 在 Runners 页面创建节点并下载一次性配置。
@@ -203,7 +203,7 @@ sudo -u baite-rdos git fetch origin
 sudo -u baite-rdos git checkout <已确认的提交 SHA>
 sudo -u baite-rdos .venv/bin/pip install -r requirements.txt
 sudo systemctl restart baite-rdos
-curl -fsS http://127.0.0.1:8000/api/health
+curl -fsS http://127.0.0.1:8010/api/health
 ```
 
 数据库迁移在启动时自动执行，并在 schema 变化前生成备份。仍建议每次更新前另做一次上述人工备份。
@@ -212,9 +212,9 @@ curl -fsS http://127.0.0.1:8000/api/health
 
 ## 10. 部署验收清单
 
-- [ ] 本机 `127.0.0.1:8000/api/health` 返回 200。
+- [ ] 本机 `127.0.0.1:8010/api/health` 返回 200。
 - [ ] 公网 HTTPS `/api/health` 返回 200，HTTP 自动跳转 HTTPS。
-- [ ] 8000 端口未向公网开放。
+- [ ] 8010 端口未向公网开放。
 - [ ] 未登录无法访问管理 API。
 - [ ] 管理员可以登录、改密码和重新登录。
 - [ ] 重启服务后管理员、Runner、项目和记录仍存在。
