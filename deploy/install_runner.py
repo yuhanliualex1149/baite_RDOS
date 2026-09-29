@@ -83,7 +83,7 @@ def protect_path(path: Path) -> None:
         return
     powershell("""
 $p=$env:RDOS_PRIVATE_PATH; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
-$directory=Test-Path -LiteralPath $p -PathType Container
+$directory=[IO.Directory]::Exists($p)
 if ($directory) { $acl=[Security.AccessControl.DirectorySecurity]::new(); $inherit='ContainerInherit,ObjectInherit' }
 else { $acl=[Security.AccessControl.FileSecurity]::new(); $inherit='None' }
 $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false)
@@ -91,7 +91,7 @@ foreach ($id in @($sid.Value,'S-1-5-18')) {
   $rule=[Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($id), 'FullControl', $inherit, 'None', 'Allow')
   $acl.AddAccessRule($rule)
 }
-Set-Acl -LiteralPath $p -AclObject $acl
+if($directory){[IO.Directory]::SetAccessControl($p,$acl)}else{[IO.File]::SetAccessControl($p,$acl)}
 """, {"RDOS_PRIVATE_PATH": str(path)})
 
 
@@ -173,7 +173,7 @@ def windows_task(node: str, action: str, xml: Path | None = None, check: bool = 
     prefix = "$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $f=$s.GetFolder('\\'); $n=$env:RDOS_TASK_NAME; "
     commands = {
         "register": "$xml=[IO.File]::ReadAllText($env:RDOS_TASK_XML); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $null=$f.RegisterTask($n,$xml,6,$sid,$null,3,$null)",
-        "status": "$t=$f.GetTask($n); @{running=($t.State -eq 4); enabled=$t.Enabled; config=$t.Definition.RegistrationInfo.Description; last_result=$t.LastTaskResult} | ConvertTo-Json -Compress",
+        "status": "$t=$f.GetTask($n); $instances=$t.GetInstances(0); $instance=$null; if($instances.Count -gt 0){$instance=$instances.Item(1).InstanceGuid}; @{running=($t.State -eq 4); instance_id=$instance; enabled=$t.Enabled; config=$t.Definition.RegistrationInfo.Description; last_result=$t.LastTaskResult} | ConvertTo-Json -Compress",
         "start": "$t=$f.GetTask($n); $t.Enabled=$true; if ($t.State -ne 4) { $null=$t.Run($null) }",
         "stop": "$t=$f.GetTask($n); $t.Enabled=$false; $t.Stop(0); for($i=0; $i -lt 50 -and $t.State -eq 4; $i++){Start-Sleep -Milliseconds 100}; if($t.State -eq 4){throw 'Task did not stop'}",
         "delete": "$f.DeleteTask($n,0)",
@@ -424,6 +424,7 @@ def status(node: str, root: Path) -> dict:
     pid = re.search(r"\bpid = (\d+)", info.stdout) if not WINDOWS and info.returncode == 0 else None
     result = {"runner_id": node, "installed": installed, "service_loaded": info.returncode == 0,
               "running": task.get("running", bool(pid)), "pid": int(pid.group(1)) if pid else None,
+              "instance_id": task.get("instance_id"),
               "logs": str(directory / "logs"),
               "note": "本机进程状态不是云端 Online 或同步成功证明；请同时查看 Panel 心跳和同步健康"}
     if installed:

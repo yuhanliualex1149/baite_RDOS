@@ -33,8 +33,7 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Three isolated Runners, offline recovery, ACK and credential rotation
         run: python tests/e2e_demo.py
-      - name: macOS LaunchAgent isolated acceptance
-        if: runner.os == 'macOS'
+      - name: Native installer and background task isolated acceptance
         run: python tests/macos_installer_smoke.py --local-runtime
       - name: Browser onboarding and one-time credential UI
         run: python tests/browser_onboarding.py

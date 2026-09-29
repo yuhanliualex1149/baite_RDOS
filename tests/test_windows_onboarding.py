@@ -200,7 +200,7 @@ class WindowsInstallTest(unittest.TestCase):
 
     def test_private_acl_has_no_other_normal_users(self):
         installer.protect_path(self.config)
-        result = installer.powershell("(Get-Acl -LiteralPath $env:RDOS_PRIVATE_PATH).Access | ForEach-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}", {"RDOS_PRIVATE_PATH": str(self.config)})
+        result = installer.powershell("[IO.File]::GetAccessControl($env:RDOS_PRIVATE_PATH).Access | ForEach-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}", {"RDOS_PRIVATE_PATH": str(self.config)})
         sid = installer.powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value").stdout.strip()
         self.assertEqual(set(result.stdout.split()), {sid, "S-1-5-18"})
 

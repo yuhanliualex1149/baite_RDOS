@@ -1,4 +1,4 @@
-"""Explicit macOS smoke test: real GitHub download + launchd, isolated fake Control API.
+"""Native installer smoke: launchd / Task Scheduler with an isolated fake Control API.
 
 Never uses a real Runner Token or writes to the deployed Panel.
 """
@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from deploy import install_macos_runner as installer
 from rdos_protocol import seal_snapshot
 from tests.test_runner import snapshot
+from runner.runner import runtime_directory
 
 
 def wait_for(check, description):
@@ -41,8 +42,8 @@ def main():
         parser.error("choose --release or --local-runtime")
     if args.local_runtime:
         args.release = "a" * 40
-    if sys.platform != "darwin" or sys.version_info < (3, 10):
-        raise SystemExit("Requires macOS and Python 3.10+")
+    if sys.platform not in {"darwin", "win32"} or sys.version_info < (3, 10):
+        raise SystemExit("Requires macOS Python 3.10+ or Windows Python 3.13 x64")
     os.umask(0o077)
     events, heartbeats = [], []
     token = "test-token-" + uuid.uuid4().hex
@@ -111,16 +112,21 @@ def main():
                 try:
                     assert not root.exists() and not work.exists()
                     directory = installer.install(config, None, root)
-                    synced = work / "control/sync.json"
-                    wait_for(lambda: synced.is_file(), "Runner never synced")
+                    def synced():
+                        if (work / "runtime.json").is_file():
+                            return (runtime_directory(work) / "control/sync.json").is_file()
+                        return (work / "control/sync.json").is_file()
+                    wait_for(synced, "Runner never synced")
                     assert heartbeats
                     info = installer.status(node, root)
                     assert info["running"] and info["revision"] == 7, info
-                    original_pid = info["pid"]
+                    original_instance = info["instance_id"] if installer.WINDOWS else info["pid"]
+                    assert original_instance
                     (work / "work/keep.md").write_text("user work")
                     # Second installation must preserve user work and the already-running process.
                     installer.install(config, None, root)
-                    assert installer.status(node, root)["pid"] == original_pid
+                    again = installer.status(node, root)
+                    assert (again["instance_id"] if installer.WINDOWS else again["pid"]) == original_instance
                     assert (work / "work/keep.md").read_text() == "user work"
                     installer.stop_service(node)
                     assert not installer.status(node, root)["running"]
@@ -135,11 +141,15 @@ def main():
                     assert token not in (directory / "logs/runner.log").read_text()
                     installer.uninstall(node, root)
                     assert not directory.exists() and (work / "work/keep.md").is_file()
-                    print("PASS: fresh download, blob hashes, isolated venv, actual launchd, sync, repeat/PID, stop/start, ACK, credential redaction")
+                    print("PASS: verified runtime, isolated venv, native background task, sync, repeat/instance, stop/start, ACK, credential redaction, uninstall preserving work")
                 finally:
-                    installer.stop_service(node)
-                    subprocess.run(["launchctl", "enable", f"gui/{os.getuid()}/{installer.service_label(node)}"],
-                                   check=True, capture_output=True)
+                    if installer.service_info(node).returncode == 0:
+                        installer.stop_service(node)
+                    if installer.WINDOWS:
+                        installer.windows_task(node, "delete")
+                    else:
+                        subprocess.run(["launchctl", "enable", f"gui/{os.getuid()}/{installer.service_label(node)}"],
+                                       check=True, capture_output=True)
                     assert installer.service_info(node).returncode != 0
     finally:
         server.shutdown()
