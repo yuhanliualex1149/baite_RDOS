@@ -57,7 +57,10 @@ def main():
                 instructions = page.locator("#onboarding-text").input_value()
                 assert configuration["runner_token"] not in instructions
                 page.locator("#copy-onboarding").click()
-                assert page.evaluate("navigator.clipboard.readText()") == instructions
+                expect(page.locator("#toast")).to_have_text("接入指令已复制，不含 Token")
+                copied = page.evaluate("navigator.clipboard.readText()")
+                # The Windows clipboard can expose CRLF; compare every character after newline normalization.
+                assert copied.replace("\r\n", "\n") == instructions, "Clipboard content differs from onboarding text"
                 page.locator('#config-dialog button[value="close"]').click()
                 expect(page.locator("#config-json")).to_have_text("")
                 page.locator('[data-action="runner-onboarding"]').click()
