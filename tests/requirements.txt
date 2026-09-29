@@ -1,0 +1,2 @@
+# Browser acceptance only; not installed on a partner's Runner.
+playwright==1.55.0

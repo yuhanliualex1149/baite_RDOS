@@ -1,0 +1,2 @@
+# Runner-only dependency; Windows has no bundled IANA timezone database.
+tzdata==2025.2 --hash=sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8

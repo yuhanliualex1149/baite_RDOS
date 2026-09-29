@@ -17,6 +17,7 @@ from typing import Callable, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+from runner.runner import runtime_directory
 
 
 def free_port() -> int:
@@ -112,6 +113,8 @@ def main() -> None:
                 "BAITE_SELECTED_RAG_FOLDER_TOKEN": "folder-test",
                 "BAITE_PUBLIC_URL": base_url,
                 "BAITE_ONLINE_WINDOW_SECONDS": "0.6",
+                "BAITE_DISABLE_EXTERNAL_SYNC": "true",
+                "PYTHONUTF8": "1",
             }
         )
         seed_rag(environment)
@@ -210,7 +213,7 @@ def main() -> None:
                 workspace = temp / "workspace" / name
                 wait_until(
                     lambda workspace=workspace: (
-                        workspace / "shared" / "selected_rag" / "Context.md"
+                        runtime_directory(workspace) / "shared" / "selected_rag" / "Context.md"
                     ).is_file(),
                     f"{name} 未收到 RAG Snapshot",
                 )
@@ -231,10 +234,9 @@ def main() -> None:
                 {"content": "# E2E Global Rules\n\nLocal Agent 自主决定具体工作方式。"},
             )
             for name in runners:
-                rules_path = temp / "workspace" / name / "shared" / "global_rules.md"
+                workspace = temp / "workspace" / name
                 wait_until(
-                    lambda path=rules_path: path.is_file()
-                    and "E2E Global Rules" in path.read_text(encoding="utf-8"),
+                    lambda root=workspace: "E2E Global Rules" in (runtime_directory(root) / "shared/global_rules.md").read_text(encoding="utf-8"),
                     f"{name} 未同步 Global Rules",
                 )
 
@@ -320,8 +322,8 @@ def main() -> None:
                 {"decision": "publish", "feedback": ""},
             )
             for name in runners:
-                skill_path = temp / "workspace" / name / "shared" / "skills" / "example-shared-skill.md"
-                wait_until(lambda path=skill_path: path.is_file(), f"{name} 未同步 Shared Skill")
+                workspace = temp / "workspace" / name
+                wait_until(lambda root=workspace: (runtime_directory(root) / "shared/skills/example-shared-skill.md").is_file(), f"{name} 未同步 Shared Skill")
 
             stop(runner_processes["user3"])
             wait_until(

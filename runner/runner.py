@@ -6,12 +6,14 @@ import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
+import platform
 import re
 import shutil
 import stat
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +24,8 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rdos_protocol import content_hash, verify_snapshot
+from runner.platform_support import (WINDOWS, is_linklike, owned_release, portable_filename,
+                                     reject_link_ancestors, workspace_lock)
 
 
 def api_request(
@@ -73,17 +77,19 @@ def load_config(path: Path) -> Dict[str, str]:
 
 def write_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    with temporary.open("w", encoding="utf-8") as output:
-        output.write(content)
-        output.flush()
-        os.fsync(output.fileno())
-    os.replace(temporary, path)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def safe_filename(name: str, fallback: str) -> str:
-    if Path(name).name != name:
-        raise ValueError(f"不安全的文件名：{name}")
+    name = portable_filename(unicodedata.normalize("NFC", name))
     if name.lower().endswith(".md"):
         return name
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
@@ -268,6 +274,13 @@ def _validate_content(item: Dict[str, Any]) -> bytes:
 
 def _activate_release(root: Path, release: Path) -> None:
     """Shared content and control documents switch through one pointer."""
+    release = owned_release(root, release.resolve())
+    snapshot = _validate_release(release)
+    entry = {"layout_version": 1, "snapshot_dir": str(release), "revision": snapshot["revision"]}
+    # Windows has no link aliases. Replacing a file is the only publication step.
+    if WINDOWS:
+        write_atomic(root / "runtime.json", json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+        return
     internal = root / ".runner"
     internal.mkdir(parents=True, exist_ok=True)
     for name in ("shared", "control"):
@@ -284,27 +297,52 @@ def _activate_release(root: Path, release: Path) -> None:
     temporary = internal / ".current-next"
     temporary.unlink(missing_ok=True)
     os.symlink(release, temporary, target_is_directory=True)
+    previous = os.readlink(internal / "current") if (internal / "current").is_symlink() else None
     os.replace(temporary, internal / "current")
+    try:
+        write_atomic(root / "runtime.json", json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+    except OSError:
+        if previous:
+            os.symlink(previous, temporary, target_is_directory=True)
+            os.replace(temporary, internal / "current")
+        else:
+            (internal / "current").unlink(missing_ok=True)
+        raise
+
+
+def runtime_directory(root: Path) -> Path:
+    """Read once per batch; callers keep this path until all batch reads finish."""
+    entry = json.loads((root / "runtime.json").read_text(encoding="utf-8"))
+    if entry.get("layout_version") != 1:
+        raise ValueError("不支持的本地布局版本")
+    return owned_release(root, Path(entry["snapshot_dir"]))
 
 
 def _store_release(staging: Path, snapshot: dict) -> None:
     write_atomic(staging / "snapshot.json", json.dumps(snapshot, ensure_ascii=False))
-    files = {str(path.relative_to(staging)): _file_sha256(path)
+    files = {path.relative_to(staging).as_posix(): _file_sha256(path)
              for folder in ("shared", "control") for path in (staging / folder).rglob("*") if path.is_file()}
     write_atomic(staging / "local-manifest.json", json.dumps(files, sort_keys=True))
 
 
 def _validate_release(release: Path) -> dict:
+    for name in ("snapshot.json", "local-manifest.json"):
+        if is_linklike(release / name):
+            raise ValueError("快照清单不能是重解析点或符号链接")
     snapshot = json.loads((release / "snapshot.json").read_text(encoding="utf-8"))
     verify_snapshot(snapshot)
     expected = json.loads((release / "local-manifest.json").read_text(encoding="utf-8"))
     actual = {}
     for folder in ("shared", "control"):
-        for path in (release / folder).rglob("*"):
-            if path.is_symlink():
-                raise ValueError("快照中不允许嵌套符号链接")
-            if path.is_file() and path.relative_to(release).as_posix() != "control/membership_ended.md":
-                actual[str(path.relative_to(release))] = _file_sha256(path)
+        if is_linklike(release / folder):
+            raise ValueError("快照中不允许重解析点或符号链接")
+        for directory, dirs, files in os.walk(release / folder, followlinks=False):
+            for name in dirs + files:
+                path = Path(directory) / name
+                if is_linklike(path):
+                    raise ValueError("快照中不允许重解析点或符号链接")
+                if name in files and path.relative_to(release).as_posix() != "control/membership_ended.md":
+                    actual[path.relative_to(release).as_posix()] = _file_sha256(path)
     if actual != expected:
         raise ValueError("本地快照文件不完整或已损坏")
     return snapshot
@@ -313,15 +351,20 @@ def _validate_release(release: Path) -> dict:
 def recover_release(root: Path, releases: Path) -> Optional[dict]:
     current = root / ".runner" / "current"
     candidates = []
+    try:
+        candidates.append(runtime_directory(root))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     if current.is_symlink():
         active = current.resolve()
         if active.parent == releases.resolve():
             candidates.append(active)
     candidates.extend(sorted(releases.glob("revision-*"), key=lambda path: path.stat().st_mtime_ns, reverse=True))
     for candidate in candidates:
-        if not candidate.is_dir() or candidate.is_symlink():
+        if not candidate.is_dir() or is_linklike(candidate):
             continue
         try:
+            candidate = owned_release(root, candidate.resolve())
             snapshot = _validate_release(candidate)
             _activate_release(root, candidate)
             return snapshot
@@ -334,6 +377,7 @@ def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) ->
     verify_snapshot(snapshot)
     revision = int(snapshot["revision"])
     releases = workspace / ".runner" / "releases"
+    reject_link_ancestors(releases)
     releases.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f"revision-{revision}-", dir=releases))
     try:
@@ -419,6 +463,9 @@ def apply_project_snapshot(workspace: Path, project: Dict[str, Any]) -> Path:
     work = root / "work"
     files_root = work / "files"
     releases = workspace / ".runner" / "project-releases" / project_id
+    reject_link_ancestors(root)
+    reject_link_ancestors(releases)
+    reject_link_ancestors(files_root)
     files_root.mkdir(parents=True, exist_ok=True)
     releases.mkdir(parents=True, exist_ok=True)
 
@@ -490,7 +537,7 @@ def mark_removed_projects(workspace: Path, previous: set[str], current: set[str]
         root = _project_path(workspace, project_id)
         if root.exists():
             write_atomic(
-                root / "control" / "membership_ended.md",
+                root / "membership_ended.md" if WINDOWS else root / "control" / "membership_ended.md",
                 "# 项目成员关系已结束\n\nRunner 不再接收本项目更新；历史文件不会自动删除。\n",
             )
 
@@ -563,7 +610,9 @@ def _file_sha256(path: Path) -> str:
 
 def scan_project_files(project_root: Path, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     files_root = project_root / "work" / "files"
-    if files_root.is_symlink():
+    try:
+        reject_link_ancestors(files_root)
+    except ValueError:
         return []
     files_root.mkdir(parents=True, exist_ok=True)
     note_map: Dict[str, Dict[str, Any]] = {}
@@ -578,10 +627,10 @@ def scan_project_files(project_root: Path, notes: List[Dict[str, Any]]) -> List[
     manifest: List[Dict[str, Any]] = []
     for directory, names, filenames in os.walk(files_root, followlinks=False):
         base = Path(directory)
-        names[:] = [name for name in names if not (base / name).is_symlink()]
+        names[:] = [name for name in names if not is_linklike(base / name)]
         for filename in filenames:
             path = base / filename
-            if path.is_symlink() or not path.is_file():
+            if is_linklike(path) or not path.is_file():
                 continue
             relative = (Path("files") / path.relative_to(files_root)).as_posix()
             stat_result = path.stat()
@@ -613,6 +662,10 @@ def load_project_status(project_root: Path) -> Dict[str, Any]:
         "complete": False,
         "source_hash": "missing",
     }
+    try:
+        reject_link_ancestors(status_path)
+    except ValueError:
+        return {**empty, "issues": ["project_status.json 路径含重解析点或符号链接，未读取"], "source_hash": "invalid:link"}
     if not status_path.is_file():
         return empty
     try:
@@ -771,12 +824,14 @@ def run(config_path: Path, poll_seconds: float) -> None:
     config = load_config(config_path)
     workspace = Path(config["workspace"])
     prepare_workspace(workspace)
-    import fcntl
-    process_lock = (workspace / ".runner" / "runner.lock").open("a")
     try:
-        fcntl.flock(process_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raise SystemExit("此 Workspace 已有 Runner 正在运行")
+        process_lock = workspace_lock(workspace / ".runner" / "runner.lock")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    release_file = Path(__file__).resolve().parents[1] / "release.json"
+    release = json.loads(release_file.read_text(encoding="utf-8"))["release"] if release_file.exists() else "development"
+    runtime_info = {"platform": "windows" if WINDOWS else platform.system().lower(),
+                    "runner_version": release, "actual_workspace": str(workspace)}
     state = _load_state(workspace)
     recovered = recover_release(workspace, workspace / ".runner" / "releases")
     state["revision"] = int(recovered["revision"]) if recovered else -1
@@ -800,7 +855,7 @@ def run(config_path: Path, poll_seconds: float) -> None:
     while True:
         try:
             queue_project_reports(config, workspace, project_cache, state)
-            api_request(config, "/api/runner/heartbeat", "POST")
+            api_request(config, "/api/runner/heartbeat", "POST", runtime_info)
             query = urllib.parse.urlencode({"known_revision": int(state["revision"])})
             snapshot = api_request(config, f"/api/runner/sync?{query}")
             retry_nonce = int(snapshot.get("retry_nonce", state.get("retry_nonce", 0)))

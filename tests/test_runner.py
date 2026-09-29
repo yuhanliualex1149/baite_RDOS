@@ -21,6 +21,7 @@ from runner.runner import (
     render_collaborations,
     safe_filename,
     scan_project_files,
+    runtime_directory,
 )
 
 
@@ -103,17 +104,18 @@ class RunnerSyncTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / "workspace"
             apply_snapshot(workspace, "runner-test", snapshot(1, "# Good Context\n"))
-            active = workspace / "shared" / "selected_rag" / "Context.md"
-            self.assertTrue((workspace / "shared").is_symlink())
+            active_root = runtime_directory(workspace)
+            active = active_root / "shared" / "selected_rag" / "Context.md"
+            self.assertEqual((workspace / "shared").is_symlink(), os.name != "nt")
             self.assertIn("Good Context", active.read_text(encoding="utf-8"))
             self.assertIn(
                 "Local Agent 自主决定",
-                (workspace / "shared" / "global_rules.md").read_text(encoding="utf-8"),
+                (active_root / "shared" / "global_rules.md").read_text(encoding="utf-8"),
             )
-            self.assertTrue((workspace / "control" / "sync.json").is_file())
+            self.assertTrue((active_root / "control" / "sync.json").is_file())
             self.assertIn(
                 "请补充适用范围",
-                (workspace / "control" / "skill_proposals.md").read_text(encoding="utf-8"),
+                (active_root / "control" / "skill_proposals.md").read_text(encoding="utf-8"),
             )
 
             broken = snapshot(2, "# Broken Context\n")
@@ -170,8 +172,8 @@ class RunnerSyncTest(unittest.TestCase):
             }
             apply_project_snapshot(workspace, seal_snapshot(project))
             root = workspace / "projects" / project["id"]
-            self.assertIn("Project A", (root / "control" / "project.md").read_text())
-            self.assertEqual((root / "shared" / "brief.md").read_text(), "# Brief\n")
+            self.assertIn("Project A", (runtime_directory(root) / "control" / "project.md").read_text(encoding="utf-8"))
+            self.assertEqual((runtime_directory(root) / "shared" / "brief.md").read_text(encoding="utf-8"), "# Brief\n")
 
             status = {
                 "summary": "完成原型",

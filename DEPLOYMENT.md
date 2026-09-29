@@ -90,39 +90,27 @@ Nginx 登录限速为每 IP 每分钟 5 次、额外突发 5 次、超限 429。
 
 ## 4. Mac Runner
 
-新建 `/Users/alexliu/Documents/baite-rdos-cloud-test`：
+候选跨平台版本见 [Runner 接入说明](docs/runner_onboarding.md)。新增 schema 5 仅追加 Runner 运行信息，迁移前自动备份，保留旧节点和历史；**本分支不部署云端、不合并 main**。Windows 10/11、WorkBuddy 的实机清单未完成前，不正式推荐候选安装入口。
 
-```text
-releases/<SHA>/   与云端一致的代码和 .venv
-current          当前发布符号链接
-config/yuhan.json 一次性节点配置，0600
-workspace/       全新 Workspace
-logs/            按日轮转，最多 30 份历史日志
-```
+使用 [macOS Runner 接入说明](docs/macos_runner_onboarding.md) 和独立脚本 `deploy/install_runner.py`。旧 Mac 入口在同一目录有新入口时继续兼容。无需先下载完整仓库或安装 Control Server；安装器只使用 Python 标准库。
 
-云端注册显示名称 `yuhan`，Workspace 填上述绝对路径；下载一次性 JSON，核实 `control_url=https://yjmt.cn/baite-rdos`，不用旧 Token。安装代码固定 SHA，Python 3.12 独立环境。
+管理员创建任意 Runner 并安全交付专属 JSON；本地 Agent 用 Python 3.10+（推荐 3.12/3.13）执行：
 
 ```bash
-python3 deploy/install_macos_runner.py \
-  --python /Users/alexliu/Documents/baite-rdos-cloud-test/current/.venv/bin/python \
-  --code /Users/alexliu/Documents/baite-rdos-cloud-test/current \
-  --config /Users/alexliu/Documents/baite-rdos-cloud-test/config/yuhan.json \
-  --logs /Users/alexliu/Documents/baite-rdos-cloud-test/logs
+python3.13 deploy/install_runner.py install \
+  --config /absolute/path/to/runner-config.json \
+  --workspace /absolute/path/to/RDOS-Workspace
 ```
 
-安装器生成 `~/Library/LaunchAgents/cn.yjmt.rdos.runner.yuhan.plist`，仅引用配置路径，不嵌入 Token。用户登录启动、异常退出重启、每 5 秒轮询。`--render-only` 只生成和校验，不启动。
+安装器从 Control API 健康接口取得发布 SHA，只读验证节点凭证，再从 GitHub 下载该 SHA 的 Runner 及协议文件并校验 Git blob Hash。每个节点有独立的 Python 环境、配置和日志，默认放在当前用户的 `Library/Application Support/BaiteRDOS/runners/<runner_id>/`；不会启动本地 Panel。
 
-```bash
-launchctl print gui/$(id -u)/cn.yjmt.rdos.runner.yuhan
-launchctl kickstart -k gui/$(id -u)/cn.yjmt.rdos.runner.yuhan
-launchctl bootout gui/$(id -u)/cn.yjmt.rdos.runner.yuhan
-```
+后台服务使用 `org.baite.rdos.runner.<runner_id>`，无固定姓名和开发者路径。`--no-start` 安装但本次不启动。正常安装设置登录启动、异常退出重启、5 秒轮询。配置为 0600，plist 仅引用配置路径、不嵌入 Token。
 
-分别检查、重启、停止。再次启动用 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/cn.yjmt.rdos.runner.yuhan.plist`。若 macOS 要求 Documents 访问授权，由用户允许该 Python，不能关闭系统隐私保护。
+同一脚本的 `status/start/stop/uninstall --runner-id <runner_id>` 用于查询、启停和卸载；安装目录也保存 `manage.py`。卸载保留 Workspace，不撤销云端 Token。重复安装保留 Workspace，已运行且配置不变时不重启。轮换 Token 后用新 JSON、原 Workspace 重新执行 install。
 
-合盖/休眠超过 60 秒 Offline 是预期，唤醒自动重连。轮换 Token 后旧凭证应 401，替换 JSON 并重启。不要托管与手动运行同一 Workspace，Runner 使用排他锁。
+合盖/休眠超过 60 秒 Offline 是预期，唤醒自动重连。不要托管与手动运行同一 Workspace。需要 macOS 文件访问授权时由用户确认，不能绕过系统隐私保护。只有同步校验和测试事件 ACK 均通过才算接入完成，不以安装器退出成功代替验收。
 
-共享和项目的 `shared`、`control` 通过单一 `.runner/current` 指针切换。完整快照和本地文件清单在启动时复核，损坏回到可验证的上一版。自动日报先 fsync 到 outbox 再联网；ACK 必须为 true 且 event_id 匹配才归档。网络失败保留待传，400/409/422 进入 rejected。
+候选 Runner 的共享和项目资料通过独立 `runtime.json` 原子入口读取；Mac 同时保留 `.runner/current` 及 `shared/control` 兼容链接。完整快照和本地文件清单在启动时复核，损坏回到可验证的上一版。自动日报先 fsync 到 outbox 再联网；ACK 必须为 true 且 event_id 匹配才归档。网络失败保留待传，400/409/422 进入 rejected。
 
 ## 5. 飞书闭环
 

@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from server import db
+from server.onboarding import instructions, validate_client_workspace
 from server.project_sync import (
     export_pending_progress,
     scheduler as project_scheduler,
@@ -103,7 +104,18 @@ class RulesInput(StrictModel):
 
 class RunnerCreateInput(StrictModel):
     display_name: str = Field(min_length=1, max_length=100)
-    workspace: str = Field(min_length=1, max_length=2000)
+    workspace: str = Field(default="", max_length=2000)
+
+
+class RunnerHeartbeatInput(StrictModel):
+    platform: Optional[Literal["windows", "darwin", "linux", "macos"]] = None
+    runner_version: Optional[str] = Field(default=None, max_length=100)
+    actual_workspace: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("actual_workspace")
+    @classmethod
+    def workspace_path(cls, value):
+        return validate_client_workspace(value) if value is not None else None
 
 
 class RunnerUpdateInput(StrictModel):
@@ -416,11 +428,22 @@ def admin_runners(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
 def create_runner(
     payload: RunnerCreateInput, _: Dict[str, Any] = Depends(require_admin)
 ) -> Dict[str, Any]:
-    workspace = Path(payload.workspace).expanduser()
-    if not workspace.is_absolute():
-        raise HTTPException(status_code=400, detail="Workspace 必须使用绝对路径")
-    item = db.create_runner(payload.display_name.strip(), str(workspace), _public_url())
+    try:
+        workspace = validate_client_workspace(payload.workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    item = db.create_runner(payload.display_name.strip(), workspace, _public_url())
     return {"item": item, "token_visible_once": True}
+
+
+@app.get("/api/admin/runners/{runner_id}/onboarding")
+def runner_onboarding(
+    runner_id: str, platform: Literal["macos", "windows"] = "macos",
+    _: Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    if not db.get_runner(runner_id):
+        raise HTTPException(status_code=404, detail="Runner 不存在")
+    return instructions(runner_id, platform, _public_url())
 
 
 @app.patch("/api/admin/runners/{runner_id}")
@@ -693,8 +716,9 @@ def workflow_reference(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, 
 
 
 @app.post("/api/runner/heartbeat")
-def runner_heartbeat(runner: Dict[str, Any] = Depends(require_runner)) -> Dict[str, bool]:
-    db.heartbeat(runner["id"])
+def runner_heartbeat(payload: Optional[RunnerHeartbeatInput] = None,
+                     runner: Dict[str, Any] = Depends(require_runner)) -> Dict[str, bool]:
+    db.heartbeat(runner["id"], payload.model_dump(exclude_none=True) if payload else None)
     return {"ok": True}
 
 

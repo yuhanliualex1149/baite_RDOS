@@ -4,6 +4,8 @@
 
 当前不是 Workflow Engine，也不会远程操纵 Agent。
 
+Windows / 自助接入候选版：见 [跨平台 Runner 接入说明](docs/runner_onboarding.md)。新增统一安装器、runtime.json 入口、可选 Workspace、心跳运行信息，以及节点交付窗口的安全接入指令；仍需 Windows 10/11 和 WorkBuddy 实机验收，未发布正式云端。
+
 ## 系统边界
 
 | 组件 | 负责 | 不负责 |
@@ -38,6 +40,8 @@ tests/                  API、快照、Runner 和 E2E 自测
 旧版固定 Agent 数据迁移为 Legacy Audit，不会自动变成新 Runner。旧 Workspace 不删除、不覆盖。首次迁移默认数据库前会在 `data/backups/` 自动留备份。
 
 ## 安装
+
+仅接入云端的伙伴不需要安装 Panel 或完整仓库：使用 [Runner 通用安装与 Agent 接入说明](docs/runner_onboarding.md)，由 Local Agent 完成下载、配置和验证。下方环境安装主要供 Control Server 与本地开发使用。
 
 本次云端测试统一使用 Python 3.12。Selected RAG 真实同步需要 Panel 所在主机已安装并完成个人 OAuth 登录的 `lark-cli`。
 

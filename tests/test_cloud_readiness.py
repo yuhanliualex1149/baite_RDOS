@@ -6,12 +6,13 @@ import tempfile
 import unittest
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from rdos_protocol import seal_snapshot, verify_snapshot
-from runner.runner import apply_snapshot, apply_project_snapshot, prepare_workspace, recover_release, submit_outbox, submit_project_report
+from runner.runner import apply_snapshot, apply_project_snapshot, prepare_workspace, recover_release, submit_outbox, submit_project_report, runtime_directory
 from server import db
 from server.backup import backup_database
 from tests import test_api
@@ -191,7 +192,7 @@ class CloudApiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_project_snapshot(workspace, bad)
         root = workspace / "projects" / project["id"]
-        self.assertEqual((root / ".runner/current").resolve(), release.resolve())
+        self.assertEqual(runtime_directory(root), release.resolve())
         bundle["projects"] = []
         with self.assertRaises(ValueError):
             verify_snapshot(bundle)
@@ -203,7 +204,7 @@ class CloudStorageTest(unittest.TestCase):
     def test_online_backup_includes_uncheckpointed_wal(self):
         with tempfile.TemporaryDirectory() as temporary:
             source, target = Path(temporary) / "live.db", Path(temporary) / "backup.db"
-            with sqlite3.connect(source) as connection:
+            with closing(sqlite3.connect(source)) as connection:
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA wal_autocheckpoint=0")
                 connection.execute("CREATE TABLE evidence (value TEXT)")
@@ -211,7 +212,7 @@ class CloudStorageTest(unittest.TestCase):
                 connection.commit()
                 self.assertGreater(Path(str(source) + "-wal").stat().st_size, 0)
                 backup_database(source, target)
-                with sqlite3.connect(target) as restored:
+                with closing(sqlite3.connect(target)) as restored:
                     self.assertEqual(restored.execute("SELECT value FROM evidence").fetchone()[0], "committed in WAL")
                     self.assertEqual(restored.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
@@ -224,13 +225,13 @@ class CloudStorageTest(unittest.TestCase):
             corrupt["global_rules"]["content"] = "changed outside RAG"
             with self.assertRaises(ValueError):
                 apply_snapshot(workspace, "test", corrupt)
-            self.assertEqual((workspace / ".runner" / "current").resolve(), second.resolve())
+            self.assertEqual(runtime_directory(workspace), second.resolve())
             (second / "shared" / "global_rules.md").write_text("disk corruption")
             recovered = recover_release(workspace, workspace / ".runner" / "releases")
             self.assertEqual(recovered["revision"], 1)
-            self.assertEqual((workspace / ".runner" / "current").resolve(), first.resolve())
-            self.assertIn("# One", (workspace / "shared" / "selected_rag" / "Context.md").read_text())
-            self.assertEqual(json.loads((workspace / "control" / "sync.json").read_text())["revision"], 1)
+            self.assertEqual(runtime_directory(workspace), first.resolve())
+            self.assertIn("# One", (runtime_directory(workspace) / "shared" / "selected_rag" / "Context.md").read_text(encoding="utf-8"))
+            self.assertEqual(json.loads((runtime_directory(workspace) / "control" / "sync.json").read_text(encoding="utf-8"))["revision"], 1)
 
     def test_interrupted_pointer_switch_keeps_old_content_and_control(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -239,15 +240,15 @@ class CloudStorageTest(unittest.TestCase):
             replace = os.replace
 
             def fail_switch(source, target):
-                if Path(target).name == "current":
+                if Path(target).name == ("runtime.json" if os.name == "nt" else "current"):
                     raise OSError("simulated interruption")
                 replace(source, target)
 
             with patch("runner.runner.os.replace", side_effect=fail_switch):
                 with self.assertRaises(OSError):
                     apply_snapshot(workspace, "test", snapshot(2))
-            self.assertEqual((workspace / ".runner" / "current").resolve(), original.resolve())
-            self.assertEqual(json.loads((workspace / "control" / "sync.json").read_text())["revision"], 1)
+            self.assertEqual(runtime_directory(workspace), original.resolve())
+            self.assertEqual(json.loads((runtime_directory(workspace) / "control" / "sync.json").read_text(encoding="utf-8"))["revision"], 1)
 
 
 if __name__ == "__main__":

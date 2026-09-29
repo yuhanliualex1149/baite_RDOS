@@ -1,0 +1,40 @@
+name: Runner candidate (macOS + Windows)
+on:
+  push:
+    branches: [codex/windows-runner-onboarding]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      BAITE_DISABLE_EXTERNAL_SYNC: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: ${{ startsWith(matrix.os, 'windows') && 'x64' || 'arm64' }}
+      - name: Install test and timezone dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install --require-hashes --only-binary=:all: -r runner/requirements.lock
+          python -m pip install -r tests/requirements.txt
+          python -m playwright install chromium
+      - name: API, filesystem, installer and existing regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Three isolated Runners, offline recovery, ACK and credential rotation
+        run: python tests/e2e_demo.py
+      - name: macOS LaunchAgent isolated acceptance
+        if: runner.os == 'macOS'
+        run: python tests/macos_installer_smoke.py --local-runtime
+      - name: Browser onboarding and one-time credential UI
+        run: python tests/browser_onboarding.py

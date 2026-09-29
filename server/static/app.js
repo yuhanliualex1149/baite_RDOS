@@ -42,6 +42,7 @@ async function api(path, options = {}) {
 
 function showLogin() {
   state.admin = null;
+  if ($("#config-dialog").open) $("#config-dialog").close();
   $("#app-view").classList.add("hidden");
   $("#login-view").classList.remove("hidden");
 }
@@ -93,7 +94,7 @@ function renderQueue() {
 
 function renderRunners() {
   const runners = state.overview?.runners || [];
-  $("#runner-list").innerHTML = runners.length ? runners.map((runner) => `<article class="runner-card"><div class="row"><h3>${escapeHtml(runner.display_name)}</h3>${pill(runner.enabled ? (runner.online ? "Online" : "Offline") : "Disabled", runner.online ? "good" : runner.enabled ? "warn" : "")}</div><p class="mono">${escapeHtml(runner.id)}</p><dl><dt>Workspace</dt><dd>${escapeHtml(runner.workspace_path)}</dd><dt>最后心跳</dt><dd>${formatTime(runner.last_seen_at)}</dd><dt>同步 Revision</dt><dd>${runner.last_synced_revision}</dd><dt>同步健康</dt><dd>${escapeHtml(runner.sync_health)} · 失败 ${runner.sync_failure_count} 次</dd></dl><div class="actions"><button class="secondary" data-action="runner-rename" data-id="${runner.id}" data-name="${escapeHtml(runner.display_name)}">改名</button><button class="secondary" data-action="runner-toggle" data-id="${runner.id}" data-enabled="${runner.enabled ? "1" : "0"}">${runner.enabled ? "停用" : "启用"}</button><button class="secondary" data-action="runner-rotate" data-id="${runner.id}">轮换 Token</button><button class="secondary" data-action="runner-retry" data-id="${runner.id}">重新同步</button></div></article>`).join("") : empty("还没有节点。点击“创建节点”开始。");
+  $("#runner-list").innerHTML = runners.length ? runners.map((runner) => `<article class="runner-card"><div class="row"><h3>${escapeHtml(runner.display_name)}</h3>${pill(runner.enabled ? (runner.online ? "Online" : "Offline") : "Disabled", runner.online ? "good" : runner.enabled ? "warn" : "")}</div><p class="mono">${escapeHtml(runner.id)}</p><dl><dt>建议 Workspace</dt><dd>${escapeHtml(runner.workspace_path || "由本机安装器确定")}</dd><dt>实际 Workspace</dt><dd>${escapeHtml(runner.actual_workspace || "尚未回报")}</dd><dt>系统 / 版本</dt><dd>${escapeHtml(runner.platform || "未知")} / ${escapeHtml(runner.runner_version || "未知")}</dd><dt>最后心跳</dt><dd>${formatTime(runner.last_seen_at)}</dd><dt>同步 Revision</dt><dd>${runner.last_synced_revision}</dd><dt>同步健康</dt><dd>${escapeHtml(runner.sync_health)} · 失败 ${runner.sync_failure_count} 次</dd></dl><div class="actions"><button class="secondary" data-action="runner-onboarding" data-id="${runner.id}">接入指令</button><button class="secondary" data-action="runner-rename" data-id="${runner.id}" data-name="${escapeHtml(runner.display_name)}">改名</button><button class="secondary" data-action="runner-toggle" data-id="${runner.id}" data-enabled="${runner.enabled ? "1" : "0"}">${runner.enabled ? "停用" : "启用"}</button><button class="secondary" data-action="runner-rotate" data-id="${runner.id}">轮换 Token</button><button class="secondary" data-action="runner-retry" data-id="${runner.id}">重新同步</button></div></article>`).join("") : empty("还没有节点。点击“创建节点”开始。");
 }
 
 function renderRules() {
@@ -239,15 +240,47 @@ function selectPage(page) {
   $("#page-title").textContent = titles[page];
 }
 
-function showConfig(config) {
+function showConfig(config, runnerId = config?.runner_id) {
   state.currentConfig = config;
-  $("#config-json").textContent = JSON.stringify(config, null, 2);
+  state.onboardingRunner = runnerId;
+  $("#config-secret").classList.toggle("hidden", !config);
+  $("#config-unavailable").classList.toggle("hidden", !!config);
+  $("#config-json").textContent = config ? JSON.stringify(config, null, 2) : "";
   if (state.configUrl) URL.revokeObjectURL(state.configUrl);
-  state.configUrl = URL.createObjectURL(new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }));
-  $("#download-config").href = state.configUrl;
-  $("#download-config").download = `runner-${config.runner_id}.json`;
+  state.configUrl = config ? URL.createObjectURL(new Blob([JSON.stringify(config, null, 2)], { type: "application/json" })) : null;
+  $("#download-config").href = state.configUrl || "#";
+  $("#download-config").download = `runner-${runnerId}.json`;
   $("#config-dialog").showModal();
+  loadOnboarding();
 }
+
+async function loadOnboarding() {
+  const runnerId = state.onboardingRunner;
+  const platform = $("#onboarding-platform").value;
+  const requestId = state.onboardingRequest = (state.onboardingRequest || 0) + 1;
+  $("#onboarding-text").value = "";
+  $("#copy-onboarding").disabled = true;
+  try {
+    const result = await api(`/api/admin/runners/${runnerId}/onboarding?platform=${platform}`);
+    if (requestId !== state.onboardingRequest || !$("#config-dialog").open) return;
+    $("#onboarding-text").value = result.instructions;
+    $("#copy-onboarding").disabled = false;
+  } catch (error) { toast(error.message, true); }
+}
+
+$("#onboarding-platform").addEventListener("change", loadOnboarding);
+$("#copy-onboarding").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#onboarding-text").value); toast("接入指令已复制，不含 Token"); }
+  catch { $("#onboarding-text").select(); toast("浏览器未允许剪贴板访问，请复制已选中的指令"); }
+});
+$("#config-dialog").addEventListener("close", () => {
+  state.currentConfig = null; state.onboardingRunner = null; state.onboardingRequest++;
+  if (state.configUrl) URL.revokeObjectURL(state.configUrl);
+  state.configUrl = null;
+  $("#config-json").textContent = "";
+  $("#onboarding-text").value = "";
+  $("#download-config").removeAttribute("href");
+});
 
 async function proposalDecision(id, decision) {
   let feedback = "";
@@ -325,6 +358,7 @@ document.addEventListener("click", async (event) => {
       }
       case "runner-toggle": await api(`/api/admin/runners/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: button.dataset.enabled !== "1" }) }); await refreshAll(); break;
       case "runner-rotate": { const result = await api(`/api/admin/runners/${id}/rotate-token`, { method: "POST", body: "{}" }); showConfig(result.config); await refreshAll(); break; }
+      case "runner-onboarding": showConfig(null, id); break;
       case "runner-retry": await api(`/api/admin/runners/${id}/retry-sync`, { method: "POST", body: "{}" }); toast("已允许 Runner 重新同步"); await refreshAll(); break;
       case "project-select": await openProject(id); break;
       case "project-edit": fillProjectForm(state.projectDetail); break;

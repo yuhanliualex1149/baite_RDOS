@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -159,7 +159,7 @@ def _backup_legacy_database() -> None:
     path = db_path()
     if path != DEFAULT_DB_PATH or not path.exists():
         return
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         legacy = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents'"
         ).fetchone()
@@ -180,7 +180,7 @@ def _backup_database_for_schema(target_version: int) -> None:
     if not path.exists():
         return
     try:
-        with sqlite3.connect(path) as conn:
+        with closing(sqlite3.connect(path)) as conn:
             has_settings = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'"
             ).fetchone()
@@ -239,7 +239,7 @@ def next_workday_nine() -> str:
 
 def init_db() -> None:
     _backup_legacy_database()
-    _backup_database_for_schema(4)
+    _backup_database_for_schema(5)
     with connection() as conn:
         if _table_exists(conn, "settings"):
             _rename_legacy_tables(conn)
@@ -567,6 +567,9 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE runner_nodes ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''"
             )
+        for column in ("platform", "runner_version", "actual_workspace"):
+            if column not in runner_columns:
+                conn.execute(f"ALTER TABLE runner_nodes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
         now = utc_now()
         receipt_columns = {row["name"] for row in conn.execute("PRAGMA table_info(event_receipts)")}
@@ -642,7 +645,7 @@ def init_db() -> None:
             """,
             (workflow_token, workflow_url, workflow_hash),
         )
-        _set_setting(conn, "schema_version", "4")
+        _set_setting(conn, "schema_version", "5")
 
 
 def _import_legacy_rag(conn: sqlite3.Connection) -> None:
@@ -834,7 +837,7 @@ def list_runners() -> List[Dict[str, Any]]:
                    last_seen_at, current_focus, status, progress_summary,
                    needs_collaboration, progress_updated_at, last_synced_revision,
                    sync_health, sync_failure_count, last_sync_success_at,
-                   last_sync_error, retry_nonce
+                   last_sync_error, retry_nonce, platform, runner_version, actual_workspace
             FROM runner_nodes ORDER BY created_at, display_name
             """
         ).fetchall()
@@ -920,11 +923,17 @@ def retry_runner_sync(runner_id: str) -> Dict[str, Any]:
     return get_runner(runner_id) or {}
 
 
-def heartbeat(runner_id: str) -> None:
+def heartbeat(runner_id: str, runtime: Optional[Dict[str, str]] = None) -> None:
     with connection() as conn:
+        updates = ["last_seen_at = ?"]
+        values = [utc_now()]
+        for field in ("platform", "runner_version", "actual_workspace"):
+            if runtime and field in runtime:
+                updates.append(f"{field} = ?")
+                values.append(runtime[field])
         cursor = conn.execute(
-            "UPDATE runner_nodes SET last_seen_at = ? WHERE id = ? AND enabled = 1",
-            (utc_now(), runner_id),
+            f"UPDATE runner_nodes SET {', '.join(updates)} WHERE id = ? AND enabled = 1",
+            (*values, runner_id),
         )
         if cursor.rowcount != 1:
             raise LookupError("runner_not_found")
