@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Type
+from urllib.parse import urlsplit
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -62,12 +63,17 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.middleware("http")
 async def admin_origin_guard(request: Request, call_next):
-    protected = request.url.path.startswith(("/api/admin/", "/api/auth/"))
+    path = request.scope["path"]
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    if root_path and path.startswith(root_path + "/"):
+        path = path[len(root_path):]
+    protected = path.startswith(("/api/admin/", "/api/auth/"))
     if protected and request.method not in ("GET", "HEAD", "OPTIONS"):
-        if request.headers.get("origin") != _public_url():
+        public = urlsplit(_public_url())
+        if request.headers.get("origin") != f"{public.scheme}://{public.netloc}":
             return JSONResponse({"detail": "管理操作必须来自本控制台"}, status_code=403)
     response = await call_next(request)
-    if request.url.path.startswith("/api/"):
+    if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -292,6 +298,10 @@ def _public_url() -> str:
     return os.environ.get("BAITE_PUBLIC_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
+def _cookie_path() -> str:
+    return urlsplit(_public_url()).path.rstrip("/") + "/"
+
+
 def _online(last_seen_at: Optional[str]) -> bool:
     if not last_seen_at:
         return False
@@ -348,7 +358,7 @@ def login(payload: LoginInput, response: Response) -> Dict[str, Any]:
         httponly=True,
         secure=_cookie_secure(),
         samesite="strict",
-        path="/",
+        path=_cookie_path(),
     )
     return {"admin": db.admin_profile()}
 
@@ -361,7 +371,7 @@ def logout(
 ) -> Dict[str, bool]:
     if session_token:
         db.delete_admin_session(session_token)
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(SESSION_COOKIE, path=_cookie_path())
     return {"ok": True}
 
 
@@ -380,7 +390,7 @@ def change_password(
         db.change_admin_password(payload.current_password, payload.new_password)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="当前密码不正确") from exc
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(SESSION_COOKIE, path=_cookie_path())
     return {"ok": True, "login_required": True}
 
 

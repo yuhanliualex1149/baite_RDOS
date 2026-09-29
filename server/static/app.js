@@ -1,4 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
+const basePath = new URL("..", document.currentScript.src).pathname.replace(/\/$/, "");
 const state = { admin: null, overview: null, rules: null, skills: [], proposals: [], rag: null, projects: [], projectDetail: null, selectedProjectId: null, workflow: null, currentConfig: null };
 const titles = { overview: "运行概览", projects: "项目管理", queue: "管理员待办", runners: "Runner 节点", rules: "Global Rules", skills: "Shared Skills", rag: "Selected RAG" };
 
@@ -25,7 +26,7 @@ function toast(message, error = false) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(basePath + path, {
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,

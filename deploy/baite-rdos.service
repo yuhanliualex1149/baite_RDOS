@@ -15,7 +15,7 @@ Environment=HOME=/var/lib/baite-rdos
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PATH=/opt/baite-rdos/tools/bin:/usr/local/bin:/usr/bin:/bin
 # Shell append works on the existing Alibaba Linux systemd 239 (append: needs 240).
-ExecStart=/bin/sh -c 'exec /opt/baite-rdos/current/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8010 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1 >> /var/log/baite-rdos/panel.log 2>&1'
+ExecStart=/bin/sh -c 'exec /opt/baite-rdos/current/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8010 --workers 1 --root-path /baite-rdos --proxy-headers --forwarded-allow-ips=127.0.0.1 >> /var/log/baite-rdos/panel.log 2>&1'
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=180

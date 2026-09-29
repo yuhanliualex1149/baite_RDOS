@@ -46,6 +46,30 @@ class CloudApiTest(unittest.TestCase):
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(self.client.get("/api/health").json()["app_release"], "test-sha")
 
+    def test_subpath_assets_origin_cookie_and_runner_config(self):
+        from server.main import app
+        with patch.dict(os.environ, {"BAITE_PUBLIC_URL": "https://yjmt.cn/baite-rdos", "BAITE_COOKIE_SECURE": "true"}):
+            with TestClient(app, root_path="/baite-rdos", base_url="https://yjmt.cn") as client:
+                prefix = "/baite-rdos"
+                page = client.get(prefix + "/")
+                self.assertIn('href="static/styles.css"', page.text)
+                self.assertEqual(client.get(prefix + "/static/app.js").status_code, 200)
+                body = {"username": "admin", "password": "AdminPassword123!"}
+                self.assertEqual(client.post(prefix + "/api/auth/login", json=body).status_code, 403)
+                client.headers["Origin"] = "https://yjmt.cn"
+                result = client.post(prefix + "/api/auth/login", json=body)
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertIn("Path=/baite-rdos/", result.headers["set-cookie"])
+                self.assertEqual(result.headers["cache-control"], "no-store")
+                runner = client.post(prefix + "/api/admin/runners", json={"display_name": "subpath-test", "workspace": self.temp_dir.name})
+                self.assertEqual(runner.status_code, 201, runner.text)
+                self.assertEqual(runner.json()["item"]["config"]["control_url"], "https://yjmt.cn/baite-rdos")
+                rejected = client.put(prefix + "/api/admin/global-rules", headers={"Origin": "https://other.example"}, json={"content": "bad"})
+                self.assertEqual(rejected.status_code, 403)
+                logout = client.post(prefix + "/api/auth/logout")
+                self.assertIn("Path=/baite-rdos/", logout.headers["set-cookie"])
+                self.assertEqual(client.get(prefix + "/api/admin/overview").status_code, 401)
+
     def test_receipt_conflicts_and_concurrent_retries(self):
         self.login()
         first, second = self.create_runner("first"), self.create_runner("second")

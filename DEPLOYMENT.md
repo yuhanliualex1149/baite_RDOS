@@ -1,19 +1,20 @@
 # RDOS 云端测试部署与恢复
 
-目标：`https://rdos.yjmt.cn`。云端只运行 Panel/API/SQLite；Mac 运行 Runner、Workspace、Agent。是否上线以验收记录为准，模板存在不代表部署成功。
+目标：`https://yjmt.cn/baite-rdos/`（2026-09-29 用户选择改用官网子路径，暂不变更 DNS）。云端只运行 Panel/API/SQLite；Mac 运行 Runner、Workspace、Agent。是否上线以验收记录为准，模板存在不代表部署成功。
 
 ## 发布边界
 
 - 云端全新数据库，不复制本地凭证、数据库、测试记录或 Workspace。
 - Human 使用 `shared_admin`；本轮仅显示名称为 `yuhan` 的测试节点，Runner ID 动态生成，独立 Token。
-- Python 3.12 独立环境，单 worker，监听 `127.0.0.1:8010`；独立 Nginx 站点提供 443。
+- Python 3.12 独立环境，单 worker，监听 `127.0.0.1:8010`；独立 Nginx 子路径配置，沿用官网 HTTPS。
+- 子路径与官网共用浏览器 Origin，Cookie Path 不是安全隔离边界。官网同源脚本也能发起 RDOS 请求；本轮仅测试，独立子域的隔离方案延后。
 - 外部同步先关闭。日报只写用户指定测试文件夹的 `RDOS 项目进展/` 子目录。
 - 本次 schema 4：旧回执没有内容 Hash 时，重试返回 409。Server 和 Runner 必须一起更新到新协议。
 - 不改官网、YXXZ、福雀来的路由，不关已有维护入口；不包含 Windows、OSS 或正式人员接入。
 
 ## 1. 只读预检
 
-运行 `bash deploy/preflight.sh` 并保存带时间的输出。核对系统、资源、8010、sudo、Nginx 全部 include、证书工具、DNS 管理权。8010 占用则停止，不抢占端口。
+运行 `bash deploy/preflight.sh` 并保存带时间的输出。核对系统、资源、8010、sudo、Nginx 全部 include 和现有证书。8010 占用则停止，不抢占端口。
 
 现有 Alibaba Linux 3 / systemd 239 可用本模板；日志通过 shell append，未使用需要 systemd 240 的 `StandardOutput=append:`。不替换系统 Python，单独安装 3.12；依据实际官方软件仓库选择安装方式，不升级整机。
 
@@ -34,13 +35,14 @@ sudo bash deploy/prepare_release.sh <40位提交SHA>
 
 脚本创建系统用户、固定 SHA 的 release 和虚拟环境，运行全部单元测试及 E2E。成功才写 `.verified`；只准备代码，不切换服务或修改 Nginx。
 
+若服务器无法稳定连接 GitHub，可在已核实远端 SHA 的本地 checkout 使用 `git archive <SHA>`，通过 SSH 传输并比对两端 SHA-256，再在目标 release 创建独立环境、运行相同测试；不能上传工作目录或凭证代替发布归档。
+
 ```text
 /opt/baite-rdos/releases/<SHA>/   代码、.venv、release.env，root 所有
 /opt/baite-rdos/current          当前 release 的符号链接
 /opt/baite-rdos/previous         上次 release 的符号链接
 /opt/baite-rdos/tools/bin/       已验证并固定版本的 lark-cli
 /etc/baite-rdos/rdos.env         root:baite-rdos 0640
-/etc/baite-rdos/tls/             HTTPS 证书和私钥
 /var/lib/baite-rdos/baite.db     持久数据库
 /var/lib/baite-rdos/backups/     0700 目录，0600 备份
 /var/log/baite-rdos/             0700 日志目录
@@ -63,23 +65,28 @@ sudo bash deploy/activate_release.sh <40位提交SHA>
 
 首次登录后修改密码，确认旧会话失效，移除环境文件中的 `BAITE_ADMIN_PASSWORD` 并重启。Session Secret 必须保留，改变它也会使 Runner Token 的校验失效。
 
-## 3. DNS、证书与独立反向代理
+## 3. 官网子路径与 HTTPS
 
-核实真实公网 IP 后添加 `rdos` A 记录，并检查是否有错误 AAAA。采用 DNS-01 签发证书，自动续期必须可实际执行；每次人工补 TXT 不算自动续期。
+本轮不添加 DNS、不申请新证书，沿用 `yjmt.cn` 的有效证书及其既有续期方式。先核实证书有效期与续期任务，不改其他站点的 TLS 配置。
 
-优先沿用已核实的证书工具，DNS API 使用所需域名的最小权限、root-only 配置，不放入 RDOS 服务环境或 Git。若 DNS 权限或续期条件不具备，HTTPS 阶段保持未完成。
+两个配置文件分开安装，安装前确认目标尚不存在并保存 Nginx 基线：
 
-`deploy/rdos.nginx.conf` 是 **http 级 include 的独立完整站点**，包含 `limit_req_zone`。不要塞进既有 `server`，更不能覆盖官网 `location /`。宝塔通常使用 `/www/server/panel/vhost/nginx/rdos.yjmt.cn.conf`，须先核实 include；只调整 RDOS 的证书路径。
+- `deploy/rdos-rate-limit.nginx.conf` → `/www/server/panel/vhost/nginx/00-baite-rdos-rate-limit.conf`，位于 http 级，只声明限速区。
+- `deploy/rdos-subpath.nginx.conf` → `/www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf`，位于已有 server 内，只添加 `/baite-rdos` 相关 location。不覆盖主站配置或 `location /`。
+- Uvicorn `--root-path /baite-rdos`，Nginx 去掉前缀后转发；环境 `BAITE_PUBLIC_URL=https://yjmt.cn/baite-rdos`。这三处必须一致。
+- 无尾斜杠入口、HTTP、www 主机统一跳到规范 HTTPS 地址。现有其他路径保持原样。
 
 ```bash
 sudo /www/server/nginx/sbin/nginx -t
 sudo /www/server/nginx/sbin/nginx -s reload
-curl -fsS https://rdos.yjmt.cn/api/health
+curl -fsS https://yjmt.cn/baite-rdos/api/health
 ```
 
-不新增 RDOS 80 监听；DNS-01 无需开放 80，已有网站端口保持原样。8010 不加入安全组，必须公网实测不可达。代理头仅信任本机 Nginx；Nginx 覆写客户端转发头。
+不新增监听端口；已有网站端口保持原样。8010 不加入安全组，必须公网实测不可达。代理头仅信任本机 Nginx；Nginx 覆写客户端转发头。
 
-Nginx 登录限速为每 IP 每分钟 5 次、额外突发 5 次、超限 429。所有浏览器管理/认证写操作要求 Origin 精确匹配 `BAITE_PUBLIC_URL`，同站不同子域也拒绝；维护脚本调用也要带正确 Origin 和 Human Cookie。
+Nginx 登录限速为每 IP 每分钟 5 次、额外突发 5 次、超限 429。所有浏览器管理/认证写操作要求 Origin 精确匹配公开 URL 的 scheme/host/port（本轮 `https://yjmt.cn`，不含路径），不同子域也拒绝；维护脚本调用也要带正确 Origin 和 Human Cookie。Cookie Path 为 `/baite-rdos/`，退出及改密使用相同路径清除。
+
+`deploy/rdos.nginx.conf` 仅保留为未来独立子域的备选模板，不与本轮限速配置重复安装。迁移子域需单独确认 DNS、证书、PUBLIC_URL、root-path 和 Mac 配置。
 
 ## 4. Mac Runner
 
@@ -93,7 +100,7 @@ workspace/       全新 Workspace
 logs/            按日轮转，最多 30 份历史日志
 ```
 
-云端注册显示名称 `yuhan`，Workspace 填上述绝对路径；下载一次性 JSON，核实 `control_url=https://rdos.yjmt.cn`，不用旧 Token。安装代码固定 SHA，Python 3.12 独立环境。
+云端注册显示名称 `yuhan`，Workspace 填上述绝对路径；下载一次性 JSON，核实 `control_url=https://yjmt.cn/baite-rdos`，不用旧 Token。安装代码固定 SHA，Python 3.12 独立环境。
 
 ```bash
 python3 deploy/install_macos_runner.py \
@@ -162,7 +169,7 @@ sudo journalctl -u baite-rdos-backup.service --since today
 
 每项保存时间、发布 SHA、动作、预期/实际结果；未执行写“未验收”。
 
-- [ ] HTTPS、证书续期、独立站点、公网 8010 不通。
+- [ ] HTTPS、既有证书续期、子路径资源/API、Cookie Path、公网 8010 不通。
 - [ ] 未登录拒绝、Cookie 属性、改密使旧会话失效、异源拒绝、限速 429。
 - [ ] Runner 不能管理、停用/轮换失效、跨节点事件冲突 409。
 - [ ] Cold Start、Panel 重启、Runner 重启、断网恢复、重复 Event。
@@ -176,4 +183,4 @@ sudo journalctl -u baite-rdos-backup.service --since today
 
 交付地址、已部署 SHA、CLI 版本、Mac 维护说明、逐项证据和未完成项。全部通过后才称“云端＋Mac 测试闭环已验收”。
 
-参考：[FastAPI 反向代理](https://fastapi.tiangolo.com/advanced/behind-a-proxy/)、[DNS-01 验证](https://letsencrypt.org/docs/challenge-types/)。
+参考：[FastAPI 反向代理和路径前缀](https://fastapi.tiangolo.com/advanced/behind-a-proxy/)。
