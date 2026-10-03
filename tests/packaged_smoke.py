@@ -14,7 +14,7 @@ from bootstrapper.core import extract_runtime
 
 def run(binary: Path, argument: str, env: dict) -> None:
     result = subprocess.run([str(binary), argument], env=env, capture_output=True,
-                            text=True, timeout=40, check=False)
+                            text=True, encoding="utf-8", errors="replace", timeout=40, check=False)
     if result.returncode:
         raise AssertionError(f"{binary.name} failed ({result.returncode}): {result.stderr[-1000:]}")
 

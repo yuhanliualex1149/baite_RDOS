@@ -348,6 +348,7 @@ def _runners_with_presence() -> list[Dict[str, Any]]:
     runners = db.list_runners()
     for runner in runners:
         runner["online"] = bool(runner["enabled"] and _online(runner["last_seen_at"]))
+        runner["self_test"] = db.installation_status(runner["id"])["self_test"] if runner["installation_id"] else None
     return runners
 
 

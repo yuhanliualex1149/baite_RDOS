@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import unittest
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -114,7 +115,16 @@ class CoreTest(unittest.TestCase):
             one = core.install(code)
             config = self.root / "install/config.json"
             self.assertEqual(json.loads(config.read_text())["runner_id"], node)
-            self.assertEqual(config.stat().st_mode & 0o077, 0)
+            if os.name == "nt":
+                script = """$acl=Get-Acl -LiteralPath $env:RDOS_PRIVATE_PATH;
+if(-not $acl.AreAccessRulesProtected){exit 2};
+$ids=@($acl.Access | ForEach-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value});
+if($ids | Where-Object {$_ -in @('S-1-1-0','S-1-5-32-545')}){exit 3}"""
+                result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                                        env={**os.environ, "RDOS_PRIVATE_PATH": str(config)}, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            else:
+                self.assertEqual(config.stat().st_mode & 0o077, 0)
             self.assertFalse((self.root / "install/pending.json").exists())
             two = core.install(code)
         self.assertEqual(one["installation_id"], two["installation_id"])

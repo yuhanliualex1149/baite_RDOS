@@ -966,6 +966,9 @@ class _LogStream:
 
 def main() -> None:
     os.umask(0o077)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     if getattr(sys, "frozen", False):
         import certifi
         os.environ.setdefault("SSL_CERT_FILE", certifi.where())

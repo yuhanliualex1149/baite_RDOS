@@ -45,6 +45,7 @@ class EnrollmentTest(unittest.TestCase):
         self.assertTrue(first.json()["ack"])
         self.assertTrue(self.client.post("/api/runner/events", headers=auth, json=event).json()["duplicate"])
         self.assertEqual(self.client.get("/api/admin/runners/" + item["id"] + "/installation").json()["self_test"]["event_id"], event["event_id"])
+        self.assertEqual(self.client.get("/api/admin/runners").json()["items"][0]["self_test"]["event_id"], event["event_id"])
         self.assertEqual(self.client.get("/api/runner/installation-status", headers=auth).json()["self_test"]["event_id"], event["event_id"])
 
     def test_reissue_revoke_and_legacy_runner(self):
