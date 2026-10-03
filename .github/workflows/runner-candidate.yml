@@ -1,7 +1,7 @@
 name: Runner candidate (macOS + Windows)
 on:
   push:
-    branches: [codex/windows-runner-onboarding]
+    branches: [codex/windows-runner-onboarding, codex/runner-bootstrapper]
   workflow_dispatch:
 permissions:
   contents: read
@@ -41,3 +41,24 @@ jobs:
       - name: Browser onboarding and one-time credential UI
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python tests/browser_onboarding.py
+      - name: Build standalone Runtime and graphical installer
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          python -m pip install -r bootstrapper/build-requirements.txt
+          python deploy/build_bootstrapper.py --version 0.1.0-candidate --output bootstrap-artifacts
+      - name: Frozen artifact smoke test
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: python tests/packaged_smoke.py bootstrap-artifacts
+      - name: Frozen Runtime end-to-end acceptance
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: python tests/frozen_runtime_e2e.py bootstrap-artifacts
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        with:
+          name: rdos-bootstrap-${{ matrix.os }}
+          path: |
+            bootstrap-artifacts/*.dmg
+            bootstrap-artifacts/*.exe
+            bootstrap-artifacts/*.tar.gz
+            bootstrap-artifacts/*.zip
+          retention-days: 14

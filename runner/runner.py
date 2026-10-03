@@ -66,6 +66,9 @@ def load_config(path: Path) -> Dict[str, str]:
     if missing:
         raise ValueError(f"Runner 配置缺少字段：{', '.join(sorted(missing))}")
     config = {key: str(payload[key]).strip() for key in expected}
+    for optional in ("installation_id", "bootstrapper_version", "protocol_version"):
+        if payload.get(optional):
+            config[optional] = str(payload[optional]).strip()
     if not all(config.values()):
         raise ValueError("Runner 配置字段不能为空")
     workspace = Path(config["workspace"]).expanduser()
@@ -840,6 +843,9 @@ def run(config_path: Path, poll_seconds: float) -> None:
     release = json.loads(release_file.read_text(encoding="utf-8"))["release"] if release_file.exists() else "development"
     runtime_info = {"platform": "windows" if WINDOWS else platform.system().lower(),
                     "runner_version": release, "actual_workspace": str(workspace)}
+    for optional in ("installation_id", "bootstrapper_version", "protocol_version"):
+        if config.get(optional):
+            runtime_info[optional] = config[optional]
     state = _load_state(workspace)
     recovered = recover_release(workspace, workspace / ".runner" / "releases")
     state["revision"] = int(recovered["revision"]) if recovered else -1
@@ -960,6 +966,9 @@ class _LogStream:
 
 def main() -> None:
     os.umask(0o077)
+    if getattr(sys, "frozen", False):
+        import certifi
+        os.environ.setdefault("SSL_CERT_FILE", certifi.where())
     parser = argparse.ArgumentParser(description="Baite AI R&D OS Local Runner")
     parser.add_argument("--config", type=Path, required=True, help="Runner 配置 JSON")
     parser.add_argument("--poll-seconds", type=float, default=5.0)

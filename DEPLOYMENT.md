@@ -1,5 +1,7 @@
 # RDOS 云端测试部署与恢复
 
+> 新版图形安装器、独立 Runtime、接入码、下载清单与实机验收见 [Bootstrapper v0.1](docs/bootstrapper_v0.1.md)。下文第 4 节是旧配置文件接入方式，不应作为新用户默认安装说明。
+
 目标：`https://yjmt.cn/baite-rdos/`（2026-09-29 用户选择改用官网子路径，暂不变更 DNS）。云端只运行 Panel/API/SQLite；Mac 运行 Runner、Workspace、Agent。是否上线以验收记录为准，模板存在不代表部署成功。
 
 ## 发布边界

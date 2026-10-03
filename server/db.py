@@ -239,7 +239,7 @@ def next_workday_nine() -> str:
 
 def init_db() -> None:
     _backup_legacy_database()
-    _backup_database_for_schema(5)
+    _backup_database_for_schema(6)
     with connection() as conn:
         if _table_exists(conn, "settings"):
             _rename_legacy_tables(conn)
@@ -351,6 +351,24 @@ def init_db() -> None:
                 event_type TEXT NOT NULL,
                 payload_hash TEXT NOT NULL,
                 response_json TEXT NOT NULL,
+                received_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS runner_enrollments (
+                runner_id TEXT PRIMARY KEY REFERENCES runner_nodes(id),
+                code_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                installation_id TEXT,
+                candidate_hash TEXT,
+                claimed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS installation_self_tests (
+                event_id TEXT PRIMARY KEY,
+                runner_id TEXT NOT NULL REFERENCES runner_nodes(id),
+                installation_id TEXT NOT NULL,
+                shared_revision INTEGER NOT NULL,
+                project_count INTEGER NOT NULL,
                 received_at TEXT NOT NULL
             );
 
@@ -567,7 +585,7 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE runner_nodes ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''"
             )
-        for column in ("platform", "runner_version", "actual_workspace"):
+        for column in ("platform", "runner_version", "actual_workspace", "installation_id", "bootstrapper_version", "protocol_version"):
             if column not in runner_columns:
                 conn.execute(f"ALTER TABLE runner_nodes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
@@ -645,7 +663,7 @@ def init_db() -> None:
             """,
             (workflow_token, workflow_url, workflow_hash),
         )
-        _set_setting(conn, "schema_version", "5")
+        _set_setting(conn, "schema_version", "6")
 
 
 def _import_legacy_rag(conn: sqlite3.Connection) -> None:
@@ -828,6 +846,86 @@ def create_runner(display_name: str, workspace_path: str, public_url: str) -> Di
     return item
 
 
+def issue_enrollment(runner_id: str) -> Dict[str, str]:
+    code = runner_id + "." + secrets.token_urlsafe(32)
+    expires = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        runner = conn.execute("SELECT enabled FROM runner_nodes WHERE id = ?", (runner_id,)).fetchone()
+        if not runner:
+            raise LookupError("runner_not_found")
+        if not runner["enabled"]:
+            raise ValueError("runner_disabled")
+        conn.execute(
+            """INSERT INTO runner_enrollments(runner_id, code_hash, expires_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(runner_id) DO UPDATE SET code_hash=excluded.code_hash,
+               expires_at=excluded.expires_at, installation_id=NULL,
+               candidate_hash=NULL, claimed_at=NULL""",
+            (runner_id, hash_token(code), expires),
+        )
+    return {"runner_id": runner_id, "enrollment_code": code, "expires_at": expires}
+
+
+def revoke_enrollment(runner_id: str) -> None:
+    with connection() as conn:
+        if not conn.execute("SELECT 1 FROM runner_nodes WHERE id = ?", (runner_id,)).fetchone():
+            raise LookupError("runner_not_found")
+        conn.execute("DELETE FROM runner_enrollments WHERE runner_id = ? AND claimed_at IS NULL", (runner_id,))
+
+
+def claim_enrollment(runner_id: str, code: str, installation_id: str, candidate_token: str) -> Dict[str, str]:
+    with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """SELECT e.*, r.enabled FROM runner_enrollments e
+               JOIN runner_nodes r ON r.id=e.runner_id WHERE e.runner_id=?""", (runner_id,)
+        ).fetchone()
+        if not row or not row["enabled"] or not hmac.compare_digest(row["code_hash"], hash_token(code)):
+            raise ValueError("invalid_enrollment")
+        if row["claimed_at"]:
+            if row["installation_id"] != installation_id or not hmac.compare_digest(
+                row["candidate_hash"] or "", hash_token(candidate_token)
+            ):
+                raise ValueError("enrollment_already_claimed")
+        else:
+            if row["expires_at"] <= utc_now():
+                raise ValueError("enrollment_expired")
+            now = utc_now()
+            conn.execute(
+                """UPDATE runner_nodes SET token_hash=?, installation_id=?, updated_at=?,
+                   last_seen_at=NULL, last_synced_revision=-1, sync_health='unknown' WHERE id=?""",
+                (hash_token(candidate_token), installation_id, now, runner_id),
+            )
+            conn.execute(
+                """UPDATE runner_enrollments SET installation_id=?, candidate_hash=?, claimed_at=?
+                   WHERE runner_id=?""",
+                (installation_id, hash_token(candidate_token), now, runner_id),
+            )
+    return {"runner_id": runner_id, "installation_id": installation_id}
+
+
+def installation_status(runner_id: str) -> Dict[str, Any]:
+    with connection() as conn:
+        runner = conn.execute("SELECT * FROM runner_nodes WHERE id=?", (runner_id,)).fetchone()
+        if not runner:
+            raise LookupError("runner_not_found")
+        event = conn.execute(
+            """SELECT event_id, received_at, shared_revision, project_count
+               FROM installation_self_tests WHERE runner_id=? AND installation_id=?
+               ORDER BY received_at DESC LIMIT 1""",
+            (runner_id, runner["installation_id"] or ""),
+        ).fetchone()
+    return {
+        "runner_id": runner_id,
+        "installation_id": runner["installation_id"] or "",
+        "heartbeat_at": runner["last_seen_at"],
+        "shared_revision": runner["last_synced_revision"],
+        "sync_health": runner["sync_health"],
+        "self_test": dict(event) if event else None,
+    }
+
+
 def list_runners() -> List[Dict[str, Any]]:
     with connection() as conn:
         rows = conn.execute(
@@ -837,7 +935,8 @@ def list_runners() -> List[Dict[str, Any]]:
                    last_seen_at, current_focus, status, progress_summary,
                    needs_collaboration, progress_updated_at, last_synced_revision,
                    sync_health, sync_failure_count, last_sync_success_at,
-                   last_sync_error, retry_nonce, platform, runner_version, actual_workspace
+                   last_sync_error, retry_nonce, platform, runner_version, actual_workspace,
+                   installation_id, bootstrapper_version, protocol_version
             FROM runner_nodes ORDER BY created_at, display_name
             """
         ).fetchall()
@@ -925,9 +1024,12 @@ def retry_runner_sync(runner_id: str) -> Dict[str, Any]:
 
 def heartbeat(runner_id: str, runtime: Optional[Dict[str, str]] = None) -> None:
     with connection() as conn:
+        expected = conn.execute("SELECT installation_id FROM runner_nodes WHERE id=?", (runner_id,)).fetchone()
+        if runtime and runtime.get("installation_id") and expected and expected["installation_id"] != runtime["installation_id"]:
+            raise ValueError("installation_id_mismatch")
         updates = ["last_seen_at = ?"]
         values = [utc_now()]
-        for field in ("platform", "runner_version", "actual_workspace"):
+        for field in ("platform", "runner_version", "actual_workspace", "bootstrapper_version", "protocol_version"):
             if runtime and field in runtime:
                 updates.append(f"{field} = ?")
                 values.append(runtime[field])
@@ -1249,6 +1351,17 @@ def process_runner_event(runner_id: str, event: Dict[str, Any]) -> Tuple[Dict[st
             response = {"kind": "collaboration_response", "collaboration_id": item["id"]}
         elif event_type == "project_update":
             response = _process_project_update(conn, runner_id, event, now)
+        elif event_type == "installation_self_test":
+            claimed = conn.execute("SELECT installation_id FROM runner_nodes WHERE id=?", (runner_id,)).fetchone()
+            if not claimed or claimed["installation_id"] != event["installation_id"]:
+                raise ValueError("installation_id_mismatch")
+            conn.execute(
+                """INSERT INTO installation_self_tests(event_id,runner_id,installation_id,
+                   shared_revision,project_count,received_at) VALUES (?,?,?,?,?,?)""",
+                (event_id, runner_id, event["installation_id"], event["shared_revision"],
+                 event["project_count"], now),
+            )
+            response = {"kind": "installation_self_test", "event_id": event_id}
         else:
             raise ValueError("unsupported_event_type")
 

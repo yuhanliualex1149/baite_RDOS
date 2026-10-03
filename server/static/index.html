@@ -79,7 +79,7 @@
           <form id="runner-form" class="panel compact-form hidden">
             <label>显示名<input id="runner-name" placeholder="例如：user1" required /></label>
             <label class="grow">建议 Workspace（可选）<input id="runner-workspace" placeholder="留空由本机安装器确定；也可填 Windows / POSIX 绝对路径" /></label>
-            <button class="primary" type="submit">创建并生成配置</button>
+            <button class="primary" type="submit">创建并生成接入码</button>
           </form>
           <div id="runner-list" class="card-grid"></div>
         </section>
@@ -112,15 +112,22 @@
 
     <dialog id="config-dialog">
       <form method="dialog" class="dialog-card">
-        <p class="eyebrow">RUNNER ONBOARDING · CANDIDATE</p><h3>Runner 接入交付</h3>
-        <p>候选版本，仅供测试。Windows 10/11 与 WorkBuddy 实机验收待完成。</p>
+        <p class="eyebrow">RUNNER BOOTSTRAPPER · INTERNAL TEST</p><h3>Runner 接入交付</h3>
+        <p>用户双击安装器、粘贴一次性接入码；Windows 10/11 实机仍待验收。</p>
+        <section id="enrollment-secret" class="hidden">
+          <p>接入码仅本次显示，24 小时有效。请私下交付，不要粘贴到聊天或日志。</p>
+          <pre id="enrollment-code"></pre>
+          <button id="copy-enrollment" class="primary" type="button">复制接入码</button>
+          <span id="enrollment-expiry"></span>
+        </section>
         <section id="config-secret">
           <p>Token 仅本次显示。私下交付个人配置，不要把它粘贴到聊天或日志。</p>
           <pre id="config-json"></pre>
           <a id="download-config" class="primary" href="#" download>下载个人配置</a>
         </section>
-        <p id="config-unavailable" class="hidden">无法重新读取旧 Token。请使用已保存的个人配置；配置遗失时由管理员主动轮换。</p>
+        <p id="config-unavailable" class="hidden">旧 Token 不可重新读取；如需重新接入，请明确签发新接入码。认领成功前，旧凭证仍有效。</p>
         <label>接入平台<select id="onboarding-platform"><option value="macos">macOS</option><option value="windows">Windows x64</option></select></label>
+        <a id="download-bootstrapper" class="primary hidden" href="#">下载安装器</a>
         <label>交给 Local Agent 的指令（不含凭证）<textarea id="onboarding-text" rows="12" readonly></textarea></label>
         <div class="actions"><button id="copy-onboarding" class="primary" type="button">复制接入指令</button><button class="secondary" value="close">关闭</button></div>
       </form>

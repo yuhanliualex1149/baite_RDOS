@@ -1,4 +1,6 @@
 .venv/
+.build-venv/
+bootstrap-artifacts/
 __pycache__/
 *.pyc
 .DS_Store

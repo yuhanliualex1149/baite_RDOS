@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -105,12 +106,16 @@ class RulesInput(StrictModel):
 class RunnerCreateInput(StrictModel):
     display_name: str = Field(min_length=1, max_length=100)
     workspace: str = Field(default="", max_length=2000)
+    delivery: Literal["config", "enrollment"] = "config"
 
 
 class RunnerHeartbeatInput(StrictModel):
     platform: Optional[Literal["windows", "darwin", "linux", "macos"]] = None
     runner_version: Optional[str] = Field(default=None, max_length=100)
     actual_workspace: Optional[str] = Field(default=None, max_length=2000)
+    installation_id: Optional[str] = Field(default=None, min_length=16, max_length=100)
+    bootstrapper_version: Optional[str] = Field(default=None, max_length=100)
+    protocol_version: Optional[str] = Field(default=None, max_length=100)
 
     @field_validator("actual_workspace")
     @classmethod
@@ -142,6 +147,20 @@ class SyncStatusInput(StrictModel):
 
 class EventBase(StrictModel):
     event_id: str = Field(min_length=8, max_length=200)
+
+
+class InstallationSelfTestEvent(EventBase):
+    type: Literal["installation_self_test"]
+    installation_id: str = Field(min_length=16, max_length=100)
+    shared_revision: int = Field(ge=0)
+    project_count: int = Field(ge=0)
+
+
+class BootstrapClaimInput(StrictModel):
+    runner_id: str = Field(pattern=r"^rnr_[A-Za-z0-9_-]{12,100}$")
+    enrollment_code: str = Field(min_length=32, max_length=200)
+    installation_id: str = Field(min_length=16, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    candidate_token: str = Field(min_length=40, max_length=150, pattern=r"^brt_[A-Za-z0-9_-]+$")
 
 
 class ProgressEvent(EventBase):
@@ -239,6 +258,7 @@ class ProjectUpdateEvent(EventBase):
 
 
 EVENT_MODELS: Dict[str, Type[EventBase]] = {
+    "installation_self_test": InstallationSelfTestEvent,
     "progress": ProgressEvent,
     "activity_record": ActivityEvent,
     "skill_change_proposal": SkillProposalEvent,
@@ -358,6 +378,27 @@ def health() -> Dict[str, str]:
     return {"status": "ok", "app_release": os.environ.get("BAITE_APP_RELEASE", "development")}
 
 
+@app.get("/api/bootstrap/manifest")
+def bootstrap_manifest() -> Dict[str, Any]:
+    path = os.environ.get("BAITE_BOOTSTRAP_MANIFEST_PATH", "")
+    if not path:
+        raise HTTPException(status_code=503, detail="安装包尚未发布")
+    try:
+        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="安装清单不可用") from exc
+    return manifest
+
+
+@app.post("/api/bootstrap/claim")
+def bootstrap_claim(payload: BootstrapClaimInput) -> Dict[str, str]:
+    try:
+        return db.claim_enrollment(payload.runner_id, payload.enrollment_code,
+                                   payload.installation_id, payload.candidate_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/auth/login")
 def login(payload: LoginInput, response: Response) -> Dict[str, Any]:
     if not db.authenticate_admin(payload.username.strip(), payload.password):
@@ -433,7 +474,38 @@ def create_runner(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     item = db.create_runner(payload.display_name.strip(), workspace, _public_url())
+    if payload.delivery == "enrollment":
+        item.pop("runner_token", None)
+        item.pop("config", None)
+        return {"item": item, "enrollment": db.issue_enrollment(item["id"]), "token_visible_once": False}
     return {"item": item, "token_visible_once": True}
+
+
+@app.post("/api/admin/runners/{runner_id}/enrollment")
+def issue_runner_enrollment(runner_id: str, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        return db.issue_enrollment(runner_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Runner 不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/api/admin/runners/{runner_id}/enrollment")
+def revoke_runner_enrollment(runner_id: str, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, bool]:
+    try:
+        db.revoke_enrollment(runner_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Runner 不存在") from exc
+    return {"ok": True}
+
+
+@app.get("/api/admin/runners/{runner_id}/installation")
+def admin_installation_status(runner_id: str, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        return db.installation_status(runner_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Runner 不存在") from exc
 
 
 @app.get("/api/admin/runners/{runner_id}/onboarding")
@@ -718,8 +790,16 @@ def workflow_reference(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, 
 @app.post("/api/runner/heartbeat")
 def runner_heartbeat(payload: Optional[RunnerHeartbeatInput] = None,
                      runner: Dict[str, Any] = Depends(require_runner)) -> Dict[str, bool]:
-    db.heartbeat(runner["id"], payload.model_dump(exclude_none=True) if payload else None)
+    try:
+        db.heartbeat(runner["id"], payload.model_dump(exclude_none=True) if payload else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@app.get("/api/runner/installation-status")
+def runner_installation_status(runner: Dict[str, Any] = Depends(require_runner)) -> Dict[str, Any]:
+    return db.installation_status(runner["id"])
 
 
 @app.get("/api/runner/projects/sync")

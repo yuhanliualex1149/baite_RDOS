@@ -94,7 +94,7 @@ function renderQueue() {
 
 function renderRunners() {
   const runners = state.overview?.runners || [];
-  $("#runner-list").innerHTML = runners.length ? runners.map((runner) => `<article class="runner-card"><div class="row"><h3>${escapeHtml(runner.display_name)}</h3>${pill(runner.enabled ? (runner.online ? "Online" : "Offline") : "Disabled", runner.online ? "good" : runner.enabled ? "warn" : "")}</div><p class="mono">${escapeHtml(runner.id)}</p><dl><dt>建议 Workspace</dt><dd>${escapeHtml(runner.workspace_path || "由本机安装器确定")}</dd><dt>实际 Workspace</dt><dd>${escapeHtml(runner.actual_workspace || "尚未回报")}</dd><dt>系统 / 版本</dt><dd>${escapeHtml(runner.platform || "未知")} / ${escapeHtml(runner.runner_version || "未知")}</dd><dt>最后心跳</dt><dd>${formatTime(runner.last_seen_at)}</dd><dt>同步 Revision</dt><dd>${runner.last_synced_revision}</dd><dt>同步健康</dt><dd>${escapeHtml(runner.sync_health)} · 失败 ${runner.sync_failure_count} 次</dd></dl><div class="actions"><button class="secondary" data-action="runner-onboarding" data-id="${runner.id}">接入指令</button><button class="secondary" data-action="runner-rename" data-id="${runner.id}" data-name="${escapeHtml(runner.display_name)}">改名</button><button class="secondary" data-action="runner-toggle" data-id="${runner.id}" data-enabled="${runner.enabled ? "1" : "0"}">${runner.enabled ? "停用" : "启用"}</button><button class="secondary" data-action="runner-rotate" data-id="${runner.id}">轮换 Token</button><button class="secondary" data-action="runner-retry" data-id="${runner.id}">重新同步</button></div></article>`).join("") : empty("还没有节点。点击“创建节点”开始。");
+  $("#runner-list").innerHTML = runners.length ? runners.map((runner) => `<article class="runner-card"><div class="row"><h3>${escapeHtml(runner.display_name)}</h3>${pill(runner.enabled ? (runner.online ? "Online" : "Offline") : "Disabled", runner.online ? "good" : runner.enabled ? "warn" : "")}</div><p class="mono">${escapeHtml(runner.id)}</p><dl><dt>建议 Workspace</dt><dd>${escapeHtml(runner.workspace_path || "由本机安装器确定")}</dd><dt>实际 Workspace</dt><dd>${escapeHtml(runner.actual_workspace || "尚未回报")}</dd><dt>系统 / 版本</dt><dd>${escapeHtml(runner.platform || "未知")} / ${escapeHtml(runner.runner_version || "未知")}</dd><dt>安装实例</dt><dd>${escapeHtml(runner.installation_id || "尚未使用图形安装器")}</dd><dt>最后心跳</dt><dd>${formatTime(runner.last_seen_at)}</dd><dt>同步 Revision</dt><dd>${runner.last_synced_revision}</dd><dt>同步健康</dt><dd>${escapeHtml(runner.sync_health)} · 失败 ${runner.sync_failure_count} 次</dd></dl><div class="actions"><button class="secondary" data-action="runner-onboarding" data-id="${runner.id}">接入信息</button><button class="secondary" data-action="runner-enroll" data-id="${runner.id}">重新签发接入码</button><button class="secondary" data-action="runner-installation" data-id="${runner.id}">查看自测</button><button class="secondary" data-action="runner-rename" data-id="${runner.id}" data-name="${escapeHtml(runner.display_name)}">改名</button><button class="secondary" data-action="runner-toggle" data-id="${runner.id}" data-enabled="${runner.enabled ? "1" : "0"}">${runner.enabled ? "停用" : "启用"}</button><button class="secondary" data-action="runner-rotate" data-id="${runner.id}">轮换 Token</button><button class="secondary" data-action="runner-retry" data-id="${runner.id}">重新同步</button></div></article>`).join("") : empty("还没有节点。点击“创建节点”开始。");
 }
 
 function renderRules() {
@@ -240,9 +240,12 @@ function selectPage(page) {
   $("#page-title").textContent = titles[page];
 }
 
-function showConfig(config, runnerId = config?.runner_id) {
+function showConfig(config, runnerId = config?.runner_id, enrollment = null) {
   state.currentConfig = config;
   state.onboardingRunner = runnerId;
+  $("#enrollment-secret").classList.toggle("hidden", !enrollment);
+  $("#enrollment-code").textContent = enrollment?.enrollment_code || "";
+  $("#enrollment-expiry").textContent = enrollment ? `有效至 ${formatTime(enrollment.expires_at)}` : "";
   $("#config-secret").classList.toggle("hidden", !config);
   $("#config-unavailable").classList.toggle("hidden", !!config);
   $("#config-json").textContent = config ? JSON.stringify(config, null, 2) : "";
@@ -260,13 +263,23 @@ async function loadOnboarding() {
   const requestId = state.onboardingRequest = (state.onboardingRequest || 0) + 1;
   $("#onboarding-text").value = "";
   $("#copy-onboarding").disabled = true;
+  $("#download-bootstrapper").classList.add("hidden");
   try {
     const result = await api(`/api/admin/runners/${runnerId}/onboarding?platform=${platform}`);
     if (requestId !== state.onboardingRequest || !$("#config-dialog").open) return;
     $("#onboarding-text").value = result.instructions;
     $("#copy-onboarding").disabled = false;
+    if (result.installer_url) {
+      $("#download-bootstrapper").href = result.installer_url;
+      $("#download-bootstrapper").classList.remove("hidden");
+    }
   } catch (error) { toast(error.message, true); }
 }
+
+$("#copy-enrollment").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#enrollment-code").textContent); toast("接入码已复制，请私下交付"); }
+  catch { toast("浏览器不允许复制，请手动复制接入码", true); }
+});
 
 $("#onboarding-platform").addEventListener("change", loadOnboarding);
 $("#copy-onboarding").addEventListener("click", async () => {
@@ -279,6 +292,8 @@ $("#config-dialog").addEventListener("close", () => {
   state.configUrl = null;
   $("#config-json").textContent = "";
   $("#onboarding-text").value = "";
+  $("#enrollment-code").textContent = "";
+  $("#enrollment-secret").classList.add("hidden");
   $("#download-config").removeAttribute("href");
 });
 
@@ -359,6 +374,17 @@ document.addEventListener("click", async (event) => {
       case "runner-toggle": await api(`/api/admin/runners/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: button.dataset.enabled !== "1" }) }); await refreshAll(); break;
       case "runner-rotate": { const result = await api(`/api/admin/runners/${id}/rotate-token`, { method: "POST", body: "{}" }); showConfig(result.config); await refreshAll(); break; }
       case "runner-onboarding": showConfig(null, id); break;
+      case "runner-enroll": {
+        if (!confirm("重新签发接入码？旧接入码立即失效；原 Runner Token 在新设备认领前继续有效。")) break;
+        const enrollment = await api(`/api/admin/runners/${id}/enrollment`, { method: "POST", body: "{}" });
+        showConfig(null, id, enrollment); break;
+      }
+      case "runner-installation": {
+        const detail = await api(`/api/admin/runners/${id}/installation`);
+        const test = detail.self_test;
+        alert(test ? `安装自测已收到：${test.event_id}\n接收时间：${formatTime(test.received_at)}\n共享 revision：${test.shared_revision}\n项目：${test.project_count}` : "尚未收到此安装实例的自测结果");
+        break;
+      }
       case "runner-retry": await api(`/api/admin/runners/${id}/retry-sync`, { method: "POST", body: "{}" }); toast("已允许 Runner 重新同步"); await refreshAll(); break;
       case "project-select": await openProject(id); break;
       case "project-edit": fillProjectForm(state.projectDetail); break;
@@ -407,8 +433,8 @@ $("#show-runner-form").addEventListener("click", () => $("#runner-form").classLi
 $("#runner-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    const result = await api("/api/admin/runners", { method: "POST", body: JSON.stringify({ display_name: $("#runner-name").value, workspace: $("#runner-workspace").value }) });
-    showConfig(result.item.config); event.target.reset(); event.target.classList.add("hidden"); await refreshAll();
+    const result = await api("/api/admin/runners", { method: "POST", body: JSON.stringify({ display_name: $("#runner-name").value, workspace: $("#runner-workspace").value, delivery: "enrollment" }) });
+    showConfig(null, result.item.id, result.enrollment); event.target.reset(); event.target.classList.add("hidden"); await refreshAll();
   } catch (error) { toast(error.message, true); }
 });
 

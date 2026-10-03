@@ -63,22 +63,20 @@ class OnboardingApiTest(unittest.TestCase):
         node = self.create_runner("personal-display-name")
         original = db.get_runner(node["id"])
         endpoint = f"/api/admin/runners/{node['id']}/onboarding"
-        with patch.dict(os.environ, {"BAITE_APP_RELEASE": "b" * 40}):
-            for platform in ("windows", "macos"):
-                result = self.client.get(endpoint, params={"platform": platform})
-                self.assertEqual(result.status_code, 200)
-                text = result.json()["instructions"]
-                self.assertIn(node["id"], text)
-                self.assertIn("b" * 40, text)
-                self.assertIn("runtime.json", text)
-                for secret in (node["runner_token"], node["config"]["workspace"], "personal-display-name"):
-                    self.assertNotIn(secret, text)
-                self.assertEqual(result.json()["channel"], "candidate")
+        for platform in ("windows", "macos"):
+            result = self.client.get(endpoint, params={"platform": platform})
+            self.assertEqual(result.status_code, 200)
+            text = result.json()["instructions"]
+            self.assertIn(node["id"], text)
+            self.assertIn("runtime.json", text)
+            self.assertIn("图形安装器", text)
+            for secret in (node["runner_token"], node["config"]["workspace"], "personal-display-name"):
+                self.assertNotIn(secret, text)
+            self.assertEqual(result.json()["channel"], "internal-test")
         self.assertEqual(db.get_runner(node["id"]), original)
-        with patch.dict(os.environ, {"BAITE_APP_RELEASE": "development"}):
-            result = self.client.get(endpoint).json()
-            self.assertFalse(result["installable"])
-            self.assertIsNone(result["installer_url"])
+        result = self.client.get(endpoint).json()
+        self.assertFalse(result["installable"])
+        self.assertIsNone(result["installer_url"])
         self.client.post("/api/auth/logout")
         self.assertEqual(self.client.get(endpoint, headers=self.headers(node)).status_code, 401)
 
