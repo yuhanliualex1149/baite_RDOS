@@ -116,7 +116,7 @@ class CoreTest(unittest.TestCase):
             config = self.root / "install/config.json"
             self.assertEqual(json.loads(config.read_text())["runner_id"], node)
             if os.name == "nt":
-                script = """$acl=Get-Acl -LiteralPath $env:RDOS_PRIVATE_PATH;
+                script = """$acl=[IO.File]::GetAccessControl($env:RDOS_PRIVATE_PATH);
 if(-not $acl.AreAccessRulesProtected){exit 2};
 $ids=@($acl.Access | ForEach-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value});
 if($ids | Where-Object {$_ -in @('S-1-1-0','S-1-5-32-545')}){exit 3}"""
