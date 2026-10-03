@@ -43,6 +43,7 @@ def main(artifacts: Path):
                                    "--port", str(port), "--log-level", "error"], env=environment,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         runner = None
+        runtime_log = base / "runtime.log"
         try:
             wait_for(lambda: httpx.get(url + "/api/health").status_code == 200, "Panel")
             with httpx.Client(base_url=url, headers={"Origin": url}) as client:
@@ -63,13 +64,19 @@ def main(artifacts: Path):
                 runtime_env = os.environ.copy()
                 for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX"):
                     runtime_env.pop(key, None)
-                runner = subprocess.Popen([str(executable), "--config", str(config), "--poll-seconds", "0.5"],
-                                          env=runtime_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                with runtime_log.open("w", encoding="utf-8") as output:
+                    runner = subprocess.Popen([str(executable), "--config", str(config), "--poll-seconds", "0.5"],
+                                              env=runtime_env, stdout=output, stderr=subprocess.STDOUT)
                 auth = {"Authorization": "Bearer " + token}
                 def synced():
+                    if runner.poll() is not None:
+                        raise AssertionError("Frozen Runner exited: " + runtime_log.read_text(encoding="utf-8", errors="replace")[-1500:])
                     status = client.get("/api/runner/installation-status", headers=auth).json()
                     return status["heartbeat_at"] and status["sync_health"] == "healthy" and (work / "runtime.json").is_file()
-                wait_for(synced, "frozen Runtime heartbeat and snapshot")
+                try:
+                    wait_for(synced, "frozen Runtime heartbeat and snapshot")
+                except AssertionError as exc:
+                    raise AssertionError(str(exc) + "\n" + runtime_log.read_text(encoding="utf-8", errors="replace")[-2000:]) from exc
                 reported = client.get("/api/admin/runners").json()["items"][0]
                 assert reported["runner_version"] == "0.1.0-candidate", reported["runner_version"]
                 revision = json.loads((work / "runtime.json").read_text(encoding="utf-8"))["revision"]

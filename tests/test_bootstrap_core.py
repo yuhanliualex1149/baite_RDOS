@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -40,6 +41,8 @@ class CoreTest(unittest.TestCase):
         return archive
 
     def test_relative_internal_link_is_preserved(self):
+        if os.name == "nt":
+            self.skipTest("Windows 不允许非提权目录创建符号链接；Mac CI 验证保留链接")
         archive = self.archive({"rdos-runner/bin": "ok", "rdos-runner/alias": ("bin",)})
         destination = self.root / "unpacked"
         core.extract_runtime(archive, destination, "tar.gz")
@@ -81,9 +84,16 @@ class CoreTest(unittest.TestCase):
     def test_install_is_private_resumable_and_reuses_same_runtime(self):
         node = "rnr_" + "z" * 12
         code = node + "." + "s" * 43
-        archive = self.archive({"rdos-runner/rdos-runner": "frozen runtime"})
-        manifest = {"protocol_version": "1", "platforms": {"macos-arm64": {"runtime": {
-            "version": "0.1.0-test", "min_bootstrapper_version": "0.1.0", "archive": "tar.gz"}}}}
+        key = "windows-x64" if os.name == "nt" else "macos-arm64"
+        kind = "zip" if os.name == "nt" else "tar.gz"
+        if os.name == "nt":
+            archive = self.root / "runtime.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr("rdos-runner/rdos-runner.exe", "frozen runtime")
+        else:
+            archive = self.archive({"rdos-runner/rdos-runner": "frozen runtime"})
+        manifest = {"protocol_version": "1", "platforms": {key: {"runtime": {
+            "version": "0.1.0-test", "min_bootstrapper_version": "0.1.0", "archive": kind}}}}
         calls = []
         def api(origin, path, data=None, token=""):
             calls.append(path)
@@ -94,7 +104,7 @@ class CoreTest(unittest.TestCase):
             raise AssertionError(path)
         def download(origin, artifact, destination):
             shutil.copy2(archive, destination)
-        with patch.object(core, "platform_key", return_value="macos-arm64"), \
+        with patch.object(core, "platform_key", return_value=key), \
              patch.object(core, "installation_root", return_value=self.root / "install"), \
              patch.object(core, "default_workspace", return_value=self.root / "workspace"), \
              patch.object(core, "api_json", side_effect=api), \

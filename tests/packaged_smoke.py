@@ -39,7 +39,8 @@ if __name__ == "__main__":
         archive = next(output.glob("rdos-runtime-macos-arm64-*.tar.gz"))
         kind = "tar.gz"
     elif os.name == "nt":
-        env["PATH"] = os.path.join(env["SystemRoot"], "System32") + os.pathsep + env["SystemRoot"]
+        system_root = env.get("SystemRoot") or env.get("WINDIR") or r"C:\Windows"
+        env["PATH"] = os.path.join(system_root, "System32") + os.pathsep + system_root
         runtime = output / "dist" / "rdos-runner" / "rdos-runner.exe"
         gui = output / "dist" / "RDOS Runner.exe"
         run(runtime, "--help", env)
