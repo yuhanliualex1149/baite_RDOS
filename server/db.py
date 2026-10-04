@@ -240,7 +240,7 @@ def next_workday_nine() -> str:
 
 def init_db() -> None:
     _backup_legacy_database()
-    _backup_database_for_schema(7)
+    _backup_database_for_schema(8)
     with connection() as conn:
         if _table_exists(conn, "settings"):
             _rename_legacy_tables(conn)
@@ -593,9 +593,13 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE runner_nodes ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''"
             )
-        for column in ("platform", "runner_version", "actual_workspace", "installation_id", "bootstrapper_version", "protocol_version"):
+        for column in ("platform", "runner_version", "actual_workspace", "installation_id", "bootstrapper_version", "protocol_version",
+                       "process_instance_id", "manager_version", "sync_instance_id", "update_current_version",
+                       "update_target_version", "update_state", "update_checked_at", "update_error", "update_reported_at"):
             if column not in runner_columns:
                 conn.execute(f"ALTER TABLE runner_nodes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        if "update_retry_nonce" not in runner_columns:
+            conn.execute("ALTER TABLE runner_nodes ADD COLUMN update_retry_nonce INTEGER NOT NULL DEFAULT 0")
 
         now = utc_now()
         receipt_columns = {row["name"] for row in conn.execute("PRAGMA table_info(event_receipts)")}
@@ -679,7 +683,7 @@ def init_db() -> None:
             """,
             (workflow_token, workflow_url, workflow_hash),
         )
-        _set_setting(conn, "schema_version", "7")
+        _set_setting(conn, "schema_version", "8")
 
 
 def _import_legacy_rag(conn: sqlite3.Connection) -> None:
@@ -938,6 +942,11 @@ def installation_status(runner_id: str) -> Dict[str, Any]:
         "heartbeat_at": runner["last_seen_at"],
         "shared_revision": runner["last_synced_revision"],
         "sync_health": runner["sync_health"],
+        "runner_version": runner["runner_version"],
+        "process_instance_id": runner["process_instance_id"],
+        "sync_instance_id": runner["sync_instance_id"],
+        "manager_version": runner["manager_version"],
+        "update_retry_nonce": runner["update_retry_nonce"],
         "self_test": dict(event) if event else None,
     }
 
@@ -952,7 +961,9 @@ def list_runners() -> List[Dict[str, Any]]:
                    needs_collaboration, progress_updated_at, last_synced_revision,
                    sync_health, sync_failure_count, last_sync_success_at,
                    last_sync_error, retry_nonce, platform, runner_version, actual_workspace,
-                   installation_id, bootstrapper_version, protocol_version
+                   installation_id, bootstrapper_version, protocol_version, process_instance_id,
+                   manager_version, sync_instance_id, update_current_version, update_target_version,
+                   update_state, update_checked_at, update_error, update_reported_at, update_retry_nonce
             FROM runner_nodes ORDER BY created_at, display_name
             """
         ).fetchall()
@@ -1045,7 +1056,8 @@ def heartbeat(runner_id: str, runtime: Optional[Dict[str, str]] = None) -> None:
             raise ValueError("installation_id_mismatch")
         updates = ["last_seen_at = ?"]
         values = [utc_now()]
-        for field in ("platform", "runner_version", "actual_workspace", "bootstrapper_version", "protocol_version"):
+        for field in ("platform", "runner_version", "actual_workspace", "bootstrapper_version", "protocol_version",
+                      "process_instance_id", "manager_version"):
             if runtime and field in runtime:
                 updates.append(f"{field} = ?")
                 values.append(runtime[field])
@@ -1063,6 +1075,7 @@ def update_runner_sync_status(
     health: str,
     failure_count: int,
     error: str,
+    process_instance_id: str = "",
 ) -> Dict[str, Any]:
     now = utc_now()
     success_at = now if health == "healthy" else None
@@ -1071,12 +1084,37 @@ def update_runner_sync_status(
             """
             UPDATE runner_nodes
             SET last_synced_revision = ?, sync_health = ?, sync_failure_count = ?,
-                last_sync_error = ?,
+                last_sync_error = ?, sync_instance_id = ?,
                 last_sync_success_at = COALESCE(?, last_sync_success_at),
                 updated_at = ?
             WHERE id = ? AND enabled = 1
             """,
-            (revision, health, failure_count, error, success_at, now, runner_id),
+            (revision, health, failure_count, error, process_instance_id, success_at, now, runner_id),
+        )
+        if cursor.rowcount != 1:
+            raise LookupError("runner_not_found")
+    return get_runner(runner_id) or {}
+
+
+def record_runner_update_status(runner_id: str, payload: Dict[str, str]) -> Dict[str, Any]:
+    with connection() as conn:
+        cursor = conn.execute(
+            """UPDATE runner_nodes SET update_current_version=?, update_target_version=?,
+               update_state=?, update_checked_at=?, update_error=?, update_reported_at=?
+               WHERE id=? AND enabled=1""",
+            (payload["current_version"], payload["target_version"], payload["state"],
+             payload["checked_at"], payload["error"], utc_now(), runner_id),
+        )
+        if cursor.rowcount != 1:
+            raise LookupError("runner_not_found")
+    return get_runner(runner_id) or {}
+
+
+def retry_runner_update(runner_id: str) -> Dict[str, Any]:
+    with connection() as conn:
+        cursor = conn.execute(
+            "UPDATE runner_nodes SET update_retry_nonce=update_retry_nonce+1, updated_at=? WHERE id=?",
+            (utc_now(), runner_id),
         )
         if cursor.rowcount != 1:
             raise LookupError("runner_not_found")

@@ -127,6 +127,8 @@ class RunnerHeartbeatInput(StrictModel):
     installation_id: Optional[str] = Field(default=None, min_length=16, max_length=100)
     bootstrapper_version: Optional[str] = Field(default=None, max_length=100)
     protocol_version: Optional[str] = Field(default=None, max_length=100)
+    process_instance_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    manager_version: Optional[str] = Field(default=None, max_length=100)
 
     @field_validator("actual_workspace")
     @classmethod
@@ -153,6 +155,15 @@ class SyncStatusInput(StrictModel):
     revision: int = Field(ge=-1)
     health: Literal["healthy", "recovering", "needs_admin"]
     failure_count: int = Field(ge=0, le=10_000)
+    error: str = Field(default="", max_length=5000)
+    process_instance_id: str = Field(default="", pattern=r"^$|^[a-f0-9]{32}$")
+
+
+class RunnerUpdateStatusInput(StrictModel):
+    current_version: str = Field(min_length=1, max_length=100)
+    target_version: str = Field(default="", max_length=100)
+    state: Literal["idle", "checking", "downloading", "validating", "updated", "rolled_back", "failed", "skipped_incompatible"]
+    checked_at: str = Field(default="", max_length=100)
     error: str = Field(default="", max_length=5000)
 
 
@@ -576,6 +587,14 @@ def retry_runner(runner_id: str, _: Dict[str, Any] = Depends(require_admin)) -> 
         raise HTTPException(status_code=404, detail="Runner 不存在") from exc
 
 
+@app.post("/api/admin/runners/{runner_id}/retry-update")
+def retry_runner_update(runner_id: str, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        return {"item": db.retry_runner_update(runner_id)}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Runner 不存在") from exc
+
+
 @app.get("/api/admin/global-rules")
 def get_rules(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     return db.get_rules()
@@ -901,5 +920,12 @@ def runner_sync_status(
         payload.health,
         payload.failure_count,
         payload.error,
+        payload.process_instance_id,
     )
     return {"ok": True, "runner": item}
+
+
+@app.post("/api/runner/update-status")
+def runner_update_status(payload: RunnerUpdateStatusInput,
+                         runner: Dict[str, Any] = Depends(require_runner)) -> Dict[str, Any]:
+    return {"ok": True, "runner": db.record_runner_update_status(runner["id"], payload.model_dump())}

@@ -31,6 +31,8 @@ def wait_for(check, label, seconds=45):
 
 def main(artifacts: Path):
     executable = artifacts / "dist" / "rdos-runner" / ("rdos-runner.exe" if os.name == "nt" else "rdos-runner")
+    checked = subprocess.run([str(executable), "--self-check"], capture_output=True, text=True, check=True)
+    expected_version = json.loads(checked.stdout)["runtime_version"]
     with tempfile.TemporaryDirectory(prefix="rdos-frozen-e2e-") as temporary:
         base = Path(temporary)
         port = free_port()
@@ -78,7 +80,7 @@ def main(artifacts: Path):
                 except AssertionError as exc:
                     raise AssertionError(str(exc) + "\n" + runtime_log.read_text(encoding="utf-8", errors="replace")[-2000:]) from exc
                 reported = client.get("/api/admin/runners").json()["items"][0]
-                assert reported["runner_version"] == "0.1.0-candidate", reported["runner_version"]
+                assert reported["runner_version"] == expected_version, reported["runner_version"]
                 revision = json.loads((work / "runtime.json").read_text(encoding="utf-8"))["revision"]
                 event_id = str(uuid.uuid4())
                 outbox = work / "outbox"

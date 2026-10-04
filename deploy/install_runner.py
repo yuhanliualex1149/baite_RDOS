@@ -22,7 +22,8 @@ from pathlib import Path
 
 REPOSITORY = "yuhanliualex1149/baite_RDOS"
 LEGACY_FILES = ("runner/runner.py", "rdos_protocol.py")
-RUNTIME_FILES = (*LEGACY_FILES, "runner/__init__.py", "runner/platform_support.py", "runner/requirements.lock")
+PLATFORM_FILES = (*LEGACY_FILES, "runner/__init__.py", "runner/platform_support.py", "runner/requirements.lock")
+RUNTIME_FILES = (*PLATFORM_FILES, "rdos_contract.py", "rdos_agent_integration.py")
 WINDOWS = os.name == "nt"
 
 
@@ -287,6 +288,8 @@ def download_runtime(config: dict) -> tuple[str, dict[str, bytes]]:
         if WINDOWS:
             raise ValueError("云端发布版本尚不支持 Windows；请等待管理员验收发布，不回退 main/latest")
         names = LEGACY_FILES
+    elif "rdos_contract.py" not in entries:
+        names = PLATFORM_FILES
     for name in names:
         entry = entries.get(name, {})
         if entry.get("type") != "blob" or entry.get("mode") not in {"100644", "100755"}:

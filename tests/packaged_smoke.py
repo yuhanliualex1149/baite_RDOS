@@ -1,6 +1,7 @@
 """Run real frozen binaries with no development Python variables or PATH entries."""
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -29,7 +30,15 @@ if __name__ == "__main__":
         runtime = output / "dist" / "rdos-runner" / "rdos-runner"
         gui = output / "dist" / "RDOS Runner.app" / "Contents" / "MacOS" / "RDOS Runner"
         run(runtime, "--help", env)
+        checked = subprocess.run([str(runtime), "--self-check"], env=env, capture_output=True,
+                                 text=True, encoding="utf-8", timeout=40, check=True)
+        if json.loads(checked.stdout)["runtime_version"] == "development":
+            raise AssertionError("Frozen Runtime did not locate packaged release.json")
         run(gui, "--self-check", env)
+        manager_help = subprocess.run([str(gui), "--manager", "--help"], env=env,
+                                      capture_output=True, timeout=40, check=False)
+        if manager_help.returncode:
+            raise AssertionError("Frozen GUI lacks Manager entrypoint")
         for binary in (runtime, gui):
             linked = subprocess.run(["/usr/bin/otool", "-L", str(binary)], capture_output=True,
                                     text=True, check=True).stdout.split("\n", 1)[1]
@@ -44,7 +53,15 @@ if __name__ == "__main__":
         runtime = output / "dist" / "rdos-runner" / "rdos-runner.exe"
         gui = output / "dist" / "RDOS Runner.exe"
         run(runtime, "--help", env)
+        checked = subprocess.run([str(runtime), "--self-check"], env=env, capture_output=True,
+                                 text=True, encoding="utf-8", timeout=40, check=True)
+        if json.loads(checked.stdout)["runtime_version"] == "development":
+            raise AssertionError("Frozen Runtime did not locate packaged release.json")
         run(gui, "--self-check", env)
+        manager_help = subprocess.run([str(gui), "--manager", "--help"], env=env,
+                                      capture_output=True, timeout=40, check=False)
+        if manager_help.returncode:
+            raise AssertionError("Frozen GUI lacks Manager entrypoint")
         archive = next(output.glob("rdos-runtime-windows-x64-*.zip"))
         kind = "zip"
     else:

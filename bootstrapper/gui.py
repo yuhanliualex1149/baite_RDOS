@@ -168,7 +168,12 @@ class Installer(tk.Tk):
 
 
 def main():
-    Installer().mainloop()
+    if "--manager" in sys.argv:
+        sys.argv.remove("--manager")
+        from bootstrapper.manager import main as manager_main
+        manager_main()
+    else:
+        Installer().mainloop()
 
 
 if __name__ == "__main__":

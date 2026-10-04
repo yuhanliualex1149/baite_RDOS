@@ -1,7 +1,7 @@
 name: Runner candidate (macOS + Windows)
 on:
   push:
-    branches: [codex/windows-runner-onboarding, codex/runner-bootstrapper]
+    branches: [codex/windows-runner-onboarding, codex/runner-bootstrapper, codex/operating-contract-agent-update]
   workflow_dispatch:
 permissions:
   contents: read
@@ -52,6 +52,9 @@ jobs:
       - name: Frozen Runtime end-to-end acceptance
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: python tests/frozen_runtime_e2e.py bootstrap-artifacts
+      - name: Frozen Manager upgrade and rollback protocol
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: python tests/manager_frozen_e2e.py bootstrap-artifacts
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         with:

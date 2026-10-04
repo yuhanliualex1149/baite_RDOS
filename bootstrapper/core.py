@@ -142,6 +142,8 @@ def _clean_env() -> dict:
     env = os.environ.copy()
     for name in ("PYTHONHOME", "PYTHONPATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
         env.pop(name, None)
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     if os.name == "nt" and getattr(sys, "frozen", False):
         import ctypes
         ctypes.windll.kernel32.SetDllDirectoryW(None)
@@ -303,7 +305,7 @@ def _windows_task(node: str, action: str, xml: Path | None = None):
     return system_call(["schtasks.exe", "/query", "/tn", task_name], check=False)
 
 
-def _windows_task_xml(executable: Path, config: Path, logs: Path) -> bytes:
+def _windows_task_xml(executable: Path, config: Path, logs: Path, manager: bool = False) -> bytes:
     identity = system_call(["whoami.exe", "/user", "/fo", "csv", "/nh"]).stdout
     match = re.search(r"S-1-[0-9-]+", identity)
     if not match:
@@ -332,35 +334,42 @@ def _windows_task_xml(executable: Path, config: Path, logs: Path) -> bytes:
     add(restart, "Count", "999")
     action = add(add(task, "Actions", Context="RunnerUser"), "Exec")
     add(action, "Command", str(executable))
-    add(action, "Arguments", subprocess.list2cmdline(["--config", str(config), "--poll-seconds", "5", "--log-directory", str(logs)]))
+    arguments = (["--manager"] if manager else []) + ["--config", str(config), "--poll-seconds", "5", "--log-directory", str(logs)]
+    add(action, "Arguments", subprocess.list2cmdline(arguments))
     add(action, "WorkingDirectory", str(executable.parent))
     return ET.tostring(task, encoding="utf-16", xml_declaration=True)
 
 
-def register_service(node: str, executable: Path, config: Path, logs: Path) -> None:
+def register_service(node: str, executable: Path, config: Path, logs: Path, manager: bool = False) -> None:
     if os.name == "nt":
         current = _windows_task_status(node)
         if current and current["config"] != str(config):
             raise ValueError("同名后台任务属于其他安装；请先由管理员核实")
         if current:
+            if manager and (current.get("executable") != str(executable) or "--manager" not in current.get("arguments", "")):
+                raise ValueError("已有后台任务仍指向旧 Runtime；需先隔离演练 Manager 接管")
             return
         xml = config.parent / "service.xml"
-        xml.write_bytes(_windows_task_xml(executable, config, logs))
+        xml.write_bytes(_windows_task_xml(executable, config, logs, manager))
         protect_path(xml)
         _windows_task(node, "register", xml)
         return
     path = _plist_path(node)
     path.parent.mkdir(parents=True, exist_ok=True)
+    arguments = [str(executable)] + (["--manager"] if manager else []) + ["--config", str(config), "--poll-seconds", "5",
+                                    "--log-directory", str(logs)]
     service = {"Label": service_label(node),
-               "ProgramArguments": [str(executable), "--config", str(config), "--poll-seconds", "5",
-                                    "--log-directory", str(logs)],
+               "ProgramArguments": arguments,
                "WorkingDirectory": str(executable.parent), "RunAtLoad": True, "KeepAlive": True,
                "ThrottleInterval": 10, "ProcessType": "Background", "Umask": 0o077,
                "StandardOutPath": str(logs / "launchd.log"), "StandardErrorPath": str(logs / "launchd-error.log")}
     if path.exists():
         existing = plistlib.loads(path.read_bytes())
-        if str(config) not in existing.get("ProgramArguments", []):
+        previous_args = existing.get("ProgramArguments", [])
+        if str(config) not in previous_args:
             raise ValueError("同名后台服务属于其他安装；请先由管理员核实")
+        if manager and (previous_args[0] != str(executable) or "--manager" not in previous_args):
+            raise ValueError("已有后台服务仍指向旧 Runtime；需先隔离演练 Manager 接管")
     with path.open("wb") as output:
         plistlib.dump(service, output)
     path.chmod(0o600)
@@ -378,7 +387,7 @@ def _windows_task_status(node: str) -> dict | None:
     script = """[Console]::OutputEncoding=[Text.UTF8Encoding]::new();
 $s=New-Object -ComObject 'Schedule.Service';$s.Connect();
 try{$t=$s.GetFolder('\\').GetTask($env:RDOS_TASK_NAME);
- @{running=($t.State -eq 4);config=$t.Definition.RegistrationInfo.Description}|ConvertTo-Json -Compress}
+ @{running=($t.State -eq 4);config=$t.Definition.RegistrationInfo.Description;executable=$t.Definition.Actions.Item(1).Path;arguments=$t.Definition.Actions.Item(1).Arguments}|ConvertTo-Json -Compress}
 catch{exit 3}"""
     env = _clean_env()
     env["RDOS_TASK_NAME"] = service_label(node)
@@ -591,8 +600,13 @@ def install(code: str, workspace: Path | None = None, progress=lambda message: N
         old = json.loads(existing_config.read_text(encoding="utf-8"))
         if old["runner_id"] != node or old["workspace"] != str(work):
             raise ValueError("已有安装身份或 Workspace 不同；未覆盖现有工作文件")
-        if not executable.is_file():
-            raise ValueError("已有安装的 Runtime 与当前发行版本不同；v0.1 不自动升级")
+        state_path = root / "runtime-state.json"
+        if not state_path.is_file():
+            raise ValueError("发现旧版直接运行 Runtime 的服务；请先隔离演练 Manager 接管")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        version = state["current"]
+        if not (root / "runtime" / version / executable.relative_to(runtime)).is_file():
+            raise ValueError("已有安装的当前 Runtime 主程序缺失")
         progress("复用已有安装并重新自测")
         start_service(node)
         event_file = root / "self-test.json"
@@ -645,8 +659,17 @@ def install(code: str, workspace: Path | None = None, progress=lambda message: N
     logs = root / "logs"
     logs.mkdir(exist_ok=True, mode=0o700)
     protect_path(logs)
+    from bootstrapper.manager import initial_state
+    state_path = root / "runtime-state.json"
+    if not state_path.exists():
+        private_write(state_path, initial_state(version, str(artifact.get("sha256", ""))))
+    retained = retain_manager()
+    if retained is None:
+        raise ValueError("后台安装需要冻结图形安装器，不能从源码直接注册 Runtime")
+    manager_executable = ((retained / "Contents" / "MacOS" / "RDOS Runner")
+                          if os.name != "nt" else retained)
     progress("注册并启动后台 Runner")
-    register_service(node, executable, existing_config, logs)
+    register_service(node, manager_executable, existing_config, logs, manager=True)
     start_service(node)
     event_path = root / "self-test.json"
     if event_path.exists():
@@ -655,7 +678,6 @@ def install(code: str, workspace: Path | None = None, progress=lambda message: N
         event_id = str(uuid.uuid4())
         private_write(event_path, {"event_id": event_id})
     _wait_self_test(config, root, event_id, progress)
-    retain_manager()
     pending_path.unlink(missing_ok=True)
     return {"runner_id": node, "workspace": str(work), "runtime_version": version,
             "installation_id": config["installation_id"], "self_test_event_id": event_id}
@@ -667,8 +689,12 @@ def status(node: str) -> dict:
     if not path.is_file():
         return {"installed": False, "running": False}
     config = json.loads(path.read_text(encoding="utf-8"))
+    state_path = root / "runtime-state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
     return {"installed": True, "running": service_running(node), "workspace": config["workspace"],
-            "installation_id": config.get("installation_id", "")}
+            "installation_id": config.get("installation_id", ""),
+            "current_version": state.get("current", ""), "target_version": state.get("target", ""),
+            "update_state": state.get("phase", "legacy"), "update_error": state.get("error", "")}
 
 
 def installed_nodes() -> list[str]:

@@ -387,7 +387,7 @@ class ApiFlowTest(unittest.TestCase):
             conn.execute("UPDATE settings SET value='旧规则正文' WHERE key='current_rule'")
         db.init_db()
         self.assertEqual(db.get_global_contract()["contract"]["organization_guidance"], "旧规则正文")
-        self.assertTrue(list((Path(self.temp_dir.name) / "backups").glob("pre-schema-v7-*.db")))
+        self.assertTrue(list((Path(self.temp_dir.name) / "backups").glob("pre-schema-v8-*.db")))
 
 
 if __name__ == "__main__":

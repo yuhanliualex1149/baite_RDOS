@@ -15,7 +15,9 @@ def artifact(path: Path, base: str, version: str, kind: str | None = None) -> di
     result = {"version": version, "url": base.rstrip("/") + "/" + path.name,
               "size": path.stat().st_size, "sha256": digest.hexdigest()}
     if kind:
-        result.update({"archive": kind, "min_bootstrapper_version": "0.1.0"})
+        result.update({"archive": kind, "min_bootstrapper_version": "0.1.0",
+                       "min_manager_version": "0.1.0", "protocol_version": "1",
+                       "supported_contract_versions": ["1"]})
     return result
 
 

@@ -95,6 +95,11 @@ function renderQueue() {
 function renderRunners() {
   const runners = state.overview?.runners || [];
   $("#runner-list").innerHTML = runners.length ? runners.map((runner) => `<article class="runner-card"><div class="row"><h3>${escapeHtml(runner.display_name)}</h3>${pill(runner.enabled ? (runner.online ? "Online" : "Offline") : "Disabled", runner.online ? "good" : runner.enabled ? "warn" : "")}</div><p class="mono">${escapeHtml(runner.id)}</p><dl><dt>建议 Workspace</dt><dd>${escapeHtml(runner.workspace_path || "由本机安装器确定")}</dd><dt>实际 Workspace</dt><dd>${escapeHtml(runner.actual_workspace || "尚未回报")}</dd><dt>系统 / 版本</dt><dd>${escapeHtml(runner.platform || "未知")} / ${escapeHtml(runner.runner_version || "未知")}</dd><dt>安装实例</dt><dd>${escapeHtml(runner.installation_id || "尚未使用图形安装器")}</dd><dt>安装自测</dt><dd>${runner.self_test ? `已通过 · ${formatTime(runner.self_test.received_at)}` : "尚未通过"}</dd><dt>最后心跳</dt><dd>${formatTime(runner.last_seen_at)}</dd><dt>同步 Revision</dt><dd>${runner.last_synced_revision}</dd><dt>同步健康</dt><dd>${escapeHtml(runner.sync_health)} · 失败 ${runner.sync_failure_count} 次</dd></dl><div class="actions"><button class="secondary" data-action="runner-onboarding" data-id="${runner.id}">接入信息</button><button class="secondary" data-action="runner-enroll" data-id="${runner.id}">重新签发接入码</button><button class="secondary" data-action="runner-revoke-enrollment" data-id="${runner.id}">撤销未用接入码</button><button class="secondary" data-action="runner-installation" data-id="${runner.id}">查看自测</button><button class="secondary" data-action="runner-rename" data-id="${runner.id}" data-name="${escapeHtml(runner.display_name)}">改名</button><button class="secondary" data-action="runner-toggle" data-id="${runner.id}" data-enabled="${runner.enabled ? "1" : "0"}">${runner.enabled ? "停用" : "启用"}</button><button class="secondary" data-action="runner-rotate" data-id="${runner.id}">轮换 Token</button><button class="secondary" data-action="runner-retry" data-id="${runner.id}">重新同步</button></div></article>`).join("") : empty("还没有节点。点击“创建节点”开始。");
+  $("#runner-list").querySelectorAll(".runner-card").forEach((card, index) => {
+    const runner = runners[index];
+    card.querySelector("dl").insertAdjacentHTML("beforeend", `<dt>Runtime 更新</dt><dd>${escapeHtml(runner.update_state || "旧版节点")} · ${escapeHtml(runner.update_current_version || runner.runner_version || "未知")} → ${escapeHtml(runner.update_target_version || "—")}</dd><dt>更新检查</dt><dd>${formatTime(runner.update_checked_at)}${runner.update_error ? `<br>${escapeHtml(runner.update_error)}` : ""}</dd>`);
+    card.querySelector(".actions").insertAdjacentHTML("beforeend", `<button class="secondary" data-action="runner-retry-update" data-id="${runner.id}">重试 Runtime 更新</button>`);
+  });
 }
 
 function renderRules() {
@@ -401,6 +406,7 @@ document.addEventListener("click", async (event) => {
         break;
       }
       case "runner-retry": await api(`/api/admin/runners/${id}/retry-sync`, { method: "POST", body: "{}" }); toast("已允许 Runner 重新同步"); await refreshAll(); break;
+      case "runner-retry-update": await api(`/api/admin/runners/${id}/retry-update`, { method: "POST", body: "{}" }); toast("已允许 Manager 重新检查更新"); await refreshAll(); break;
       case "project-select": await openProject(id); break;
       case "project-edit": fillProjectForm(state.projectDetail); break;
       case "project-sync": await api(`/api/admin/projects/${state.selectedProjectId}/sync`, { method: "POST", body: "{}" }); toast("项目飞书资料同步完成"); await refreshAll(); break;

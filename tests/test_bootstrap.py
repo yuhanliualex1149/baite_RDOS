@@ -16,6 +16,33 @@ class EnrollmentTest(unittest.TestCase):
     login = test_api.ApiFlowTest.login
     create_runner = test_api.ApiFlowTest.create_runner
 
+    def test_manager_instance_and_update_status_are_runner_scoped(self):
+        self.login()
+        one = self.create_runner("managed")
+        two = self.create_runner("other")
+        auth = {"Authorization": "Bearer " + one["runner_token"]}
+        instance = uuid.uuid4().hex
+        self.assertEqual(self.client.post("/api/runner/heartbeat", headers=auth, json={
+            "runner_version": "1.1.0", "manager_version": "0.1.0", "process_instance_id": instance}).status_code, 200)
+        self.assertEqual(self.client.post("/api/runner/sync-status", headers=auth, json={
+            "revision": 3, "health": "healthy", "failure_count": 0, "process_instance_id": instance}).status_code, 200)
+        payload = {"current_version": "1.1.0", "target_version": "", "state": "updated",
+                   "checked_at": "2026-10-04T00:00:00+00:00", "error": ""}
+        self.assertEqual(self.client.post("/api/runner/update-status", headers=auth, json=payload).status_code, 200)
+        status = self.client.get("/api/runner/installation-status", headers=auth).json()
+        self.assertEqual(status["process_instance_id"], instance)
+        self.assertEqual(status["sync_instance_id"], instance)
+        runners = {item["id"]: item for item in self.client.get("/api/admin/runners").json()["items"]}
+        self.assertEqual(runners[one["id"]]["update_current_version"], "1.1.0")
+        self.assertEqual(runners[two["id"]]["update_current_version"], "")
+        self.assertEqual(self.client.post("/api/runner/update-status", json=payload).status_code, 401)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post(f"/api/admin/runners/{one['id']}/retry-update", headers=auth).status_code, 401)
+        self.login()
+        self.assertEqual(self.client.post(f"/api/admin/runners/{one['id']}/retry-update").status_code, 200)
+        self.assertEqual(self.client.get("/api/runner/installation-status", headers=auth).json()["update_retry_nonce"], 1)
+        self.assertEqual(self.client.post("/api/runner/heartbeat", headers={"Authorization": "Bearer " + two["runner_token"]}).status_code, 200)
+
     def test_claim_idempotency_rotation_and_self_test(self):
         self.login()
         item = self.create_runner("pilot")

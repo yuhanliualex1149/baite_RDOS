@@ -94,12 +94,26 @@ def main():
                 expect(page.locator("#config-secret")).to_be_visible()
                 rotated = json.loads(page.locator("#config-json").inner_text())
                 assert rotated["runner_id"] == code.split(".")[0]
+                update = {"current_version": "1.0.0", "target_version": "1.1.0",
+                          "state": "rolled_back", "checked_at": "2026-10-04T00:00:00+00:00",
+                          "error": "隔离测试：候选版本未通过健康检查"}
+                request = urllib.request.Request(url + "/api/runner/update-status",
+                    data=json.dumps(update).encode("utf-8"), method="POST",
+                    headers={"Authorization": "Bearer " + rotated["runner_token"],
+                             "Content-Type": "application/json"})
+                assert urllib.request.urlopen(request).status == 200
                 with page.expect_download() as download:
                     page.locator("#download-config").click()
                 assert json.loads(Path(download.value.path()).read_text(encoding="utf-8")) == rotated
                 expect(page.locator("#copy-onboarding")).to_be_enabled()
                 assert rotated["runner_token"] not in page.locator("#onboarding-text").input_value()
                 page.locator('#config-dialog button[value="close"]').click()
+                page.reload()
+                page.locator('[data-page="runners"]').first.click()
+                expect(page.locator(".runner-card")).to_contain_text("rolled_back")
+                expect(page.locator(".runner-card")).to_contain_text("候选版本未通过健康检查")
+                page.locator('[data-action="runner-retry-update"]').click()
+                expect(page.locator("#toast")).to_contain_text("重新检查更新")
                 assert page.locator(".runner-card").count() == 1
                 assert not errors, errors
                 browser.close()

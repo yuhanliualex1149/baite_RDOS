@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import plistlib
 import tarfile
 import tempfile
 import unittest
@@ -82,6 +83,31 @@ class CoreTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 core._safe_download_url(core.ORIGIN, value)
 
+    @unittest.skipIf(os.name == "nt", "LaunchAgent migration copy is macOS-only")
+    def test_legacy_service_copy_takeover_and_restore_without_launching(self):
+        node = "rnr_" + "m" * 12
+        plist = self.root / "LaunchAgents" / (core.service_label(node) + ".plist")
+        plist.parent.mkdir()
+        config = self.root / "copy" / "config.json"
+        old_executable = self.root / "copy" / "runtime" / "old" / "rdos-runner"
+        manager_executable = self.root / "copy" / "RDOS Runner.app" / "Contents/MacOS/RDOS Runner"
+        logs = self.root / "copy" / "logs"
+        previous = {"Label": core.service_label(node), "ProgramArguments": [str(old_executable), "--config", str(config)]}
+        plist.write_bytes(plistlib.dumps(previous))
+        backup = plist.read_bytes()
+        with patch.object(core, "_plist_path", return_value=plist):
+            with self.assertRaisesRegex(ValueError, "仍指向旧 Runtime"):
+                core.register_service(node, manager_executable, config, logs, manager=True)
+            self.assertEqual(plist.read_bytes(), backup)
+            # An explicit isolated copy may be re-registered after preserving its old plist.
+            plist.unlink()
+            core.register_service(node, manager_executable, config, logs, manager=True)
+            new_args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+            self.assertEqual(new_args[0], str(manager_executable))
+            self.assertIn("--manager", new_args)
+            plist.write_bytes(backup)
+            self.assertEqual(plist.read_bytes(), backup)
+
     def test_install_is_private_resumable_and_reuses_same_runtime(self):
         node = "rnr_" + "z" * 12
         code = node + "." + "s" * 43
@@ -105,16 +131,21 @@ class CoreTest(unittest.TestCase):
             raise AssertionError(path)
         def download(origin, artifact, destination):
             shutil.copy2(archive, destination)
+        retained = self.root / ("RDOS Runner.exe" if os.name == "nt" else "RDOS Runner.app")
         with patch.object(core, "platform_key", return_value=key), \
              patch.object(core, "installation_root", return_value=self.root / "install"), \
              patch.object(core, "default_workspace", return_value=self.root / "workspace"), \
              patch.object(core, "api_json", side_effect=api), \
              patch.object(core, "download_verified", side_effect=download), \
-             patch.object(core, "register_service"), patch.object(core, "start_service"), \
+             patch.object(core, "register_service") as register, patch.object(core, "start_service"), \
+             patch.object(core, "retain_manager", return_value=retained), \
              patch.object(core, "_wait_self_test"):
             one = core.install(code)
             config = self.root / "install/config.json"
             self.assertEqual(json.loads(config.read_text())["runner_id"], node)
+            manager_executable = retained if os.name == "nt" else retained / "Contents/MacOS/RDOS Runner"
+            register.assert_called_once_with(node, manager_executable, config, self.root / "install/logs", manager=True)
+            self.assertEqual(json.loads((self.root / "install/runtime-state.json").read_text())["current"], "0.1.0-test")
             if os.name == "nt":
                 script = """$acl=[IO.File]::GetAccessControl($env:RDOS_PRIVATE_PATH);
 if(-not $acl.AreAccessRulesProtected){exit 2};

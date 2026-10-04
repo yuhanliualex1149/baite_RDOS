@@ -912,34 +912,45 @@ def _save_state(workspace: Path, state: Dict[str, Any]) -> None:
 
 
 def report_sync(config: Dict[str, str], state: Dict[str, Any], health: str, error: str = "") -> None:
+    payload = {
+        "revision": int(state["revision"]),
+        "health": health,
+        "failure_count": int(state["failure_count"]),
+        "error": error,
+    }
+    if config.get("process_instance_id"):
+        payload["process_instance_id"] = config["process_instance_id"]
     api_request(
         config,
         "/api/runner/sync-status",
         "POST",
-        {
-            "revision": int(state["revision"]),
-            "health": health,
-            "failure_count": int(state["failure_count"]),
-            "error": error,
-        },
+        payload,
     )
 
 
-def run(config_path: Path, poll_seconds: float) -> None:
+def run(config_path: Path, poll_seconds: float, instance_id: str = "") -> None:
     config = load_config(config_path)
+    if instance_id:
+        if not re.fullmatch(r"[a-f0-9]{32}", instance_id):
+            raise ValueError("Runtime 进程实例 ID 无效")
+        config["process_instance_id"] = instance_id
     workspace = Path(config["workspace"])
     prepare_workspace(workspace)
     try:
         process_lock = workspace_lock(workspace / ".runner" / "runner.lock")
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    release_file = Path(__file__).resolve().parents[1] / "release.json"
+    release_file = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "release.json"
     release = json.loads(release_file.read_text(encoding="utf-8"))["release"] if release_file.exists() else "development"
     runtime_info = {"platform": "windows" if WINDOWS else platform.system().lower(),
                     "runner_version": release, "actual_workspace": str(workspace)}
     for optional in ("installation_id", "bootstrapper_version", "protocol_version"):
         if config.get(optional):
             runtime_info[optional] = config[optional]
+    if instance_id:
+        runtime_info["process_instance_id"] = instance_id
+    if os.environ.get("RDOS_MANAGER_VERSION"):
+        runtime_info["manager_version"] = os.environ["RDOS_MANAGER_VERSION"]
     state = _load_state(workspace)
     recovered = recover_release(workspace, workspace / ".runner" / "releases")
     state["revision"] = int(recovered["revision"]) if recovered else -1
@@ -956,6 +967,7 @@ def run(config_path: Path, poll_seconds: float) -> None:
             project_cache.append(recovered_project)
     # Always fetch the complete project assignment once after process start.
     known_project_token = ""
+    instance_sync_reported = False
     print(
         f"[{config['runner_id']}] Runner 已启动，Workspace: {workspace}",
         flush=True,
@@ -1025,6 +1037,9 @@ def run(config_path: Path, poll_seconds: float) -> None:
                 )
 
             queue_project_reports(config, workspace, project_cache, state)
+            if instance_id and not instance_sync_reported and state["revision"] >= 0 and not state["failure_count"]:
+                report_sync(config, state, "healthy")
+                instance_sync_reported = True
             submit_outbox(config, workspace)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -1070,6 +1085,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True, help="Runner 配置 JSON")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--log-directory", type=Path, help="按日轮转日志，保留 30 天")
+    parser.add_argument("--instance-id", default="", help="Manager 分配的非敏感进程实例 ID")
     args = parser.parse_args()
     if args.poll_seconds <= 0:
         parser.error("poll-seconds 必须大于 0")
@@ -1082,7 +1098,7 @@ def main() -> None:
         logger.addHandler(handler)
         sys.stdout, sys.stderr = _LogStream(logger, logging.INFO), _LogStream(logger, logging.ERROR)
     try:
-        run(args.config, args.poll_seconds)
+        run(args.config, args.poll_seconds, args.instance_id)
     except (ValueError, json.JSONDecodeError) as exc:
         raise SystemExit(str(exc)) from exc
     except KeyboardInterrupt:
