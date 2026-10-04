@@ -346,7 +346,16 @@ def main() -> None:
     args = parser.parse_args()
     if args.poll_seconds <= 0:
         parser.error("poll-seconds 必须大于 0")
-    RunnerManager(args.config, args.poll_seconds).run()
+    try:
+        RunnerManager(args.config, args.poll_seconds).run()
+    except Exception as exc:
+        logs = args.log_directory or args.config.parent / "logs"
+        logs.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = logs / "manager-error.log"
+        with path.open("a", encoding="utf-8") as output:
+            output.write(f"{_now()} {type(exc).__name__}: {str(exc)[:1000]}\n")
+        core.protect_path(path)
+        raise
 
 
 if __name__ == "__main__":
