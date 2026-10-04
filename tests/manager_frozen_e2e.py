@@ -158,13 +158,15 @@ def main(artifacts: Path) -> None:
                     except AssertionError as exc:
                         state = json.loads((install / "runtime-state.json").read_text(encoding="utf-8"))
                         log_path = install / "logs" / "manager-error.log"
-                        error_log = log_path.read_text(encoding="utf-8")[-1200:] if log_path.is_file() else "(none)"
+                        error_log = log_path.read_text(encoding="utf-8")[-300:] if log_path.is_file() else "(none)"
                         runtime_log = install / "logs" / "manager-runtime.log"
-                        runtime_tail = runtime_log.read_text(encoding="utf-8", errors="replace")[-1200:] if runtime_log.is_file() else "(none)"
+                        runtime_tail = runtime_log.read_text(encoding="utf-8", errors="replace")[-300:] if runtime_log.is_file() else "(none)"
                         remote = client.get("/api/runner/installation-status", headers=auth).json()
                         raise AssertionError(f"{exc}; manager_exit={frozen_manager.poll()}; "
-                            f"state={state}; manager_error={error_log}; runtime_log={runtime_tail}; "
-                            f"remote_instance={remote.get('process_instance_id')}") from exc
+                            f"phase={state['phase']}; child_pid={state['child_pid']}; "
+                            f"child_instance={state['child_instance_id']}; "
+                            f"remote_instance={remote.get('process_instance_id')}; "
+                            f"manager_error={error_log}; runtime_log={runtime_tail}") from exc
                 finally:
                     if frozen_manager.poll() is None:
                         frozen_manager.send_signal(signal.SIGTERM)

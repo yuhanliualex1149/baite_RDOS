@@ -69,7 +69,7 @@ class RunnerManager:
             script = "$p=Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $env:RDOS_CHILD_PID);if($p){$p.CommandLine}"
             env = core._clean_env()
             env["RDOS_CHILD_PID"] = str(pid)
-            return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            return subprocess.run([core.windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
                                   env=env, capture_output=True, text=True, check=False).stdout.strip()
         return subprocess.run(["ps", "-p", str(pid), "-o", "command="],
                               env=core._clean_env(), capture_output=True, text=True, check=False).stdout.strip()

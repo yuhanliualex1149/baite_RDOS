@@ -157,6 +157,14 @@ def system_call(args: list[str], check: bool = True):
     return result
 
 
+def windows_powershell() -> str:
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    path = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe" if root else None
+    if path is None or not path.is_file():
+        raise ValueError("Windows 系统 PowerShell 不可用")
+    return str(path)
+
+
 def protect_path(path: Path) -> None:
     if os.name != "nt":
         path.chmod(0o700 if path.is_dir() else 0o600)
@@ -174,7 +182,7 @@ foreach($id in @($sid.Value,'S-1-5-18')){
 if($d){[IO.Directory]::SetAccessControl($p,$acl)}else{[IO.File]::SetAccessControl($p,$acl)}"""
     env = _clean_env()
     env["RDOS_PRIVATE_PATH"] = str(path)
-    result = subprocess.run(["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    result = subprocess.run([windows_powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
                             env=env, capture_output=True, text=True)
     if result.returncode:
         raise ValueError("无法设置 Windows 私有目录权限：" + result.stderr.strip()[:500])
@@ -391,7 +399,7 @@ try{$t=$s.GetFolder('\\').GetTask($env:RDOS_TASK_NAME);
 catch{exit 3}"""
     env = _clean_env()
     env["RDOS_TASK_NAME"] = service_label(node)
-    result = subprocess.run(["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    result = subprocess.run([windows_powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
                             env=env, capture_output=True, text=True, encoding="utf-8", check=False)
     return json.loads(result.stdout) if result.returncode == 0 else None
 
