@@ -19,17 +19,17 @@
 
 | 检查 | 结果 |
 | --- | --- |
-| 全套单元回归 | 82 tests passed，5 skipped；覆盖正常升级、重复检查、坏 Hash／坏程序／模拟 Windows 文件占用、无新心跳、不健康快照、切换中断恢复、断网、版本不兼容、管理员重试、实例匹配和增量数据库备份。 |
+| 全套本机单元回归 | 83 tests passed，6 skipped（含仅在 Windows 执行的稳定 Manager 副本测试）；覆盖正常升级、重复检查、坏 Hash／坏程序／模拟 Windows 文件占用、无新心跳、不健康快照、切换中断恢复、断网、版本不兼容、管理员重试、实例匹配和增量数据库备份。 |
 | 三节点旧协议端到端 | `tests/e2e_demo.py` 通过，旧式 Runner 的同步、事件 ACK、离线恢复与 Token 轮换未回退。 |
 | 旧 Mac 安装器隔离回归 | `tests/macos_installer_smoke.py --local-runtime` 通过；测试服务和文件已清理。另对旧 LaunchAgent 配置副本演练了拒绝静默接管和还原，未操作真实服务。 |
 | 冻结成品 | 本机 Apple Silicon、macOS 26.6.2 构建候选 Runtime 和 DMG；`tests/packaged_smoke.py` 在精简 PATH、无开发 Python 环境变量下通过，已解包搬移运行并检查动态链接。 |
 | 冻结 Runtime E2E | `tests/frozen_runtime_e2e.py` 用隔离 Panel 和虚构凭证通过心跳、完整快照、诊断事件与 ACK。 |
 | 冻结 Manager E2E | `tests/manager_frozen_e2e.py` 通过：旧冻结 Runtime → 校验新版本 → 新实例健康 → ACK → 模拟坏候选回退 → 冻结 Manager 自身拉起并托管 Runtime。全程未连接正式云端。 |
 | 浏览器工作台 | 本机 Chrome 完成节点接入回归，以及 Runtime 更新状态、错误和管理员重试按钮检查；无非预期 console error/warn。 |
+| 双平台 CI | [候选分支运行 #18](https://github.com/yuhanliualex1149/baite_RDOS/actions/runs/37205622825) 的 macOS arm64 与 Windows x64 作业均为 success；两边都执行单元、旧协议端到端、原生后台任务、浏览器及冻结成品测试，Windows 冻结 Manager 的升级、回退和退出清理也通过。 |
 
 ## 待验收与发布门槛
 
-- 候选分支的 macOS arm64／Windows x64 CI 冻结成品测试：待远端 CI 结果。CI 不等于 Windows 真人实机。
 - 约定窗口内对**隔离测试节点**做真实 Mac 重启，验证 Manager 登录自启、持久状态与离线恢复：未执行。
 - Windows 10/11 普通用户、任务计划程序、文件占用、系统防护和休眠恢复：未执行。
 - 正式云端部署、真实旧 Mac 节点接管与生产回滚：未执行；本轮不切换。
