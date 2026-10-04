@@ -8,7 +8,7 @@
 
 ## 实施内容
 
-- 冻结图形程序保留为稳定 Manager，并通过 `--manager` 托管独立 Runtime。新安装的后台服务指向保留的 Manager 路径；发现仍指向旧 Runtime 的同名服务时拒绝静默接管。
+- Mac 保留冻结图形程序为稳定 Manager；Windows 从首次下载的 onedir Runtime 保留独立的 Manager 副本，避免 onefile 安装器的父子进程影响后台停止。两端都通过 `--manager` 托管可更新的 Runtime；Windows 子进程还绑定随 Manager 退出而关闭的 Job Object。新安装的后台服务指向保留路径；发现仍指向旧 Runtime 的同名服务时拒绝静默接管。
 - 安装目录中的私有 `runtime-state.json` 持久记录 current、previous、candidate、版本 Hash、切换阶段、失败候选和子进程实例。更新下载到暂存目录，校验大小、SHA-256、安全解包和候选独立 `--self-check` 后才切换。相同版本不同 Hash 不覆盖。
 - 启动时及每 12 小时检查同域 Manifest，按平台、协议、Contract 和最低 Manager 版本过滤。断网或清单暂不可达时继续运行当前 Runtime；失败的同一版本与 Hash 暂停自动重试，清单变化或管理员点击“重试 Runtime 更新”才解除。
 - 切换时停止已核实身份的子进程，不禁用后台服务。新版本必须回传本次进程实例的心跳和同步状态，且本地全局及参与项目快照均通过校验，才记为成功。超时、崩溃或不健康时回到 previous；Manager 在切换中重启也从持久状态回退。

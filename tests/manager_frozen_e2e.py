@@ -137,8 +137,12 @@ def main(artifacts: Path) -> None:
                 assert manager.state["failed"] == {"version": failed_version, "sha256": failed_artifact["sha256"]}
                 manager.wait_healthy(new_version, manager.state["child_instance_id"], timeout=60)
                 manager._stop_recorded_child()
-                gui = (artifacts / "dist" / "RDOS Runner.exe") if os.name == "nt" else (
-                    artifacts / "dist" / "RDOS Runner.app" / "Contents" / "MacOS" / "RDOS Runner")
+                if os.name == "nt":
+                    stable = install / "manager" / "rdos-runner"
+                    shutil.copytree(source, stable)
+                    gui = stable / "rdos-runner.exe"
+                else:
+                    gui = artifacts / "dist" / "RDOS Runner.app" / "Contents" / "MacOS" / "RDOS Runner"
                 frozen_env = os.environ.copy()
                 for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "DYLD_LIBRARY_PATH"):
                     frozen_env.pop(name, None)
@@ -168,9 +172,13 @@ def main(artifacts: Path) -> None:
                             f"remote_instance={remote.get('process_instance_id')}; "
                             f"manager_error={error_log}; runtime_log={runtime_tail}") from exc
                 finally:
+                    managed_pid = json.loads((install / "runtime-state.json").read_text(encoding="utf-8"))["child_pid"]
                     if frozen_manager.poll() is None:
                         frozen_manager.send_signal(signal.SIGTERM)
                     frozen_manager.wait(timeout=15)
+                    if managed_pid:
+                        wait_for(lambda: not manager._recorded_command(managed_pid),
+                                 "Manager stop left Runtime child running", seconds=10)
                     manager.state = json.loads((install / "runtime-state.json").read_text(encoding="utf-8"))
                     manager._stop_recorded_child()
                 print("MANAGER FROZEN E2E PASS: upgrade, ACK, failed candidate rollback, frozen Manager supervision")

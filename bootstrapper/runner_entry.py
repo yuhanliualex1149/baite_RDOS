@@ -8,7 +8,11 @@ from runner.runner import main
 
 
 if __name__ == "__main__":
-    if "--self-check" in sys.argv:
+    if "--manager" in sys.argv:
+        sys.argv.remove("--manager")
+        from bootstrapper.manager import main as manager_main
+        manager_main()
+    elif "--self-check" in sys.argv:
         import certifi
         import tzdata
         release = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "release.json"

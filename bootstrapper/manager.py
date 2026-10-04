@@ -39,6 +39,51 @@ def initial_state(version: str, artifact_hash: str = "") -> dict:
             "seen_retry_nonce": 0, "child_pid": 0, "child_instance_id": "", "child_version": ""}
 
 
+def _windows_attach_kill_job(existing_handle: int, process: subprocess.Popen) -> int:
+    """Keep a Runtime child in a job that dies when the Manager is stopped."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimit(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class Counters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount", "ReadTransferCount",
+            "WriteTransferCount", "OtherTransferCount")]
+
+    class ExtendedLimit(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BasicLimit), ("IoInfo", Counters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = existing_handle or kernel.CreateJobObjectW(None, None)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not existing_handle:
+        limits = ExtendedLimit()
+        limits.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            error = ctypes.get_last_error()
+            kernel.CloseHandle(handle)
+            raise ctypes.WinError(error)
+    if not kernel.AssignProcessToJobObject(handle, wintypes.HANDLE(process._handle)):
+        error = ctypes.get_last_error()
+        if not existing_handle:
+            kernel.CloseHandle(handle)
+        raise ctypes.WinError(error)
+    return int(handle)
+
+
 class RunnerManager:
     def __init__(self, config_path: Path, poll_seconds: float = 5):
         self.config_path = config_path.resolve()
@@ -53,6 +98,7 @@ class RunnerManager:
         if not VERSION_NAME.fullmatch(self.state["current"]):
             raise ValueError("当前 Runtime 版本无效")
         self.child: subprocess.Popen | None = None
+        self.windows_job = 0
         self.stopping = False
 
     def save(self) -> None:
@@ -120,6 +166,14 @@ class RunnerManager:
         with (logs / "manager-runtime.log").open("ab") as output:
             self.child = subprocess.Popen(args, cwd=executable.parent, env=env, stdout=output,
                                           stderr=subprocess.STDOUT, close_fds=True, creationflags=creationflags)
+        if os.name == "nt":
+            try:
+                self.windows_job = _windows_attach_kill_job(self.windows_job, self.child)
+            except OSError:
+                self.child.terminate()
+                self.child.wait(timeout=5)
+                self.child = None
+                raise
         core.protect_path(logs / "manager-runtime.log")
         self.state.update(child_pid=self.child.pid, child_instance_id=instance, child_version=version)
         self.save()

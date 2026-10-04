@@ -39,6 +39,10 @@ if __name__ == "__main__":
                                       capture_output=True, timeout=40, check=False)
         if manager_help.returncode:
             raise AssertionError("Frozen GUI lacks Manager entrypoint")
+        stable_manager_help = subprocess.run([str(runtime), "--manager", "--help"], env=env,
+                                             capture_output=True, timeout=40, check=False)
+        if stable_manager_help.returncode:
+            raise AssertionError("Frozen onedir Runtime lacks stable Manager entrypoint")
         for binary in (runtime, gui):
             linked = subprocess.run(["/usr/bin/otool", "-L", str(binary)], capture_output=True,
                                     text=True, check=True).stdout.split("\n", 1)[1]
@@ -62,6 +66,10 @@ if __name__ == "__main__":
                                       capture_output=True, timeout=40, check=False)
         if manager_help.returncode:
             raise AssertionError("Frozen GUI lacks Manager entrypoint")
+        stable_manager_help = subprocess.run([str(runtime), "--manager", "--help"], env=env,
+                                             capture_output=True, timeout=40, check=False)
+        if stable_manager_help.returncode:
+            raise AssertionError("Frozen onedir Runtime lacks stable Manager entrypoint")
         archive = next(output.glob("rdos-runtime-windows-x64-*.zip"))
         kind = "zip"
     else:

@@ -621,7 +621,7 @@ def install(code: str, workspace: Path | None = None, progress=lambda message: N
         event_id = str(uuid.uuid4())
         private_write(event_file, {"event_id": event_id})
         _wait_self_test(old, root, event_id, progress)
-        retain_manager()
+        retain_manager(root / "runtime" / version, root)
         return {"runner_id": node, "workspace": str(work), "runtime_version": version,
                 "installation_id": old["installation_id"], "self_test_event_id": event_id}
     if not executable.is_file():
@@ -671,7 +671,7 @@ def install(code: str, workspace: Path | None = None, progress=lambda message: N
     state_path = root / "runtime-state.json"
     if not state_path.exists():
         private_write(state_path, initial_state(version, str(artifact.get("sha256", ""))))
-    retained = retain_manager()
+    retained = retain_manager(runtime, root)
     if retained is None:
         raise ValueError("后台安装需要冻结图形安装器，不能从源码直接注册 Runtime")
     manager_executable = ((retained / "Contents" / "MacOS" / "RDOS Runner")
@@ -722,18 +722,28 @@ def installed_nodes() -> list[str]:
     return sorted(nodes)
 
 
-def retain_manager() -> Path | None:
-    """Keep a launchable GUI after the download/DMG has been removed."""
+def retain_manager(runtime: Path | None = None, root: Path | None = None) -> Path | None:
+    """Keep an immutable, unversioned Manager path after installation."""
     if not getattr(sys, "frozen", False):
         return None
     executable = Path(sys.executable).resolve()
     if os.name == "nt":
-        destination = Path(os.environ["LOCALAPPDATA"]) / "BaiteRDOS" / "RDOS Runner.exe"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if executable != destination and not destination.exists():
-            shutil.copy2(executable, destination)
-            protect_path(destination)
-        return destination
+        if runtime is None or root is None:
+            raise ValueError("缺少 Windows Manager 安装目录")
+        destination = root / "manager"
+        manager_executable = destination / "rdos-runner" / "rdos-runner.exe"
+        if not manager_executable.is_file():
+            source = runtime / "rdos-runner"
+            if not (source / "rdos-runner.exe").is_file():
+                raise ValueError("Runtime 无法提供独立 Manager 程序")
+            stage = root / (".manager-" + uuid.uuid4().hex)
+            try:
+                shutil.copytree(runtime, stage)
+                os.replace(stage, destination)
+                protect_path(destination)
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+        return manager_executable
     bundle = next((parent for parent in executable.parents if parent.suffix == ".app"), None)
     if bundle is None:
         raise ValueError("找不到图形安装器应用包，无法保留管理入口")

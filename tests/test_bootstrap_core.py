@@ -108,6 +108,19 @@ class CoreTest(unittest.TestCase):
             plist.write_bytes(backup)
             self.assertEqual(plist.read_bytes(), backup)
 
+    @unittest.skipUnless(os.name == "nt", "Windows stable Manager copy")
+    def test_windows_manager_is_stable_onedir_copy(self):
+        runtime = self.root / "runtime" / "1.0.0"
+        executable = runtime / "rdos-runner" / "rdos-runner.exe"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"frozen candidate")
+        with patch.object(core.sys, "frozen", True, create=True):
+            retained = core.retain_manager(runtime, self.root)
+            self.assertEqual(retained.read_bytes(), b"frozen candidate")
+            executable.write_bytes(b"new candidate")
+            self.assertEqual(core.retain_manager(runtime, self.root), retained)
+            self.assertEqual(retained.read_bytes(), b"frozen candidate")
+
     def test_install_is_private_resumable_and_reuses_same_runtime(self):
         node = "rnr_" + "z" * 12
         code = node + "." + "s" * 43
