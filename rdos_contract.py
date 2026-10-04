@@ -96,9 +96,10 @@ def render_rules(contract: dict[str, Any]) -> str:
     )
 
 
-def agent_projection(contract: dict[str, Any], revision: int, updated_at: str) -> dict[str, Any]:
+def agent_projection(contract: dict[str, Any], revision: int, updated_at: str,
+                     contract_revision: int | None = None) -> dict[str, Any]:
     validate_contract(contract)
-    return {
+    projection = {
         "contract_version": CONTRACT_VERSION,
         "contract_hash": contract_hash(contract),
         "shared_revision": revision,
@@ -111,3 +112,6 @@ def agent_projection(contract: dict[str, Any], revision: int, updated_at: str) -
         "events": {"allowed": AGENT_EVENTS.copy()},
         "human_decision": contract["human_decision"],
     }
+    if contract_revision is not None:
+        projection["contract_revision"] = contract_revision
+    return projection

@@ -23,6 +23,8 @@ from runner.runner import (
     safe_filename,
     scan_project_files,
     runtime_directory,
+    recover_release,
+    ensure_agent_entries,
 )
 
 
@@ -79,6 +81,57 @@ def snapshot(revision: int, content: str = "# Context\n") -> dict:
 
 
 class RunnerSyncTest(unittest.TestCase):
+    def test_agent_entries_follow_atomic_contract_without_touching_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            work = workspace / "work" / "notes.md"
+            work.parent.mkdir(parents=True)
+            work.write_text("user work", encoding="utf-8")
+            apply_snapshot(workspace, "runner-test", snapshot(1))
+            first = runtime_directory(workspace)
+            root_entry = (workspace / "CODEBUDDY.md").read_bytes()
+            for name in ("CODEBUDDY.md", "AGENTS.md"):
+                text = (workspace / name).read_text(encoding="utf-8")
+                self.assertIn("runtime.json", text)
+                self.assertIn("snapshot_dir", text)
+                self.assertNotIn("Local Agent 自主决定。", text)
+            initial_read_first = (first / "control/READ_FIRST.md").read_text(encoding="utf-8")
+            self.assertIn("Shared revision: 1", initial_read_first)
+            self.assertIn("outbox/*.json", initial_read_first)
+            self.assertIn("Agent 不得批准 Gate", initial_read_first)
+            newer = snapshot(2)
+            newer["global_contract"]["contract"] = make_contract("更新后的组织说明")
+            newer["global_contract"]["contract_hash"] = contract_hash(newer["global_contract"]["contract"])
+            newer["global_rules"]["content"] = render_rules(newer["global_contract"]["contract"])
+            apply_snapshot(workspace, "runner-test", seal_snapshot(newer))
+            current = runtime_directory(workspace)
+            self.assertNotEqual(current, first)
+            self.assertIn("更新后的组织说明", (current / "control/READ_FIRST.md").read_text(encoding="utf-8"))
+            self.assertEqual((workspace / "CODEBUDDY.md").read_bytes(), root_entry)
+            self.assertEqual(work.read_text(encoding="utf-8"), "user work")
+            self.assertEqual(recover_release(workspace, workspace / ".runner/releases")["revision"], 2)
+            self.assertEqual(runtime_directory(workspace), current)
+
+    def test_existing_agent_entry_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            (workspace / "AGENTS.md").write_text("my own rules", encoding="utf-8")
+            apply_snapshot(workspace, "runner-test", snapshot(1))
+            self.assertEqual((workspace / "AGENTS.md").read_text(encoding="utf-8"), "my own rules")
+            self.assertTrue((workspace / "CODEBUDDY.md").exists())
+            self.assertEqual(ensure_agent_entries(workspace), ["AGENTS.md"])
+
+    def test_corrupt_agent_entry_recovers_previous_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            first = apply_snapshot(workspace, "runner-test", snapshot(1))
+            second = apply_snapshot(workspace, "runner-test", snapshot(2))
+            (second / "control/READ_FIRST.md").write_text("tampered", encoding="utf-8")
+            recovered = recover_release(workspace, workspace / ".runner/releases")
+            self.assertEqual(recovered["revision"], 1)
+            self.assertEqual(runtime_directory(workspace), first.resolve())
+
     def test_safe_filename(self) -> None:
         self.assertEqual(safe_filename("Context.md", "fallback"), "Context.md")
         self.assertEqual(safe_filename("Review Method", "fallback"), "review-method.md")

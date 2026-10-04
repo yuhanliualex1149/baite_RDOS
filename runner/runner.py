@@ -17,7 +17,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rdos_protocol import content_hash, verify_snapshot
 from rdos_contract import agent_projection, contract_hash, render_rules, validate_contract
+from rdos_agent_integration import ENTRY_VERSION, ROOT_ENTRY, render_read_first
 from runner.platform_support import (WINDOWS, is_linklike, owned_release, portable_filename,
                                      reject_link_ancestors, workspace_lock)
 
@@ -303,6 +304,10 @@ def _activate_release(root: Path, release: Path) -> None:
         entry.update(contract_version=operating["contract"]["contract_version"],
                      contract_revision=operating["contract_revision"], contract_hash=operating["contract_hash"],
                      shared_revision=snapshot["revision"])
+        if (release / "manifest.json").is_file():
+            manifest = json.loads((release / "manifest.json").read_text(encoding="utf-8"))
+            if manifest.get("agent_integration_version") == ENTRY_VERSION:
+                entry["agent_integration_version"] = ENTRY_VERSION
     # Windows has no link aliases. Replacing a file is the only publication step.
     if WINDOWS:
         write_atomic(root / "runtime.json", json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
@@ -356,6 +361,7 @@ def _store_release(staging: Path, snapshot: dict) -> None:
     write_atomic(staging / "snapshot.json", json.dumps(snapshot, ensure_ascii=False))
     files = {path.relative_to(staging).as_posix(): _file_sha256(path)
              for folder in ("shared", "control") for path in (staging / folder).rglob("*") if path.is_file()}
+    files["manifest.json"] = _file_sha256(staging / "manifest.json")
     write_atomic(staging / "local-manifest.json", json.dumps(files, sort_keys=True))
 
 
@@ -367,6 +373,8 @@ def _validate_release(release: Path) -> dict:
     verify_snapshot(snapshot)
     expected = json.loads((release / "local-manifest.json").read_text(encoding="utf-8"))
     actual = {}
+    if "manifest.json" in expected:
+        actual["manifest.json"] = _file_sha256(release / "manifest.json")
     for folder in ("shared", "control"):
         if is_linklike(release / folder):
             raise ValueError("快照中不允许重解析点或符号链接")
@@ -388,7 +396,46 @@ def _validate_release(release: Path) -> dict:
         agent = json.loads((release / "control/agent_contract.json").read_text(encoding="utf-8"))
         if stored != operating["contract"] or agent["contract_hash"] != operating["contract_hash"]:
             raise ValueError("本地 Operating Contract 内容不一致")
+        manifest = json.loads((release / "manifest.json").read_text(encoding="utf-8"))
+        if any(manifest.get(key) != value for key, value in {
+            "revision": snapshot["revision"],
+            "contract_version": operating["contract"]["contract_version"],
+            "contract_revision": operating["contract_revision"],
+            "contract_hash": operating["contract_hash"],
+        }.items()):
+            raise ValueError("快照 Manifest 与 Operating Contract 不一致")
+        if manifest.get("agent_integration_version") == ENTRY_VERSION:
+            if agent != agent_projection(operating["contract"], snapshot["revision"],
+                                         agent["generated_at"], operating["contract_revision"]):
+                raise ValueError("Agent Contract 投影内容不一致")
+            if (release / "control/READ_FIRST.md").read_text(encoding="utf-8") != render_read_first(agent):
+                raise ValueError("Agent 入口与 Contract 不一致")
+        elif "agent_integration_version" in manifest:
+            raise ValueError("不支持的 Agent Integration 版本")
     return snapshot
+
+
+def ensure_agent_entries(workspace: Path) -> list[str]:
+    """Create stable locators only; never overwrite a user's existing entry."""
+    conflicts = []
+    for filename in ("AGENTS.md", "CODEBUDDY.md"):
+        path = workspace / filename
+        if path.exists() or is_linklike(path):
+            try:
+                managed = not is_linklike(path) and path.is_file() and path.read_text(encoding="utf-8") == ROOT_ENTRY
+            except (OSError, UnicodeError):
+                managed = False
+            if not managed:
+                conflicts.append(filename)
+            continue
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as output:
+                output.write(ROOT_ENTRY)
+        except OSError:
+            conflicts.append(filename)
+    if conflicts:
+        print(f"Agent 入口冲突，未覆盖已有文件：{', '.join(conflicts)}", file=sys.stderr, flush=True)
+    return conflicts
 
 
 def recover_release(root: Path, releases: Path) -> Optional[dict]:
@@ -410,6 +457,8 @@ def recover_release(root: Path, releases: Path) -> Optional[dict]:
             candidate = owned_release(root, candidate.resolve())
             snapshot = _validate_release(candidate)
             _activate_release(root, candidate)
+            if "global_contract" in snapshot and (candidate / "control/READ_FIRST.md").is_file():
+                ensure_agent_entries(root)
             return snapshot
         except (OSError, ValueError, KeyError):
             continue
@@ -430,9 +479,11 @@ def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) ->
         (shared / "selected_rag").mkdir(parents=True)
         write_atomic(shared / "global_contract.json", json.dumps(operating["contract"], ensure_ascii=False, indent=2) + "\n")
         write_atomic(shared / "global_rules.md", render_rules(operating["contract"]))
+        agent = agent_projection(operating["contract"], revision, datetime.now(timezone.utc).isoformat(),
+                                 operating["contract_revision"])
         write_atomic(staging / "control" / "agent_contract.json",
-                     json.dumps(agent_projection(operating["contract"], revision, operating["updated_at"]),
-                                ensure_ascii=False, indent=2) + "\n")
+                     json.dumps(agent, ensure_ascii=False, indent=2) + "\n")
+        write_atomic(staging / "control" / "READ_FIRST.md", render_read_first(agent))
 
         used_skill_names: set[str] = set()
         for item in snapshot["shared_skills"]:
@@ -467,6 +518,7 @@ def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) ->
             "contract_version": operating["contract"]["contract_version"],
             "contract_revision": operating["contract_revision"],
             "contract_hash": operating["contract_hash"],
+            "agent_integration_version": ENTRY_VERSION,
             "rag_snapshot": snapshot["rag_snapshot"],
             "selected_rag": rag_manifest,
             "shared_skills": [
@@ -494,6 +546,7 @@ def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) ->
         final = releases / f"revision-{revision}-{time.time_ns()}"
         os.replace(staging, final)
         _activate_release(workspace, final)
+        ensure_agent_entries(workspace)
         return final
     except Exception:
         if staging.exists():
