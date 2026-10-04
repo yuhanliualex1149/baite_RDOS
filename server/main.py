@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError, field_validator
 
 from server import db
 from server.onboarding import instructions, validate_client_workspace
@@ -101,6 +101,17 @@ class PasswordInput(StrictModel):
 
 class RulesInput(StrictModel):
     content: str = Field(min_length=1, max_length=100_000)
+
+
+class ContractInput(StrictModel):
+    organization_guidance: str = Field(min_length=1, max_length=100_000)
+    selected_rag_required: StrictBool
+    shared_skill_policy: Literal["recommended", "optional"]
+    expected_contract_revision: StrictInt = Field(ge=1)
+
+
+class ContractRestoreInput(StrictModel):
+    expected_contract_revision: StrictInt = Field(ge=1)
 
 
 class RunnerCreateInput(StrictModel):
@@ -572,10 +583,39 @@ def get_rules(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
 
 @app.put("/api/admin/global-rules")
 def publish_rules(payload: RulesInput, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
-    content = payload.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="Global Rules 不能为空")
-    return db.update_rules(content)
+    raise HTTPException(status_code=409, detail="Global Rules 是 Operating Contract 生成视图，请使用 /api/admin/global-contract")
+
+
+@app.get("/api/admin/global-contract")
+def global_contract(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    return db.get_global_contract()
+
+
+@app.put("/api/admin/global-contract")
+def publish_global_contract(payload: ContractInput, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        return db.update_global_contract(payload.organization_guidance, payload.selected_rag_required,
+                                         payload.shared_skill_policy, payload.expected_contract_revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=409 if str(exc) == "stale_contract_revision" else 400,
+                            detail=str(exc)) from exc
+
+
+@app.get("/api/admin/global-contract/history")
+def global_contract_history(_: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    return {"items": db.list_global_contract_history()}
+
+
+@app.post("/api/admin/global-contract/history/{contract_revision}/restore")
+def restore_global_contract(contract_revision: int, payload: ContractRestoreInput,
+                            _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    try:
+        return db.restore_global_contract(contract_revision, payload.expected_contract_revision)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="历史版本不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409 if str(exc) == "stale_contract_revision" else 400,
+                            detail=str(exc)) from exc
 
 
 @app.get("/api/admin/shared-skills")

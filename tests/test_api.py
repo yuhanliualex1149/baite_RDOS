@@ -167,8 +167,14 @@ class ApiFlowTest(unittest.TestCase):
         self.login()
         source = self.create_runner("user1")
         headers = self.headers(source)
+        current = self.client.get("/api/admin/global-contract").json()
         self.assertEqual(
-            self.client.put("/api/admin/global-rules", json={"content": "# New Rule"}).status_code,
+            self.client.put("/api/admin/global-contract", json={
+                "organization_guidance": "# New Rule",
+                "selected_rag_required": True,
+                "shared_skill_policy": "recommended",
+                "expected_contract_revision": current["contract_revision"],
+            }).status_code,
             200,
         )
         from server.main import app
@@ -177,9 +183,11 @@ class ApiFlowTest(unittest.TestCase):
             token_only.headers["Origin"] = "http://127.0.0.1:8000"
             self.assertEqual(
                 token_only.put(
-                    "/api/admin/global-rules",
+                    "/api/admin/global-contract",
                     headers=headers,
-                    json={"content": "runner must not publish"},
+                    json={"organization_guidance": "runner must not publish",
+                          "selected_rag_required": True, "shared_skill_policy": "recommended",
+                          "expected_contract_revision": 1},
                 ).status_code,
                 401,
             )
@@ -324,6 +332,62 @@ class ApiFlowTest(unittest.TestCase):
         ).json()["result"]["collaboration_id"]
         queue = self.client.get("/api/admin/work-queue").json()
         self.assertIn(risk, [item["id"] for item in queue["judgments"]])
+
+    def test_operating_contract_publish_history_and_legacy_migration(self) -> None:
+        import json
+        from server import db
+        from rdos_contract import render_rules
+        from runner.runner import apply_snapshot, runtime_directory
+
+        self.login()
+        first = self.client.get("/api/admin/global-contract").json()
+        self.assertEqual(first["contract"]["contract_version"], "1")
+        self.assertIn("installation_self_test", first["contract"]["events"]["allowed"])
+        payload = {"organization_guidance": first["contract"]["organization_guidance"],
+                   "selected_rag_required": True, "shared_skill_policy": "recommended",
+                   "expected_contract_revision": 1}
+        self.assertEqual(self.client.put("/api/admin/global-contract", json=payload).json()["shared_revision"],
+                         first["shared_revision"])
+        payload["organization_guidance"] = "新的组织说明"
+        changed = self.client.put("/api/admin/global-contract", json=payload)
+        self.assertEqual(changed.status_code, 200, changed.text)
+        current = changed.json()
+        self.assertEqual(current["contract_revision"], 2)
+        self.assertEqual(current["shared_revision"], first["shared_revision"] + 1)
+        self.assertEqual(self.client.put("/api/admin/global-contract", json=payload).status_code, 409)
+        self.assertEqual(self.client.put("/api/admin/global-contract", json={**payload, "unknown": True}).status_code, 422)
+        self.assertEqual(self.client.put("/api/admin/global-contract", json={**payload, "selected_rag_required": "true"}).status_code, 422)
+        self.assertEqual(self.client.put("/api/admin/global-rules", json={"content": "旧写入"}).status_code, 409)
+        self.assertEqual(self.client.get("/api/admin/global-rules").json()["content"],
+                         render_rules(current["contract"]))
+
+        runner = self.create_runner("contract-test")
+        response = self.client.get("/api/runner/sync", headers=self.headers(runner)).json()
+        workspace = Path(self.temp_dir.name) / "workspace"
+        apply_snapshot(workspace, runner["id"], response)
+        active = runtime_directory(workspace)
+        self.assertEqual(json.loads((active / "shared/global_contract.json").read_text())["organization_guidance"],
+                         "新的组织说明")
+        self.assertEqual((active / "shared/global_rules.md").read_text(), render_rules(current["contract"]))
+        self.assertEqual(json.loads((workspace / "runtime.json").read_text())["contract_hash"], current["contract_hash"])
+
+        restored = self.client.post("/api/admin/global-contract/history/1/restore",
+                                    json={"expected_contract_revision": 2}).json()
+        self.assertEqual(restored["contract_revision"], 3)
+        self.assertEqual(restored["contract"]["organization_guidance"], first["contract"]["organization_guidance"])
+        self.assertEqual(len(self.client.get("/api/admin/global-contract/history").json()["items"]), 3)
+        db.init_db()
+        self.assertEqual(db.get_global_contract()["contract_revision"], 3)
+
+        # Simulate a v6 database to prove the old handwritten text is retained and backed up.
+        with db.connection() as conn:
+            conn.execute("DELETE FROM global_contract_history")
+            conn.execute("DELETE FROM settings WHERE key='current_contract_revision'")
+            conn.execute("UPDATE settings SET value='6' WHERE key='schema_version'")
+            conn.execute("UPDATE settings SET value='旧规则正文' WHERE key='current_rule'")
+        db.init_db()
+        self.assertEqual(db.get_global_contract()["contract"]["organization_guidance"], "旧规则正文")
+        self.assertTrue(list((Path(self.temp_dir.name) / "backups").glob("pre-schema-v7-*.db")))
 
 
 if __name__ == "__main__":

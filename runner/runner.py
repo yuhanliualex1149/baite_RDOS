@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rdos_protocol import content_hash, verify_snapshot
+from rdos_contract import agent_projection, contract_hash, render_rules, validate_contract
 from runner.platform_support import (WINDOWS, is_linklike, owned_release, portable_filename,
                                      reject_link_ancestors, workspace_lock)
 
@@ -275,11 +276,33 @@ def _validate_content(item: Dict[str, Any]) -> bytes:
     return encoded
 
 
+def _contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    operating = snapshot.get("global_contract")
+    if not isinstance(operating, dict) or set(operating) != {
+        "contract", "contract_revision", "contract_hash", "updated_at", "shared_revision"
+    }:
+        raise ValueError("共享快照缺少 Operating Contract")
+    contract = validate_contract(operating["contract"])
+    if operating["contract_hash"] != contract_hash(contract):
+        raise ValueError("Operating Contract Hash 不匹配")
+    if (type(operating["contract_revision"]) is not int or operating["contract_revision"] < 1
+            or operating["shared_revision"] != snapshot["revision"]):
+        raise ValueError("Operating Contract revision 不匹配")
+    if snapshot.get("global_rules", {}).get("content") != render_rules(contract):
+        raise ValueError("Global Rules 与 Operating Contract 不一致")
+    return operating
+
+
 def _activate_release(root: Path, release: Path) -> None:
     """Shared content and control documents switch through one pointer."""
     release = owned_release(root, release.resolve())
     snapshot = _validate_release(release)
     entry = {"layout_version": 1, "snapshot_dir": str(release), "revision": snapshot["revision"]}
+    if "global_contract" in snapshot:
+        operating = _contract_from_snapshot(snapshot)
+        entry.update(contract_version=operating["contract"]["contract_version"],
+                     contract_revision=operating["contract_revision"], contract_hash=operating["contract_hash"],
+                     shared_revision=snapshot["revision"])
     # Windows has no link aliases. Replacing a file is the only publication step.
     if WINDOWS:
         write_atomic(root / "runtime.json", json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
@@ -356,6 +379,15 @@ def _validate_release(release: Path) -> dict:
                     actual[path.relative_to(release).as_posix()] = _file_sha256(path)
     if actual != expected:
         raise ValueError("本地快照文件不完整或已损坏")
+    if "global_contract" in snapshot:
+        operating = _contract_from_snapshot(snapshot)
+        for relative in operating["contract"]["runtime"]["required_read_order"]:
+            if not (release / relative).is_file():
+                raise ValueError(f"Operating Contract 入口文件缺失：{relative}")
+        stored = json.loads((release / "shared/global_contract.json").read_text(encoding="utf-8"))
+        agent = json.loads((release / "control/agent_contract.json").read_text(encoding="utf-8"))
+        if stored != operating["contract"] or agent["contract_hash"] != operating["contract_hash"]:
+            raise ValueError("本地 Operating Contract 内容不一致")
     return snapshot
 
 
@@ -386,6 +418,7 @@ def recover_release(root: Path, releases: Path) -> Optional[dict]:
 
 def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) -> Path:
     verify_snapshot(snapshot)
+    operating = _contract_from_snapshot(snapshot)
     revision = int(snapshot["revision"])
     releases = workspace / ".runner" / "releases"
     reject_link_ancestors(releases)
@@ -395,7 +428,11 @@ def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) ->
         shared = staging / "shared"
         (shared / "skills").mkdir(parents=True)
         (shared / "selected_rag").mkdir(parents=True)
-        write_atomic(shared / "global_rules.md", snapshot["global_rules"]["content"])
+        write_atomic(shared / "global_contract.json", json.dumps(operating["contract"], ensure_ascii=False, indent=2) + "\n")
+        write_atomic(shared / "global_rules.md", render_rules(operating["contract"]))
+        write_atomic(staging / "control" / "agent_contract.json",
+                     json.dumps(agent_projection(operating["contract"], revision, operating["updated_at"]),
+                                ensure_ascii=False, indent=2) + "\n")
 
         used_skill_names: set[str] = set()
         for item in snapshot["shared_skills"]:
@@ -426,6 +463,10 @@ def apply_snapshot(workspace: Path, runner_id: str, snapshot: Dict[str, Any]) ->
 
         manifest = {
             "revision": revision,
+            "shared_revision": revision,
+            "contract_version": operating["contract"]["contract_version"],
+            "contract_revision": operating["contract_revision"],
+            "contract_hash": operating["contract_hash"],
             "rag_snapshot": snapshot["rag_snapshot"],
             "selected_rag": rag_manifest,
             "shared_skills": [

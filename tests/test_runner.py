@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from rdos_protocol import seal_snapshot
+from rdos_contract import contract_hash, make_contract, render_rules
 
 from runner.runner import (
     apply_project_snapshot,
@@ -41,9 +42,13 @@ def rag_item(content: str, runtime_name: str = "Context.md") -> dict:
 
 
 def snapshot(revision: int, content: str = "# Context\n") -> dict:
+    contract = make_contract("Local Agent 自主决定。")
     return seal_snapshot({
         "revision": revision,
-        "global_rules": {"content": "# Global Rules\n\nLocal Agent 自主决定。"},
+        "global_contract": {"contract": contract, "contract_revision": 1,
+                            "contract_hash": contract_hash(contract),
+                            "updated_at": "2026-09-27T00:00:00+00:00", "shared_revision": revision},
+        "global_rules": {"content": render_rules(contract)},
         "shared_skills": [
             {
                 "id": 1,
@@ -124,6 +129,26 @@ class RunnerSyncTest(unittest.TestCase):
                 apply_snapshot(workspace, "runner-test", broken)
             self.assertIn("Good Context", active.read_text(encoding="utf-8"))
             self.assertNotIn("Broken Context", active.read_text(encoding="utf-8"))
+
+    def test_bad_or_unknown_contract_never_replaces_last_known_good(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            apply_snapshot(workspace, "runner-test", snapshot(1))
+            old_entry = (workspace / "runtime.json").read_bytes()
+            for change in ("unknown_version", "bad_hash", "missing_field", "bad_read_order"):
+                candidate = snapshot(2)
+                operating = candidate["global_contract"]
+                if change == "unknown_version":
+                    operating["contract"]["contract_version"] = "99"
+                elif change == "bad_hash":
+                    operating["contract_hash"] = "0" * 64
+                elif change == "missing_field":
+                    operating["contract"].pop("workspace")
+                else:
+                    operating["contract"]["runtime"]["required_read_order"] = ["missing.md"]
+                with self.assertRaises(ValueError):
+                    apply_snapshot(workspace, "runner-test", seal_snapshot(candidate))
+                self.assertEqual((workspace / "runtime.json").read_bytes(), old_entry)
 
     def test_collaboration_file_contains_only_relevant_state(self) -> None:
         content = render_collaborations(

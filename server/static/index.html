@@ -85,11 +85,16 @@
         </section>
 
         <section id="page-rules" class="page">
-          <div class="section-intro"><h3>Global Rules</h3><p>这里只规定组织规则和协作边界，不规定 Local Agent 使用什么 Skill、Workflow 或执行步骤。</p></div>
+          <div class="section-intro"><h3>Operating Contract</h3><p>结构化规则是唯一正式来源；下方 Markdown 由其自动生成。Local Agent 仍自主决定具体工作方法。</p></div>
           <article class="panel editor-panel">
-            <div class="panel-head"><div><p id="rule-revision" class="eyebrow"></p><h3>当前正式规则</h3></div><span id="rule-updated" class="muted"></span></div>
-            <textarea id="rule-content" rows="18"></textarea>
+            <div class="panel-head"><div><p id="rule-revision" class="eyebrow"></p><h3>当前正式协议</h3></div><span id="rule-updated" class="muted"></span></div>
+            <label>组织补充说明<textarea id="rule-content" rows="10"></textarea></label>
+            <label class="check-option"><input id="rule-rag-required" type="checkbox" />Selected RAG 必读</label>
+            <label>Shared Skill 使用政策<select id="rule-skill-policy"><option value="recommended">推荐使用，允许本地替代</option><option value="optional">按需使用，允许本地替代</option></select></label>
             <div class="actions"><button id="save-rules" class="primary">发布并同步</button></div>
+            <details><summary>查看完整结构化协议（只读）</summary><pre id="rule-preview"></pre></details>
+          </article>
+          <article class="panel"><h3>历史版本</h3><div id="rule-history"></div>
           </article>
         </section>
 

@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from rdos_protocol import content_hash, seal_snapshot
+from rdos_contract import contract_hash, make_contract, render_rules, validate_contract
 from server.backup import backup_database
 
 from server.workflow_reference import (
@@ -239,7 +240,7 @@ def next_workday_nine() -> str:
 
 def init_db() -> None:
     _backup_legacy_database()
-    _backup_database_for_schema(6)
+    _backup_database_for_schema(7)
     with connection() as conn:
         if _table_exists(conn, "settings"):
             _rename_legacy_tables(conn)
@@ -249,6 +250,13 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS global_contract_history (
+                contract_revision INTEGER PRIMARY KEY,
+                content_json TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                published_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS admin_account (
@@ -602,6 +610,14 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES ('shared_revision', '1', ?)",
             (now,),
         )
+        if not conn.execute("SELECT 1 FROM global_contract_history LIMIT 1").fetchone():
+            original = _setting(conn, "current_rule") or DEFAULT_RULE
+            contract = make_contract(original)
+            conn.execute(
+                "INSERT INTO global_contract_history(contract_revision,content_json,content_hash,published_at) VALUES (1,?,?,?)",
+                (json.dumps(contract, ensure_ascii=False), contract_hash(contract), now),
+            )
+            _set_setting(conn, "current_contract_revision", "1")
 
         admin = conn.execute("SELECT 1 FROM admin_account WHERE id = 1").fetchone()
         if not admin:
@@ -663,7 +679,7 @@ def init_db() -> None:
             """,
             (workflow_token, workflow_url, workflow_hash),
         )
-        _set_setting(conn, "schema_version", "6")
+        _set_setting(conn, "schema_version", "7")
 
 
 def _import_legacy_rag(conn: sqlite3.Connection) -> None:
@@ -1067,24 +1083,65 @@ def update_runner_sync_status(
     return get_runner(runner_id) or {}
 
 
-def get_rules() -> Dict[str, Any]:
+def get_global_contract() -> Dict[str, Any]:
     with connection() as conn:
+        number = int(_setting(conn, "current_contract_revision") or "0")
         row = conn.execute(
-            "SELECT value, updated_at FROM settings WHERE key = 'current_rule'"
+            "SELECT * FROM global_contract_history WHERE contract_revision=?", (number,)
         ).fetchone()
-        revision = int(_setting(conn, "shared_revision") or "0")
-    return {"content": row["value"], "updated_at": row["updated_at"], "revision": revision}
+        shared = int(_setting(conn, "shared_revision") or "0")
+    if not row:
+        raise RuntimeError("Current Operating Contract 不存在")
+    contract = validate_contract(json.loads(row["content_json"]))
+    if contract_hash(contract) != row["content_hash"]:
+        raise ValueError("Current Operating Contract Hash 不匹配")
+    return {"contract": contract, "contract_revision": number, "contract_hash": row["content_hash"],
+            "updated_at": row["published_at"], "shared_revision": shared}
 
 
-def update_rules(content: str) -> Dict[str, Any]:
-    now = utc_now()
+def list_global_contract_history() -> List[Dict[str, Any]]:
     with connection() as conn:
-        conn.execute(
-            "UPDATE settings SET value = ?, updated_at = ? WHERE key = 'current_rule'",
-            (content, now),
-        )
-        revision = _bump_revision(conn)
-    return {"content": content, "updated_at": now, "revision": revision}
+        rows = conn.execute("SELECT * FROM global_contract_history ORDER BY contract_revision DESC").fetchall()
+    return [{"contract_revision": row["contract_revision"], "contract_hash": row["content_hash"],
+             "updated_at": row["published_at"], "contract": validate_contract(json.loads(row["content_json"]))}
+            for row in rows]
+
+
+def update_global_contract(guidance: str, rag_required: bool, skill_policy: str,
+                           expected_revision: int) -> Dict[str, Any]:
+    contract = make_contract(guidance, rag_required, skill_policy)
+    digest = contract_hash(contract)
+    with connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = int(_setting(conn, "current_contract_revision") or "0")
+        if current != expected_revision:
+            raise ValueError("stale_contract_revision")
+        existing = conn.execute("SELECT content_hash FROM global_contract_history WHERE contract_revision=?", (current,)).fetchone()
+        if existing and existing["content_hash"] == digest:
+            return get_global_contract()
+        number = current + 1
+        now = utc_now()
+        conn.execute("INSERT INTO global_contract_history(contract_revision,content_json,content_hash,published_at) VALUES (?,?,?,?)",
+                     (number, json.dumps(contract, ensure_ascii=False), digest, now))
+        _set_setting(conn, "current_contract_revision", str(number))
+        _bump_revision(conn)
+    return get_global_contract()
+
+
+def restore_global_contract(number: int, expected_revision: int) -> Dict[str, Any]:
+    with connection() as conn:
+        row = conn.execute("SELECT content_json FROM global_contract_history WHERE contract_revision=?", (number,)).fetchone()
+    if not row:
+        raise LookupError("contract_revision_not_found")
+    contract = validate_contract(json.loads(row["content_json"]))
+    return update_global_contract(contract["organization_guidance"], contract["knowledge"]["selected_rag_required"],
+                                  contract["skills"]["shared_skill_policy"], expected_revision)
+
+
+def get_rules() -> Dict[str, Any]:
+    current = get_global_contract()
+    return {"content": render_rules(current["contract"]), "updated_at": current["updated_at"],
+            "revision": current["shared_revision"]}
 
 
 def current_revision() -> int:
@@ -1544,9 +1601,12 @@ def _shared_snapshot(runner_id: str) -> Dict[str, Any]:
         raise LookupError("runner_not_found")
     rag = active_rag_files(include_content=True)
     state = rag_state()
+    operating = get_global_contract()
     return {
         "revision": current_revision(),
-        "global_rules": get_rules(),
+        "global_contract": operating,
+        "global_rules": {"content": render_rules(operating["contract"]),
+                         "updated_at": operating["updated_at"], "revision": operating["shared_revision"]},
         "shared_skills": list_skills(include_content=True),
         "skill_proposals": [
             {

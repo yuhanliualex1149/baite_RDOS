@@ -35,7 +35,7 @@ def main():
         try:
             wait_until(lambda: urllib.request.urlopen(url + "/api/health").status == 200, "Panel startup")
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(channel="chromium")
+                browser = playwright.chromium.launch(channel=os.environ.get("RDOS_TEST_BROWSER", "chromium"))
                 context = browser.new_context(permissions=["clipboard-read", "clipboard-write"])
                 page = context.new_page()
                 errors = []
@@ -46,6 +46,16 @@ def main():
                 page.locator("#login-username").fill("admin")
                 page.locator("#login-password").fill("IsolatedBrowser123!")
                 page.locator('#login-form button[type="submit"]').click()
+                page.on("dialog", lambda dialog: dialog.accept())
+                page.locator('[data-page="rules"]').first.click()
+                expect(page.locator("#rule-revision")).to_contain_text("CONTRACT v1")
+                page.locator("#rule-content").fill("浏览器验收规则")
+                page.locator("#rule-skill-policy").select_option("optional")
+                page.locator("#save-rules").click()
+                expect(page.locator("#rule-revision")).to_contain_text("修订 2")
+                expect(page.locator("#rule-preview")).to_contain_text('"shared_skill_policy": "optional"')
+                page.locator('[data-action="contract-restore"]').first.click()
+                expect(page.locator("#rule-revision")).to_contain_text("修订 3")
                 page.locator('[data-page="runners"]').first.click()
                 page.locator("#show-runner-form").click()
                 page.locator("#runner-name").fill("user1")
@@ -76,7 +86,6 @@ def main():
                 page.locator("#onboarding-platform").select_option("macos")
                 expect(page.locator("#download-bootstrapper")).to_have_attribute("href", re.compile("mac.dmg"))
                 page.locator('#config-dialog button[value="close"]').click()
-                page.on("dialog", lambda dialog: dialog.accept())
                 page.locator('[data-action="runner-enroll"]').click()
                 second_code = page.locator("#enrollment-code").inner_text()
                 assert second_code != code

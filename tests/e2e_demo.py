@@ -226,12 +226,15 @@ def main() -> None:
                 "三个 Runner 未全部 Online",
             )
 
+            contract = request(admin, base_url, "/api/admin/global-contract")
             request(
                 admin,
                 base_url,
-                "/api/admin/global-rules",
+                "/api/admin/global-contract",
                 "PUT",
-                {"content": "# E2E Global Rules\n\nLocal Agent 自主决定具体工作方式。"},
+                {"organization_guidance": "# E2E Global Rules\n\nLocal Agent 自主决定具体工作方式。",
+                 "selected_rag_required": True, "shared_skill_policy": "recommended",
+                 "expected_contract_revision": contract["contract_revision"]},
             )
             for name in runners:
                 workspace = temp / "workspace" / name

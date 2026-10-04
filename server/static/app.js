@@ -1,7 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 const basePath = new URL("..", document.currentScript.src).pathname.replace(/\/$/, "");
-const state = { admin: null, overview: null, rules: null, skills: [], proposals: [], rag: null, projects: [], projectDetail: null, selectedProjectId: null, workflow: null, currentConfig: null };
-const titles = { overview: "运行概览", projects: "项目管理", queue: "管理员待办", runners: "Runner 节点", rules: "Global Rules", skills: "Shared Skills", rag: "Selected RAG" };
+const state = { admin: null, overview: null, rules: null, contractHistory: [], skills: [], proposals: [], rag: null, projects: [], projectDetail: null, selectedProjectId: null, workflow: null, currentConfig: null };
+const titles = { overview: "运行概览", projects: "项目管理", queue: "管理员待办", runners: "Runner 节点", rules: "Operating Contract", skills: "Shared Skills", rag: "Selected RAG" };
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
@@ -99,9 +99,14 @@ function renderRunners() {
 
 function renderRules() {
   if (!state.rules) return;
-  $("#rule-revision").textContent = `SHARED REVISION ${state.rules.revision}`;
+  const contract = state.rules.contract;
+  $("#rule-revision").textContent = `CONTRACT v${contract.contract_version} · 修订 ${state.rules.contract_revision} · SHARED REVISION ${state.rules.shared_revision}`;
   $("#rule-updated").textContent = `最近发布 ${formatTime(state.rules.updated_at)}`;
-  if (document.activeElement !== $("#rule-content")) $("#rule-content").value = state.rules.content;
+  if (document.activeElement !== $("#rule-content")) $("#rule-content").value = contract.organization_guidance;
+  if (document.activeElement !== $("#rule-rag-required")) $("#rule-rag-required").checked = contract.knowledge.selected_rag_required;
+  if (document.activeElement !== $("#rule-skill-policy")) $("#rule-skill-policy").value = contract.skills.shared_skill_policy;
+  $("#rule-preview").textContent = JSON.stringify(contract, null, 2);
+  $("#rule-history").innerHTML = state.contractHistory.map((item) => `<div class="list-item"><div class="row"><b>修订 ${item.contract_revision}</b>${pill(item.contract_revision === state.rules.contract_revision ? "当前" : "历史")}</div><p>${formatTime(item.updated_at)} · <span class="mono">${escapeHtml(item.contract_hash.slice(0, 12))}…</span></p>${item.contract_revision === state.rules.contract_revision ? "" : `<button class="secondary" data-action="contract-restore" data-id="${item.contract_revision}">恢复为新修订</button>`}</div>`).join("");
 }
 
 function renderSkills() {
@@ -221,15 +226,15 @@ function renderAll() { renderOverview(); renderProjects(); renderQueue(); render
 
 async function refreshAll(silent = false) {
   try {
-    const [overview, rules, skills, proposals, rag, projects, workflow] = await Promise.all([
-      api("/api/admin/overview"), api("/api/admin/global-rules"), api("/api/admin/shared-skills"), api("/api/admin/skill-proposals"), api("/api/admin/selected-rag"), api("/api/admin/projects"), api("/api/admin/workflow-reference"),
+    const [overview, rules, history, skills, proposals, rag, projects, workflow] = await Promise.all([
+      api("/api/admin/overview"), api("/api/admin/global-contract"), api("/api/admin/global-contract/history"), api("/api/admin/shared-skills"), api("/api/admin/skill-proposals"), api("/api/admin/selected-rag"), api("/api/admin/projects"), api("/api/admin/workflow-reference"),
     ]);
     state.projects = projects.items;
     state.workflow = workflow;
     if (!state.selectedProjectId && state.projects.length) state.selectedProjectId = state.projects[0].id;
     if (state.selectedProjectId && !state.projects.some((item) => item.id === state.selectedProjectId)) state.selectedProjectId = state.projects[0]?.id || null;
     state.projectDetail = state.selectedProjectId ? (await api(`/api/admin/projects/${state.selectedProjectId}`)).item : null;
-    Object.assign(state, { overview, rules, skills: skills.items, proposals: proposals.items, rag });
+    Object.assign(state, { overview, rules, contractHistory: history.items, skills: skills.items, proposals: proposals.items, rag });
     renderAll();
   } catch (error) { if (!silent && state.admin) toast(error.message, true); }
 }
@@ -362,6 +367,11 @@ document.addEventListener("click", async (event) => {
   try {
     const id = button.dataset.id;
     switch (button.dataset.action) {
+      case "contract-restore": {
+        if (!confirm(`将修订 ${id} 的内容恢复为新的正式修订？`)) break;
+        await api(`/api/admin/global-contract/history/${id}/restore`, { method: "POST", body: JSON.stringify({ expected_contract_revision: state.rules.contract_revision }) });
+        toast("历史内容已作为新修订发布"); await refreshAll(); break;
+      }
       case "proposal-publish": await proposalDecision(id, "publish"); break;
       case "proposal-return": await proposalDecision(id, "return"); break;
       case "collab-confirm": await collaborationDecision(id, "confirm"); break;
@@ -473,7 +483,15 @@ $("#project-form").addEventListener("submit", async (event) => {
 });
 
 $("#save-rules").addEventListener("click", async () => {
-  try { state.rules = await api("/api/admin/global-rules", { method: "PUT", body: JSON.stringify({ content: $("#rule-content").value }) }); toast("Global Rules 已发布并同步"); renderRules(); await refreshAll(); } catch (error) { toast(error.message, true); }
+  try {
+    await api("/api/admin/global-contract", { method: "PUT", body: JSON.stringify({
+      organization_guidance: $("#rule-content").value,
+      selected_rag_required: $("#rule-rag-required").checked,
+      shared_skill_policy: $("#rule-skill-policy").value,
+      expected_contract_revision: state.rules.contract_revision,
+    }) });
+    toast("Operating Contract 已发布并同步"); await refreshAll();
+  } catch (error) { toast(error.message, true); }
 });
 
 async function synchronizeRag() {
