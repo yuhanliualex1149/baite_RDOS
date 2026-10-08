@@ -12,7 +12,7 @@ idna==3.20
 pydantic==2.13.5
 pydantic_core==2.46.5
 starlette==0.52.1
-tzdata==2025.2 --hash=sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8
+tzdata==2025.2
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 uvicorn==0.39.0
