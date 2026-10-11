@@ -34,7 +34,7 @@ jobs:
           umask 077
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/rdos_deploy
-          printf '%s\n' '39.96.86.168 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDG2NeWbEQdv+k4BOVL5AYA/rgI6KjgALF5rjIUXAi34' > ~/.ssh/known_hosts
+          printf '%s\n' '39.96.86.168 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDG2NeWbEQdv+k4BOVl5AYA/rgI6KjgALF5rjIUXAi34' > ~/.ssh/known_hosts
       - name: Verify connection or deploy exact commit
         env:
           OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'deploy' }}
