@@ -1,0 +1,54 @@
+name: RDOS production
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - 'deploy/**'
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'check verifies access only; deploy publishes the current main commit'
+        type: choice
+        options: [check, deploy]
+        default: check
+permissions:
+  contents: read
+concurrency:
+  group: rdos-production
+  cancel-in-progress: false
+jobs:
+  production:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Configure dedicated SSH identity
+        env:
+          DEPLOY_KEY: ${{ secrets.RDOS_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY" || { echo 'Add the RDOS_DEPLOY_SSH_KEY repository secret first.'; exit 1; }
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/rdos_deploy
+          printf '%s\n' '39.96.86.168 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDG2NeWbEQdv+k4BOVL5AYA/rgI6KjgALF5rjIUXAi34' > ~/.ssh/known_hosts
+      - name: Verify connection or deploy exact commit
+        env:
+          OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'deploy' }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$OPERATION" in
+            check) command=check ;;
+            deploy) command="deploy $COMMIT_SHA" ;;
+            *) exit 64 ;;
+          esac
+          ssh -T -i ~/.ssh/rdos_deploy -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+            baite-rdos-deploy@39.96.86.168 "$command"
+      - name: Remove temporary SSH identity
+        if: always()
+        run: rm -f ~/.ssh/rdos_deploy
