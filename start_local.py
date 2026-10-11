@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -33,6 +34,11 @@ def wait_for_server(process: subprocess.Popen, port: int, timeout: float = 25) -
             raise RuntimeError("Control Panel 启动失败，请查看上方日志")
         try:
             with urllib.request.urlopen(health_url, timeout=1):
+                # An older server on the same port must not make this new
+                # process appear to have started successfully.
+                time.sleep(0.2)
+                if process.poll() is not None:
+                    raise RuntimeError("Control Panel 启动失败，请检查端口是否已被占用")
                 return
         except (urllib.error.URLError, TimeoutError):
             time.sleep(0.3)
@@ -54,7 +60,7 @@ def stop_processes(processes: List[subprocess.Popen]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="启动 RDOS Control Panel 和可选的 Local Runner")
+    parser = argparse.ArgumentParser(description="启动 RDOS 中央 Agent 与本地 Panel")
     parser.add_argument("--env-file", type=Path, default=PROJECT_ROOT / ".env.local")
     parser.add_argument("--runner-config", type=Path, action="append", default=[])
     args = parser.parse_args()
@@ -73,6 +79,11 @@ def main() -> None:
 
     host = os.environ.get("BAITE_HOST", "127.0.0.1")
     port = int(os.environ.get("BAITE_PORT", "8000"))
+    try:
+        with socket.create_connection(("127.0.0.1" if host in ("0.0.0.0", "::") else host, port), timeout=0.3):
+            raise SystemExit(f"端口 {port} 已被占用；本地 Panel 可能已经运行。")
+    except OSError:
+        pass
     server_command = [
         sys.executable,
         "-m",
@@ -103,9 +114,10 @@ def main() -> None:
                 env=os.environ.copy(),
             )
             processes.append(process)
-        public_url = os.environ.get("BAITE_PUBLIC_URL", f"http://127.0.0.1:{port}")
-        print(f"\nRDOS 系统管理员工作台已启动：{public_url}", flush=True)
-        print(f"同时启动的 Local Runner：{len(args.runner_config)}", flush=True)
+        local_url = f"http://127.0.0.1:{port}"
+        print(f"\nRDOS 中央 Agent 本地 Panel 已启动：{local_url}", flush=True)
+        if args.runner_config:
+            print(f"另行启动的旧 Local Runner：{len(args.runner_config)}", flush=True)
         print("按 Ctrl+C 停止本次启动的所有进程。\n", flush=True)
         while all(process.poll() is None for process in processes):
             time.sleep(0.5)

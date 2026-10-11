@@ -3,17 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>RDOS 系统管理员工作台</title>
+    <title>RDOS 旧版管理界面</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="static/styles.css" />
+    <link rel="stylesheet" href="static/styles.css?v=20261011-vi" />
   </head>
   <body>
     <section id="login-view" class="login-shell">
       <form id="login-form" class="login-card">
-        <div class="brand-mark">B</div>
-        <p class="eyebrow">Baite AI R&amp;D OS</p>
-        <h1>系统管理员工作台</h1>
-        <p class="muted">管理组织共享信息、Local Runner 与需要人工介入的事项。</p>
+        <h1>旧版管理界面</h1>
+        <a class="central-entry" href="./" data-central-entry>返回新版 RDOS →</a>
         <label>管理员账号<input id="login-username" autocomplete="username" required /></label>
         <label>密码<input id="login-password" type="password" autocomplete="current-password" required /></label>
         <button class="primary wide" type="submit">登录</button>
@@ -23,42 +21,40 @@
 
     <div id="app-view" class="app-shell hidden">
       <aside class="sidebar">
-        <div class="brand"><span class="brand-mark small">B</span><div><b>RDOS</b><small>Admin Console</small></div></div>
+        <div class="brand"><div><b>RDOS</b><small>旧版管理界面</small></div></div>
+        <a class="central-entry sidebar-entry" href="./" data-central-entry>返回新版 RDOS →</a>
         <nav id="main-nav">
-          <button class="nav-item active" data-page="overview">Overview</button>
-          <button class="nav-item" data-page="projects">Projects <span id="project-badge" class="badge hidden">0</span></button>
-          <button class="nav-item" data-page="queue">Work Queue <span id="queue-badge" class="badge hidden">0</span></button>
-          <button class="nav-item" data-page="runners">Runners</button>
-          <button class="nav-item" data-page="rules">Global Rules</button>
-          <button class="nav-item" data-page="skills">Shared Skills</button>
-          <button class="nav-item" data-page="rag">Selected RAG</button>
+          <button class="nav-item active" data-page="overview">运行概览</button>
+          <button class="nav-item" data-page="projects">项目管理 <span id="project-badge" class="badge hidden">0</span></button>
+          <button class="nav-item" data-page="queue">管理员待办 <span id="queue-badge" class="badge hidden">0</span></button>
+          <button class="nav-item" data-page="runners">Runner 节点</button>
+          <button class="nav-item" data-page="rules">组织规则</button>
+          <button class="nav-item" data-page="skills">共享 Skill</button>
+          <button class="nav-item" data-page="rag">共享 RAG 资料</button>
         </nav>
-        <div class="boundary-note">
-          <b>职责边界</b>
-          <p>Panel 管协作<br />Runner 管同步<br />Local Agent 管具体工作</p>
-        </div>
       </aside>
 
       <main class="main-area">
         <header class="topbar">
-          <div><p class="eyebrow">SYSTEM ADMINISTRATOR</p><h2 id="page-title">运行概览</h2></div>
-          <div class="admin-actions"><span id="admin-name"></span><button id="change-password" class="text-button">修改密码</button><button id="logout" class="text-button">退出</button></div>
+          <div><h2 id="page-title">运行概览</h2></div>
+          <div class="admin-actions"><span id="admin-name"></span><button id="legacy-refresh" class="text-button">刷新数据</button><button id="change-password" class="text-button">修改密码</button><button id="logout" class="text-button">退出</button></div>
         </header>
+        <div id="refresh-status" class="refresh-status" role="status" aria-live="polite">正在读取旧版数据…</div>
 
         <section id="page-overview" class="page active">
           <div id="overview-metrics" class="metrics"></div>
           <div class="two-column">
-            <article class="panel"><div class="panel-head"><div><p class="eyebrow">RUNNERS</p><h3>节点状态</h3></div><button class="secondary go-page" data-page="runners">管理节点</button></div><div id="overview-runners"></div></article>
-            <article class="panel"><div class="panel-head"><div><p class="eyebrow">CURRENT FOCUS</p><h3>当前重点与进度</h3></div></div><div id="overview-progress"></div></article>
+            <article class="panel"><div class="panel-head"><div><h3>节点状态</h3></div><button class="secondary go-page" data-page="runners">管理节点</button></div><div id="overview-runners"></div></article>
+            <article class="panel"><div class="panel-head"><div><h3>当前重点与进度</h3></div></div><div id="overview-progress"></div></article>
           </div>
           <div class="two-column">
-            <article class="panel"><div class="panel-head"><div><p class="eyebrow">ACTIVITY</p><h3>最近工作方法元数据</h3></div></div><div id="overview-activities"></div></article>
-            <article class="panel"><div class="panel-head"><div><p class="eyebrow">SHARED CONTEXT</p><h3>共享状态</h3></div></div><div id="overview-shared"></div></article>
+            <article class="panel"><div class="panel-head"><div><h3>最近使用的方法</h3></div></div><div id="overview-activities"></div></article>
+            <article class="panel"><div class="panel-head"><div><h3>共享状态</h3></div></div><div id="overview-shared"></div></article>
           </div>
         </section>
 
         <section id="page-projects" class="page">
-          <div class="split-heading"><div><h3>项目管理</h3><p>汇总项目协作事实、研发节点和 Gate 记录，不规定 Local Agent 的执行步骤。</p></div><button id="show-project-form" class="primary">新建项目</button></div>
+          <div class="split-heading"><button id="show-project-form" class="primary">新建项目</button></div>
           <div class="project-layout">
             <aside class="panel project-list-panel"><div id="project-list"></div></aside>
             <div id="project-detail" class="project-detail"></div>
@@ -66,16 +62,15 @@
         </section>
 
         <section id="page-queue" class="page">
-          <div class="section-intro"><h3>只把真正需要管理员行动的事项放在这里</h3><p>日常进度和普通节点协作不会进入待办。</p></div>
           <div class="queue-grid">
-            <article class="panel"><p class="eyebrow orange">待发布</p><h3>规则与 Shared Skill</h3><div id="queue-publish"></div></article>
-            <article class="panel"><p class="eyebrow blue">待判断</p><h3>风险、Gate 与升级协作</h3><div id="queue-judgments"></div></article>
-            <article class="panel"><p class="eyebrow red">异常需处理</p><h3>同步与内容异常</h3><div id="queue-incidents"></div></article>
+            <article class="panel"><h3>待发布内容</h3><div id="queue-publish"></div></article>
+            <article class="panel"><h3>待核实事项</h3><div id="queue-judgments"></div></article>
+            <article class="panel"><h3>同步与内容异常</h3><div id="queue-incidents"></div></article>
           </div>
         </section>
 
         <section id="page-runners" class="page">
-          <div class="split-heading"><div><h3>Local Runner 节点</h3><p>节点数量不固定。每个节点使用独立 Token 和 Workspace。</p></div><button id="show-runner-form" class="primary">创建节点</button></div>
+          <div class="split-heading"><button id="show-runner-form" class="primary">创建节点</button></div>
           <form id="runner-form" class="panel compact-form hidden">
             <label>显示名<input id="runner-name" placeholder="例如：user1" required /></label>
             <label class="grow">建议 Workspace（可选）<input id="runner-workspace" placeholder="留空由本机安装器确定；也可填 Windows / POSIX 绝对路径" /></label>
@@ -85,39 +80,38 @@
         </section>
 
         <section id="page-rules" class="page">
-          <div class="section-intro"><h3>Operating Contract</h3><p>结构化规则是唯一正式来源；下方 Markdown 由其自动生成。Local Agent 仍自主决定具体工作方法。</p></div>
           <article class="panel editor-panel">
             <div class="panel-head"><div><p id="rule-revision" class="eyebrow"></p><h3>当前正式协议</h3></div><span id="rule-updated" class="muted"></span></div>
             <label>组织补充说明<textarea id="rule-content" rows="10"></textarea></label>
             <label class="check-option"><input id="rule-rag-required" type="checkbox" />Selected RAG 必读</label>
             <label>Shared Skill 使用政策<select id="rule-skill-policy"><option value="recommended">推荐使用，允许本地替代</option><option value="optional">按需使用，允许本地替代</option></select></label>
-            <div class="actions"><button id="save-rules" class="primary">发布并同步</button></div>
-            <details><summary>查看完整结构化协议（只读）</summary><pre id="rule-preview"></pre></details>
+            <p id="rule-edit-status" class="edit-status" role="status" aria-live="polite"></p>
+            <div class="actions"><button id="discard-rules" class="secondary" type="button" disabled>放弃修改</button><button id="save-rules" class="primary">发布并同步</button></div>
+            <details><summary>查看完整协议</summary><pre id="rule-preview"></pre></details>
           </article>
           <article class="panel"><h3>历史版本</h3><div id="rule-history"></div>
           </article>
         </section>
 
         <section id="page-skills" class="page">
-          <div class="section-intro"><h3>Shared Skills</h3><p>正式版本由系统管理员发布；候选内容来自 Local Agent Proposal。</p></div>
           <div class="two-column align-start">
-            <article class="panel"><p class="eyebrow">OFFICIAL</p><h3>正式版本</h3><div id="skill-list"></div></article>
-            <article class="panel"><p class="eyebrow orange">PROPOSALS</p><h3>候选版本与差异</h3><div id="proposal-list"></div></article>
+            <article class="panel"><h3>正式版本</h3><div id="skill-list"></div></article>
+            <article class="panel"><h3>候选版本与差异</h3><div id="proposal-list"></div></article>
           </div>
         </section>
 
         <section id="page-rag" class="page">
-          <div class="split-heading"><div><h3>Selected RAG</h3><p>只读同步飞书云空间指定文件夹。正文不能在本工作台新增、修改或删除。</p></div><button id="sync-rag" class="primary">立即同步</button></div>
+          <div class="split-heading"><div><p>从飞书同步；修改正文请打开原文件。</p></div><button id="sync-rag" class="primary">立即同步</button></div>
           <div id="rag-state" class="status-banner"></div>
-          <article class="panel table-panel"><div class="panel-head"><div><p class="eyebrow">ACTIVE SNAPSHOT</p><h3>当前生效文件</h3></div></div><div class="table-wrap"><table><thead><tr><th>文件</th><th>类型</th><th>更新时间</th><th>Hash</th><th>状态</th></tr></thead><tbody id="rag-files"></tbody></table></div></article>
-          <article class="panel"><p class="eyebrow">NOT IN RUNTIME</p><h3>未纳入项</h3><div id="rag-ignored"></div></article>
+          <article class="panel table-panel"><div class="panel-head"><div><h3>当前生效文件</h3></div></div><div class="table-wrap"><table><thead><tr><th>文件</th><th>类型</th><th>更新时间</th><th>状态</th></tr></thead><tbody id="rag-files"></tbody></table></div></article>
+          <article class="panel"><h3>未纳入项</h3><div id="rag-ignored"></div></article>
         </section>
       </main>
     </div>
 
     <dialog id="config-dialog">
       <form method="dialog" class="dialog-card">
-        <p class="eyebrow">RUNNER BOOTSTRAPPER · INTERNAL TEST</p><h3>Runner 接入交付</h3>
+        <h3>旧版 Runner 接入</h3>
         <p>用户双击安装器、粘贴一次性接入码；Windows 10/11 实机仍待验收。</p>
         <section id="enrollment-secret" class="hidden">
           <p>接入码仅本次显示，24 小时有效。请私下交付，不要粘贴到聊天或日志。</p>
@@ -134,22 +128,24 @@
         <label>接入平台<select id="onboarding-platform"><option value="macos">macOS</option><option value="windows">Windows x64</option></select></label>
         <a id="download-bootstrapper" class="primary hidden" href="#">下载安装器</a>
         <label>交给 Local Agent 的指令（不含凭证）<textarea id="onboarding-text" rows="12" readonly></textarea></label>
-        <div class="actions"><button id="copy-onboarding" class="primary" type="button">复制接入指令</button><button class="secondary" value="close">关闭</button></div>
+        <p id="config-message" class="dialog-message" data-dialog-notice role="status" aria-live="polite"></p>
+        <div class="actions"><button id="copy-onboarding" class="primary" type="button">复制接入指令</button><button id="close-config" class="secondary" type="button" value="close">关闭</button></div>
       </form>
     </dialog>
 
     <dialog id="password-dialog">
-      <form id="password-form" class="dialog-card">
-        <p class="eyebrow">ADMIN ACCOUNT</p><h3>修改管理员密码</h3>
-        <label>当前密码<input id="current-password" type="password" required /></label>
-        <label>新密码<input id="new-password" type="password" minlength="10" required /></label>
+      <form id="password-form" class="dialog-card" data-draft-form>
+        <h3>修改密码</h3>
+        <label>当前密码<input id="current-password" type="password" autocomplete="current-password" required /></label>
+        <label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="10" required /></label>
+        <p class="form-error" data-form-error role="alert"></p>
         <div class="actions"><button class="primary" type="submit">修改并重新登录</button><button id="cancel-password" class="secondary" type="button">取消</button></div>
       </form>
     </dialog>
     <dialog id="project-dialog">
-      <form id="project-form" class="dialog-card project-form">
+      <form id="project-form" class="dialog-card project-form" data-draft-form>
         <input id="project-id" type="hidden" />
-        <p class="eyebrow">PROJECT SETUP</p><h3 id="project-form-title">新建项目</h3>
+        <h3 id="project-form-title">新建项目</h3>
         <div class="form-grid">
           <label class="full">项目名称<input id="project-name" required maxlength="300" /></label>
           <label class="full">项目说明<textarea id="project-description" rows="3"></textarea></label>
@@ -163,16 +159,18 @@
         <fieldset><legend>参与 Runner</legend><div id="project-members" class="check-grid"></div></fieldset>
         <fieldset><legend>产品类型</legend><div id="project-types" class="check-grid"></div></fieldset>
         <fieldset><legend>交付规模</legend><div id="project-scales" class="check-grid"></div></fieldset>
+        <p class="form-error" data-form-error role="alert"></p>
         <div class="actions"><button id="cancel-project" class="secondary" type="button">取消</button><button class="primary" type="submit">保存项目</button></div>
       </form>
     </dialog>
     <dialog id="gate-return-dialog">
-      <form id="gate-return-form" class="dialog-card">
+      <form id="gate-return-form" class="dialog-card" data-draft-form>
         <input id="gate-return-project" type="hidden" />
         <input id="gate-return-record" type="hidden" />
-        <p class="eyebrow">GATE RECORD</p><h3>退回核实</h3>
-        <p>请说明还需要补充核实什么。退回只影响这条记录，不会阻断 Runner 继续工作。</p>
+        <h3>退回核实</h3>
+        <p>请说明需补充的内容。退回此记录不影响 Runner 工作。</p>
         <label>反馈<textarea id="gate-return-feedback" rows="4" required></textarea></label>
+        <p class="form-error" data-form-error role="alert"></p>
         <div class="actions"><button id="cancel-gate-return" class="secondary" type="button">取消</button><button class="primary" type="submit">退回核实</button></div>
       </form>
     </dialog>

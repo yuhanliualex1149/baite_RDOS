@@ -53,7 +53,11 @@ class CloudApiTest(unittest.TestCase):
             with TestClient(app, root_path="/baite-rdos", base_url="https://yjmt.cn") as client:
                 prefix = "/baite-rdos"
                 page = client.get(prefix + "/")
-                self.assertIn('href="static/styles.css"', page.text)
+                self.assertRegex(page.text, r'href="static/central\.css(?:\?[^" ]+)?"')
+                self.assertIn("中央 Agent", page.text)
+                self.assertEqual(client.get(prefix + "/static/central.js").status_code, 200)
+                legacy = client.get(prefix + "/legacy")
+                self.assertRegex(legacy.text, r'href="static/styles\.css(?:\?[^" ]+)?"')
                 self.assertEqual(client.get(prefix + "/static/app.js").status_code, 200)
                 body = {"username": "admin", "password": "AdminPassword123!"}
                 self.assertEqual(client.post(prefix + "/api/auth/login", json=body).status_code, 403)

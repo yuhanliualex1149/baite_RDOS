@@ -14,7 +14,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError, field_validator
 
-from server import db
+from server import db, central_store, central_service
+from server.central_api import router as central_router
+from server.central_onboarding import router as onboarding_router
 from server.onboarding import instructions, validate_client_workspace
 from server.project_sync import (
     export_pending_progress,
@@ -41,16 +43,21 @@ ONLINE_WINDOW_SECONDS = float(os.environ.get("BAITE_ONLINE_WINDOW_SECONDS", "60"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_db()
+    central_store.init()
+    for item in central_store.items("onboarding_session"):
+        if item.get("checking"):
+            item.update(checking=False, error="服务重启中断了上次核对；已有成果保留，可继续核对。")
+            central_store.put("onboarding_session", item["id"], item)
     stop = asyncio.Event()
-    tasks = [
-        asyncio.create_task(scheduler(stop)),
-        asyncio.create_task(project_scheduler(stop)),
-    ]
+    tasks = [asyncio.create_task(central_service.scheduler(stop))]
+    if os.environ.get("BAITE_ENABLE_LEGACY_SYNC", "").lower() in ("1", "true", "yes"):
+        tasks.extend((asyncio.create_task(scheduler(stop)), asyncio.create_task(project_scheduler(stop))))
     try:
         yield
     finally:
         stop.set()
         await asyncio.gather(*tasks)
+        await central_service.shutdown()
 
 
 app = FastAPI(
@@ -61,6 +68,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(central_router)
+app.include_router(onboarding_router)
 
 
 @app.middleware("http")
@@ -69,9 +78,9 @@ async def admin_origin_guard(request: Request, call_next):
     root_path = request.scope.get("root_path", "").rstrip("/")
     if root_path and path.startswith(root_path + "/"):
         path = path[len(root_path):]
-    protected = path.startswith(("/api/admin/", "/api/auth/"))
+    protected = path.startswith(("/api/admin/", "/api/auth/", "/api/central/"))
     if protected and request.method not in ("GET", "HEAD", "OPTIONS"):
-        public = urlsplit(_public_url())
+        public = urlsplit(str(request.base_url)) if path.startswith("/api/central/") else urlsplit(_public_url())
         if request.headers.get("origin") != f"{public.scheme}://{public.netloc}":
             return JSONResponse({"detail": "管理操作必须来自本控制台"}, status_code=403)
     response = await call_next(request)
@@ -393,6 +402,11 @@ def require_runner(authorization: Optional[str] = Header(default=None)) -> Dict[
 
 @app.get("/")
 def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "central.html")
+
+
+@app.get("/legacy")
+def legacy_index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 

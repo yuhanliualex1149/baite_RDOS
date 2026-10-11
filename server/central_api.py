@@ -1,0 +1,544 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from typing import Literal, Optional
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
+
+from server import central_service as service, central_store as store, central_projects as projects, db
+from server.feishu_tools import DEFAULT_CLI
+
+
+router = APIRouter(prefix="/api/central")
+COOKIE = "baite_central_session"
+_LOGIN_ATTEMPTS: dict[tuple[str, str], list[float]] = {}
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_WINDOW_SECONDS = 60
+_LOGIN_MAX_ATTEMPTS = 10
+
+
+def _cookie_path() -> str:
+    return urlsplit(os.environ.get("BAITE_PUBLIC_URL", "http://127.0.0.1:8000")).path.rstrip("/") + "/"
+
+
+def _check_login_limit(request: Request) -> None:
+    # The reverse proxy supplies the client address to trusted Uvicorn proxy
+    # headers. Never trust a user-supplied X-Forwarded-For header here.
+    key = (str(db.db_path()), request.client.host if request.client else "unknown")
+    now = time.monotonic()
+    with _LOGIN_LOCK:
+        recent = [stamp for stamp in _LOGIN_ATTEMPTS.get(key, ()) if stamp > now - _LOGIN_WINDOW_SECONDS]
+        if len(recent) >= _LOGIN_MAX_ATTEMPTS:
+            retry_after = max(1, int(recent[0] + _LOGIN_WINDOW_SECONDS - now) + 1)
+            raise HTTPException(429, "登录尝试过于频繁，请稍后再试。", headers={"Retry-After": str(retry_after)})
+        recent.append(now)
+        _LOGIN_ATTEMPTS[key] = recent
+        if len(_LOGIN_ATTEMPTS) > 1024:
+            for old_key, stamps in list(_LOGIN_ATTEMPTS.items()):
+                if stamps[-1] <= now - _LOGIN_WINDOW_SECONDS:
+                    _LOGIN_ATTEMPTS.pop(old_key, None)
+            if len(_LOGIN_ATTEMPTS) > 1024:
+                oldest = sorted(_LOGIN_ATTEMPTS, key=lambda item: _LOGIN_ATTEMPTS[item][-1])
+                for old_key in oldest[:len(_LOGIN_ATTEMPTS) - 1024]:
+                    _LOGIN_ATTEMPTS.pop(old_key, None)
+
+
+class Input(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Login(Input):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=500)
+
+
+class Operation(Input):
+    operation_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class ProjectOperation(Operation):
+    project_id: str = Field(default=store.PROJECT_ID, min_length=1, max_length=100)
+
+
+class Chat(Operation):
+    message: str = Field(min_length=1, max_length=20000)
+    # Omitting a project opens the organization conversation. Existing project
+    # conversations continue to use an explicit project_id.
+    project_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+
+class Task(ProjectOperation):
+    task_id: str = Field(default="", max_length=100)
+    instructions: str = Field(min_length=1, max_length=25000)
+    member_ids: list[str] = Field(min_length=1, max_length=30)
+    task_kind: Literal["work", "onboarding"] = "work"
+    stage: Literal["", "第一阶段", "第二阶段", "第三阶段"] = ""
+    nature: Literal["一次性", "周期", "每次接入执行"] = "一次性"
+    related_task: str = Field(default="", max_length=100)
+    version: str = Field(default="", max_length=30)
+
+
+class Member(Input):
+    username: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=80)
+    roles: list[Literal["admin", "researcher"]] = Field(min_length=1, max_length=2)
+    password: str = Field(default="", max_length=500)
+    identity_mode: Literal["actual", "role_test"] = "actual"
+    member_id: str = Field(default="", max_length=84, pattern=r"^(?:|mem_[A-Za-z0-9_-]{8,80})$")
+
+
+class MemberEdit(Input):
+    username: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    roles: Optional[list[Literal["admin", "researcher"]]] = None
+    identity_mode: Optional[Literal["actual", "role_test"]] = None
+    enabled: Optional[StrictBool] = None
+
+
+class Onboarding(Input):
+    project_id: str = Field(default=store.PROJECT_ID, min_length=1, max_length=100)
+    work_scope: str = Field(min_length=1, max_length=4000)
+    share_scope: str = Field(min_length=1, max_length=4000)
+    stage: int = Field(ge=1, le=3)
+    evidence: str = Field(min_length=1, max_length=12000)
+    run_label: str = Field(min_length=1, max_length=120)
+
+
+class Runtime(Input):
+    paused: StrictBool
+
+
+class DraftEdit(Input):
+    old_text: str = Field(max_length=30000)
+    new_text: str = Field(min_length=1, max_length=30000)
+    summary: str = Field(min_length=1, max_length=3000)
+
+
+class Publish(Operation):
+    expected_hash: str = Field(min_length=64, max_length=64)
+
+
+class ProjectCreate(Operation):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    member_ids: list[str] = Field(min_length=1, max_length=30)
+    folder_url: str = Field(min_length=1, max_length=1000)
+    # Admin-only migration from a local trial. Ordinary creation still creates
+    # a project feedback document in the selected folder.
+    project_id: str = Field(default="", max_length=100, pattern=r"^(?:|prj_[A-Za-z0-9_-]{6,90})$")
+    feedback_url: str = Field(default="", max_length=1000)
+
+
+class ProjectEdit(Operation):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    member_ids: Optional[list[str]] = Field(default=None, min_length=1, max_length=30)
+    folder_url: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+
+
+class SourceCreate(Operation):
+    url: str = Field(min_length=1, max_length=1000)
+    name: str = Field(default="", max_length=160)
+    watch: StrictBool = False
+
+
+class Rejection(Input):
+    reason: str = Field(default="", max_length=4000)
+
+
+class TaskDraftEdit(Input):
+    instructions: str = Field(min_length=1, max_length=25000)
+    member_ids: list[str] = Field(min_length=1, max_length=30)
+    task_id: str = Field(default="", max_length=100)
+    task_kind: Literal["work", "onboarding"] = "work"
+    stage: Literal["", "第一阶段", "第二阶段", "第三阶段"] = ""
+    nature: Literal["一次性", "周期", "每次接入执行"] = "一次性"
+    related_task: str = Field(default="", max_length=100)
+    version: str = Field(default="", max_length=30)
+
+
+def current_user(token: Optional[str] = Cookie(default=None, alias=COOKIE),
+                 actor: Optional[str] = Header(default=None, alias="X-RDOS-Actor")) -> dict:
+    user = store.session(token or "")
+    if not user:
+        raise HTTPException(401, "登录已过期，请重新登录。")
+    if actor is not None and actor != user["id"]:
+        raise HTTPException(409, {"message": "当前账号已变化，请重新登录。", "code": "session_changed"})
+    return user
+
+
+def admin(user: dict = Depends(current_user)) -> dict:
+    if "admin" not in user["roles"]:
+        raise HTTPException(403, "当前账号不能执行此操作，请使用管理员账号，或联系管理员。")
+    return user
+
+
+def researcher(user: dict = Depends(current_user)) -> dict:
+    if "researcher" not in user["roles"]:
+        raise HTTPException(403, "当前账号不能登记研究员接入，请使用研究员账号，或联系管理员。")
+    return user
+
+
+def failure(exc: Exception) -> HTTPException:
+    parsing = isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)) or getattr(exc, "code", "") == "parse_error"
+    status = 404 if isinstance(exc, projects.ProjectNotFoundError) else 403 if isinstance(exc, PermissionError) else 502 if parsing else 409 if isinstance(exc, (ValueError, sqlite3.IntegrityError)) else 502
+    code = getattr(exc, "code", "parse_error" if parsing else "project_not_found" if status == 404 else "permission_denied" if status == 403 else "validation_error" if status == 409 else "operation_failed")
+    return HTTPException(status, {"message": "账号已存在，请换一个登录名。" if isinstance(exc, sqlite3.IntegrityError) else service.human_error(exc),
+                                 "code": code, "technical_detail": service.safe_error(exc)})
+
+
+def project_failure(exc: Exception, operation_id: str) -> HTTPException:
+    error = failure(exc)
+    operation = store.get("operation", operation_id) or {}
+    if operation.get("action") == "project" and operation.get("status") == "failed":
+        record_id = (operation.get("result") or {}).get("project_id")
+        item = store.get("project", record_id) if record_id else None
+        if item and item.get("status") == "failed":
+            error.detail["project_id"] = record_id
+    return error
+
+
+@router.post("/auth/login")
+def login(payload: Login, response: Response, request: Request):
+    _check_login_limit(request)
+    result = store.login(payload.username.strip(), payload.password)
+    if not result:
+        raise HTTPException(401, "账号或密码不匹配，请检查后重试。")
+    response.set_cookie(COOKIE, result["token"], max_age=12 * 3600, httponly=True,
+                        secure=request.url.scheme == "https" or urlsplit(os.environ.get("BAITE_PUBLIC_URL", "")).scheme == "https"
+                        or os.environ.get("BAITE_COOKIE_SECURE", "").lower() in ("1", "true", "yes"),
+                        samesite="strict", path=_cookie_path())
+    return {"user": result["user"]}
+
+
+@router.get("/auth/me")
+def me(user: dict = Depends(current_user)):
+    return {"user": user}
+
+
+@router.post("/auth/logout")
+def logout(response: Response, token: Optional[str] = Cookie(default=None, alias=COOKIE)):
+    store.logout(token or "")
+    response.delete_cookie(COOKIE, path=_cookie_path())
+    return {"ok": True}
+
+
+@router.get("/workspace")
+def workspace(project_id: str = store.PROJECT_ID, user: dict = Depends(current_user)):
+    try:
+        project = projects.project(project_id, user)
+    except Exception as exc:
+        raise failure(exc) from exc
+    is_admin = "admin" in user["roles"]
+    tasks = [item for item in store.items("task") if projects.belongs(item, project_id) or (not item.get("project_id") and item.get("task_id") in ("ONB-FRAME-01", "ONB-REVIEW-01"))]
+    feedback = [item for item in store.items("feedback") if projects.belongs(item, project_id)]
+    proposals = [item for item in store.items("proposal") if projects.belongs(item, project_id)]
+    runtime = dict(store.get("state", "runtime") or {})
+    project_runtime = runtime.get("project_runtime", {}).get(project_id)
+    # A team-level chat must not appear as the selected project's latest work.
+    for field in ("last_scheduled", "last_manual", "last_read_at", "error", "last_error", "last_read_error", "technical_detail"):
+        runtime.pop(field, None)
+    runtime["schedule_verified"] = False
+    if project_runtime:
+        runtime.update(project_runtime)
+    runtime["next_due"] = runtime.get("project_next_due", {}).get(project_id, runtime.get("next_due"))
+    runtime.update(model_configured=bool(os.environ.get("BAITE_LLM_API_KEY") or os.environ.get("ARK_API_KEY")),
+                   model=os.environ.get("BAITE_LLM_MODEL") or "deepseek-v4-pro",
+                   feishu_configured=Path(os.environ.get("BAITE_LARK_CLI", str(DEFAULT_CLI))).is_file(),
+                   error=runtime.get("error") or runtime.get("last_error") or runtime.get("last_read_error", ""))
+    # These filters route relevant work; Feishu's existing organization sharing is unchanged.
+    if not is_admin:
+        tasks = [task for task in tasks if service.task_applies(task, user["id"])]
+        feedback = [item for item in feedback if item.get("member_id") == user["id"]]
+        proposals = [item for item in proposals if item["status"] == "published"]
+    all_runs = store.items("run") if is_admin else []
+    runs_by_id = {item["id"]: item for item in all_runs}
+    messages = []
+    if is_admin:
+        for message in store.items("message"):
+            if not projects.belongs(message, project_id):
+                continue
+            run = runs_by_id.get(message.get("run_id"), {})
+            entry = {**message, "kind": message.get("kind", run.get("kind", "")),
+                     "trigger": message.get("trigger", run.get("trigger", ""))}
+            if entry["kind"] != "sync" and entry["trigger"] != "scheduled":
+                messages.append(entry)
+        # Keep the conversation window independent of the diagnostics window.
+        # Source metadata, never message wording, distinguishes periodic checks.
+        messages = sorted(messages, key=lambda item: item["created_at"])[-60:]
+    return {"user": user, "project": project, "projects": projects.list_projects(user),
+            "users": store.users() if is_admin else [user], "tasks": tasks, "feedback": feedback,
+            "proposals": proposals, "runs": [item for item in all_runs if projects.belongs(item, project_id)][:60],
+            "task_drafts": [item for item in store.items("task_draft") if projects.belongs(item, project_id)] if is_admin else [],
+            "messages": messages,
+            "sources": projects.sources(project_id), "runtime": runtime,
+            "onboarding": [item for item in store.items("onboarding") if projects.belongs(item, project_id) and (is_admin or item["member_id"] == user["id"])]}
+
+
+@router.post("/chat")
+async def chat(payload: Chat, user: dict = Depends(admin)):
+    try:
+        run = service.new_run(user, payload.message, payload.operation_id,
+                              project_id=payload.project_id or "")
+        if run["status"] == "queued":
+            service.launch(run)
+        return {"run_id": run["id"]}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.get("/overview")
+def overview(user: dict = Depends(admin)):
+    """Organization conversation and concise project context for admins."""
+    return service.organization_overview(user)
+
+
+@router.post("/sync")
+async def sync(payload: ProjectOperation, user: dict = Depends(admin)):
+    try:
+        run = service.new_run(user, "读取真实反馈和重要正文变化；基于证据整合进展，必要时发布具体补充要求。不要重复已处理要求；方法改动先形成草稿。", payload.operation_id, "sync", project_id=payload.project_id)
+        if run["status"] == "queued":
+            service.launch(run)
+        return {"run_id": run["id"]}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.get("/runs/{run_id}")
+def run_detail(run_id: str, user: dict = Depends(admin)):
+    item = store.get("run", run_id)
+    if not item:
+        raise HTTPException(404, "找不到这次处理记录，请刷新后重新选择。")
+    return {"run": item, **item}
+
+
+@router.post("/runs/{run_id}/retry")
+async def retry(run_id: str, user: dict = Depends(admin)):
+    item = store.get("run", run_id)
+    if not item:
+        raise HTTPException(404, "找不到这次处理记录，请刷新后重新选择。")
+    if item["status"] not in ("failed", "paused", "interrupted"):
+        raise HTTPException(409, "这次处理不需要重试，请先查看当前结果。")
+    if any(run["status"] in ("queued", "running") for run in store.items("run")):
+        raise HTTPException(409, "中央 Agent 正在处理其他工作，请等待完成后再试。")
+    if (store.get("state", "runtime") or {}).get("paused"):
+        raise HTTPException(409, "请先恢复中央 Agent，再重试")
+    retry_count = item.get("retry_count", 0) + 1
+    if retry_count > 2:
+        raise HTTPException(409, "这次处理已继续两次，请先查看错误和已有结果，再发起新操作。")
+    item.setdefault("previous_attempts", []).append({key: item.get(key) for key in ("started_at", "completed_at", "status", "error", "steps", "usage", "result")})
+    item.update(status="queued", error="", technical_detail="", steps=[], result="", retry_count=retry_count)
+    for key in ("completed_at", "analysis_complete", "no_analysis", "usage", "model"):
+        item.pop(key, None)
+    store.put("run", run_id, item)
+    service.launch(item)
+    return {"run_id": run_id}
+
+
+@router.post("/tasks")
+async def task(payload: Task, user: dict = Depends(admin)):
+    try:
+        return {"item": await service.save_task(payload.model_dump(exclude={"operation_id"}, exclude_unset=True), payload.operation_id, user)}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.post("/tasks/{task_id}/withdraw")
+async def withdraw(task_id: str, payload: ProjectOperation, user: dict = Depends(admin)):
+    try:
+        return {"item": await service.save_task({"task_id": task_id, "status": "停用", "project_id": payload.project_id}, payload.operation_id, user)}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.post("/users")
+def create_member(payload: Member, user: dict = Depends(admin)):
+    try:
+        return store.create_user(**payload.model_dump())
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.patch("/users/{user_id}")
+def edit_member(user_id: str, payload: MemberEdit, user: dict = Depends(admin)):
+    try:
+        return {"user": store.update_user(user_id, payload.model_dump(exclude_none=True))}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.post("/onboarding")
+async def onboarding(payload: Onboarding, user: dict = Depends(current_user)):
+    try:
+        project = projects.project(payload.project_id, user)
+    except Exception as exc:
+        raise failure(exc) from exc
+    item = {**payload.model_dump(), "id": "onb_" + store.digest([user["id"], payload.project_id, payload.stage, payload.run_label])[:20],
+            "member_id": user["id"], "project_id": payload.project_id, "identity_mode": user["identity_mode"],
+            "evidence_status": "研究员自述；本地记忆保存和执行效果仍需实际核对", "created_at": db.utc_now()}
+    # Only a matching remote member/run segment proves feedback was readable here.
+    try:
+        document = await asyncio.to_thread(service.feishu(payload.project_id).read_document, project["feedback_id"])
+        entries = service.parse_feedback(document, [task for task in store.items("task") if projects.belongs(task, payload.project_id)], store.users(), payload.project_id)
+        matches = [entry for entry in entries if entry["member_id"] == user["id"] and entry.get("run_label") == payload.run_label]
+        item.update(remote_feedback_verified=bool(matches), source_url=document["source_url"],
+                    feedback_ids=[entry["id"] for entry in matches], read_error="", technical_detail="")
+    except Exception as exc:
+        item.update(remote_feedback_verified=False, read_error=service.human_error(exc), technical_detail=service.safe_error(exc))
+    store.put("onboarding", item["id"], item)
+    return {"item": item}
+
+
+@router.patch("/runtime")
+def runtime(payload: Runtime, user: dict = Depends(admin)):
+    state = store.get("state", "runtime")
+    state.update(paused=payload.paused, next_due=store.future(300) if not payload.paused else state.get("next_due"))
+    store.put("state", "runtime", state)
+    return {"runtime": state}
+
+
+@router.post("/proposals/{proposal_id}/edit")
+async def edit_proposal(proposal_id: str, payload: DraftEdit, user: dict = Depends(admin)):
+    async with service.WRITE_LOCK:
+        item = store.get("proposal", proposal_id)
+        if not item:
+            raise HTTPException(404, "草稿不存在")
+        if item["status"] == "published":
+            raise HTTPException(409, "已发布内容请基于当前版本重新形成草稿")
+        try:
+            material = await asyncio.to_thread(service.source_read, item["target_id"], item["target_kind"], item.get("project_id", store.PROJECT_ID))
+            if material["content_hash"] != item["base_hash"] or (payload.old_text and material["content"].count(payload.old_text) != 1):
+                raise ValueError("来源已变化或原文范围不准确，请重新读取并形成草稿")
+            if payload.old_text == payload.new_text:
+                raise ValueError("草稿没有改动")
+            item.update(**payload.model_dump(), status="draft", edited_by=user["id"], edited_at=db.utc_now())
+            item.pop("confirmed_by", None)
+            item.pop("confirmed_at", None)
+            item.pop("publication_operation_id", None)
+            item["draft_hash"] = service.proposal_hash(item)
+            store.put("proposal", proposal_id, item)
+            return {"item": item}
+        except Exception as exc:
+            raise failure(exc) from exc
+
+
+@router.post("/proposals/{proposal_id}/publish")
+async def publish(proposal_id: str, payload: Publish, user: dict = Depends(admin)):
+    try:
+        return {"item": await service.publish_proposal(proposal_id, payload.expected_hash, payload.operation_id, user)}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.get("/projects")
+def project_list(user: dict = Depends(current_user)):
+    return {"items": projects.list_projects(user)}
+
+
+@router.post("/projects")
+async def create_project(payload: ProjectCreate, user: dict = Depends(admin)):
+    try:
+        fields = payload.model_dump(exclude={"operation_id", "project_id", "feedback_url"})
+        if payload.project_id:
+            fields["project_id"] = payload.project_id
+        if payload.feedback_url:
+            fields["feedback_url"] = payload.feedback_url
+        return {"item": await projects.save_project(fields, payload.operation_id, user)}
+    except Exception as exc:
+        raise project_failure(exc, payload.operation_id) from exc
+
+
+@router.patch("/projects/{project_id}")
+async def edit_project(project_id: str, payload: ProjectEdit, user: dict = Depends(admin)):
+    try:
+        return {"item": await projects.save_project(payload.model_dump(exclude={"operation_id"}, exclude_none=True), payload.operation_id, user, project_id)}
+    except Exception as exc:
+        raise project_failure(exc, payload.operation_id) from exc
+
+
+@router.get("/sources")
+def source_list(user: dict = Depends(admin)):
+    return {"items": [source for source in store.items("source") if not source.get("project_id")]}
+
+
+@router.post("/sources")
+async def register_source(payload: SourceCreate, user: dict = Depends(admin)):
+    try:
+        return {"item": await projects.register_source(payload.model_dump(exclude={"operation_id"}), payload.operation_id, user)}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.delete("/sources/{source_id}")
+def remove_source(source_id: str, user: dict = Depends(admin)):
+    item = store.get("source", source_id)
+    if not item or not item.get("removable"):
+        raise HTTPException(409, "这个入口是基础接入资料，请保留")
+    store.remove("source", source_id)
+    return {"ok": True}
+
+
+@router.post("/task-drafts/{draft_id}/edit")
+async def edit_task_draft(draft_id: str, payload: TaskDraftEdit, user: dict = Depends(admin)):
+    async with service.WRITE_LOCK:
+        old = store.get("task_draft", draft_id)
+        if not old:
+            raise HTTPException(404, "任务草稿不存在")
+        if old["status"] == "published" or old.get("publication_operation_id"):
+            raise HTTPException(409, "这份任务已确认发布；请先核对发布结果，再另建修改草稿")
+        try:
+            fields = {key: old[key] for key in ("instructions", "member_ids", "task_id", "task_kind", "stage", "nature", "related_task", "version") if key in old}
+            changes = payload.model_dump(exclude_unset=True)
+            if changes.get("stage") in ("第一阶段", "第二阶段", "第三阶段") and "task_kind" not in changes:
+                changes["task_kind"] = "onboarding"
+            fields.update(changes)
+            fields["task_id"] = fields.get("task_id") or old["task_id"]
+            checked = service.prepare_task(fields, {"id": old.get("run_id", ""), "project_id": old["project_id"], "operation_id": "edit:" + store.identifier("draft")}, user)
+            store.remove("task_draft", checked["id"])
+            old.update({key: checked[key] for key in ("instructions", "member_ids", "task_id", "task_kind", "stage", "nature", "related_task", "version")},
+                       status="draft", edited_by=user["id"], edited_at=db.utc_now())
+            old["draft_hash"] = service.task_draft_hash(old)
+            store.put("task_draft", draft_id, old)
+            return {"item": old}
+        except Exception as exc:
+            raise failure(exc) from exc
+
+
+@router.post("/task-drafts/{draft_id}/publish")
+async def publish_task_draft(draft_id: str, payload: Publish, user: dict = Depends(admin)):
+    try:
+        return {"item": await service.publish_task_draft(draft_id, payload.expected_hash, payload.operation_id, user)}
+    except Exception as exc:
+        raise failure(exc) from exc
+
+
+@router.post("/task-drafts/{draft_id}/reject")
+async def reject_task_draft(draft_id: str, payload: Rejection, user: dict = Depends(admin)):
+    async with service.WRITE_LOCK:
+        item = store.get("task_draft", draft_id)
+        if not item:
+            raise HTTPException(404, "任务草稿不存在")
+        if item["status"] == "published" or item.get("publication_operation_id"):
+            raise HTTPException(409, "任务已确认发布，请先核对发布结果")
+        item.update(status="rejected", rejection_reason=payload.reason, rejected_by=user["id"], rejected_at=db.utc_now())
+        return {"item": store.put("task_draft", draft_id, item)}
+
+
+@router.post("/proposals/{proposal_id}/reject")
+async def reject_proposal(proposal_id: str, payload: Rejection, user: dict = Depends(admin)):
+    async with service.WRITE_LOCK:
+        item = store.get("proposal", proposal_id)
+        if not item:
+            raise HTTPException(404, "建议不存在")
+        if item["status"] == "published" or item.get("publication_operation_id"):
+            raise HTTPException(409, "建议已确认发布，请先核对远端结果")
+        item.update(status="rejected", rejection_reason=payload.reason, rejected_by=user["id"], rejected_at=db.utc_now())
+        return {"item": store.put("proposal", proposal_id, item)}

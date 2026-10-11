@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>百特 RDOS</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="static/central.css?v=20261011-13" />
+    <script src="static/central.js?v=20261011-13" defer></script>
+  </head>
+  <body>
+    <section id="login-view" class="login-shell">
+      <form id="login-form" class="login-card">
+        <h1>登录百特 RDOS</h1>
+
+        <label for="login-username">账号</label>
+        <input id="login-username" autocomplete="username" required />
+        <label for="login-password">密码</label>
+        <input id="login-password" type="password" autocomplete="current-password" required />
+        <button id="login-submit" class="primary wide" type="submit">登录</button>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </form>
+    </section>
+
+    <div id="app-view" class="app-shell hidden">
+      <header class="topbar">
+        <div class="brand"><b>百特 RDOS</b></div>
+        <div class="top-actions"><span id="current-user"></span><button id="logout" class="quiet" type="button">退出登录</button></div>
+      </header>
+      <nav id="main-nav" class="main-nav" aria-label="工作区入口">
+        <button class="page-tab active" data-page="onboard" type="button">Agent 接入</button>
+        <button class="page-tab" data-page="projects" type="button">项目</button>
+        <button class="page-tab admin-only" data-page="agent" type="button">中央 Agent</button>
+        <button class="page-tab admin-only" data-page="work" type="button">任务与反馈</button>
+        <button class="page-tab admin-only" data-page="global" type="button">全局设置</button>
+      </nav>
+      <main class="workspace">
+        <div class="workspace-heading">
+          <div><p id="page-eyebrow" class="sr-only" aria-hidden="true"></p><h1 id="page-title">Agent 接入</h1><p id="page-description" class="hidden"></p></div>
+          <div class="heading-actions"><button id="refresh-workspace" class="quiet" type="button">刷新</button></div>
+        </div>
+        <div id="workspace-error" class="notice error hidden" role="alert"></div>
+
+        <section id="page-onboard" class="main-page">
+          <article class="panel onboarding-panel">
+            <span id="onboarding-identity" class="sr-only" aria-hidden="true"></span>
+            <p id="onboarding-reentry-note" class="onboarding-reentry-note hidden">重新接入会开始新一轮记录，已有成果保留。</p>
+            <div id="onboarding-paths" class="onboard-choices">
+              <article class="choice-card"><h2>首次接入</h2><p>还未接入百特。</p><button id="choose-new" class="primary" type="button" data-onboard-path="new">开始接入</button></article>
+              <article class="choice-card"><h2>更新已有接入</h2><p>已接入，只更新必要内容。</p><button id="choose-refresh" class="primary" type="button" data-onboard-path="refresh">开始更新</button></article>
+            </div>
+            <p id="onboarding-path-error" class="form-error" role="alert"></p>
+            <div id="onboarding-current" class="hidden">
+              <div class="onboarding-mode"><span id="onboarding-mode-label"></span><button id="change-onboarding-path" class="quiet" type="button">重新接入</button></div>
+              <ol id="onboarding-progress" class="onboarding-progress" aria-label="接入步骤">
+                <li><span>1</span>连接飞书</li><li><span>2</span>确认工作范围</li><li><span>3</span>设置定时同步</li>
+              </ol>
+              <div id="onboarding-status"></div>
+              <div id="onboarding-actions" class="inline-actions">
+                <button id="copy-onboarding-instruction" class="primary" type="button">复制给我的 Agent</button>
+                <button id="onboarding-go-project" class="primary hidden" data-page="projects" type="button">进入项目</button>
+                <button id="prepare-onboarding-instruction" class="quiet hidden" type="button">重新生成指令</button>
+              </div>
+              <div id="onboarding-instruction" class="instruction-box hidden">
+                <p id="onboarding-instruction-summary">复制后，粘贴到你的 Agent 对话中。</p>
+                <div id="onboarding-link" class="instruction-link"></div>
+                <details id="onboarding-copy-details"><summary>指令全文</summary><div id="onboarding-prompt" class="plain-content"></div></details>
+              </div>
+              <p id="onboarding-action-status" class="action-status" role="status"></p>
+              <p id="onboarding-action-error" class="form-error" role="alert"></p>
+              <div id="onboarding-check-action" class="onboarding-check-action">
+                <button id="check-onboarding" class="secondary" type="button">检查结果</button>
+                <p id="onboarding-check-hint">Agent 完成本步后点击</p>
+              </div>
+              <details id="onboarding-check-details"><summary>查看检查依据</summary><div id="onboarding-check-report"></div></details>
+            </div>
+            <div class="onboarding-help"><button id="open-setup" class="quiet" type="button">飞书连接帮助</button></div>
+          </article>
+        </section>
+
+        <section id="page-projects" class="main-page hidden">
+          <div class="page-actions"><button id="new-project" class="primary admin-only" type="button">创建项目</button></div>
+          <div id="project-list" class="project-cards"></div>
+          <section id="project-instruction" class="panel instruction-box hidden">
+            <div class="section-title"><h2 id="project-instruction-title">给 Agent 的说明</h2><button id="copy-project-instruction" class="primary" type="button">复制给我的 Agent</button></div>
+            <p class="muted">复制后，粘贴到你的 Agent 对话中。</p>
+            <div id="project-instruction-link" class="instruction-link"></div>
+            <details id="project-copy-details"><summary>指令全文</summary><div id="project-prompt" class="plain-content"></div></details>
+            <p id="project-instruction-status" class="action-status" role="status"></p><p id="project-instruction-error" class="form-error" role="alert"></p>
+          </section>
+        </section>
+
+        <section id="page-agent" class="main-page hidden admin-only">
+          <p class="page-intro">讨论工作、查资料、安排任务。</p>
+          <div id="connection-banner" class="notice hidden" role="status"></div>
+          <article id="conversation-panel" class="panel conversation-panel">
+            <div class="conversation-meta hidden" aria-hidden="true"><span id="agent-status"></span></div>
+            <div id="messages" class="messages" aria-live="polite"></div>
+            <section id="active-run" class="active-run hidden" aria-live="polite"></section>
+            <p id="chat-status" class="action-status" role="status"></p><p id="chat-error" class="form-error" role="alert"></p>
+            <form id="chat-form" class="chat-form">
+              <label for="chat-message" class="sr-only">给中央 Agent 的消息</label>
+              <textarea id="chat-message" rows="3" placeholder="想讨论什么？" required></textarea>
+              <div class="composer-footer"><small>Ctrl / ⌘ + Enter 发送</small><button id="chat-send" class="primary" type="submit">发送</button></div>
+            </form>
+          </article>
+        </section>
+
+        <section id="page-work" class="main-page hidden admin-only">
+          <div class="work-scope"><span id="work-scope-label">全部项目</span><button id="work-show-all" class="quiet hidden" type="button">查看全部项目</button></div>
+          <article class="panel work-panel">
+            <div class="work-toolbar"><div class="inline-actions"><button id="sync-feedback" class="secondary" type="button">更新反馈</button><button id="manual-run" class="quiet hidden" type="button">立即读取反馈</button></div><button id="new-task" class="primary" type="button">新建任务</button></div>
+            <p id="sync-feedback-status" class="action-status" role="status"></p><p id="sync-feedback-error" class="form-error" role="alert"></p>
+            <div class="tab-bar" role="tablist" aria-label="项目工作">
+              <button id="tab-drafts" class="tab" role="tab" aria-selected="false" aria-controls="view-drafts" data-tab="drafts">任务草稿 <span id="draft-count"></span></button>
+              <button id="tab-tasks" class="tab active" role="tab" aria-selected="true" aria-controls="view-tasks" data-tab="tasks">已发布任务 <span id="task-count"></span></button>
+              <button id="tab-feedback" class="tab" role="tab" aria-selected="false" aria-controls="view-feedback" data-tab="feedback">工作反馈 <span id="feedback-count"></span></button>
+              <button id="tab-proposals" class="tab" role="tab" aria-selected="false" aria-controls="view-proposals" data-tab="proposals">方法建议 <span id="proposal-count"></span></button>
+            </div>
+            <section id="view-drafts" class="tab-view hidden" role="tabpanel" aria-labelledby="tab-drafts"><div id="task-draft-list" class="item-list"></div></section>
+            <section id="view-tasks" class="tab-view" role="tabpanel" aria-labelledby="tab-tasks"><div id="task-list" class="item-list"></div></section>
+            <section id="view-feedback" class="tab-view hidden" role="tabpanel" aria-labelledby="tab-feedback"><div id="feedback-list" class="item-list"></div></section>
+            <section id="view-proposals" class="tab-view hidden" role="tabpanel" aria-labelledby="tab-proposals"><div id="proposal-list" class="item-list"></div></section>
+          </article>
+        </section>
+
+        <section id="page-global" class="main-page hidden admin-only">
+          <div class="settings-stack">
+            <section class="panel">
+              <div class="section-title"><h2>共享资料</h2><button id="show-source-form" class="secondary" type="button">添加资料</button></div>
+              <form id="source-form" class="stack-form source-form hidden">
+                <label>飞书链接<input id="source-url" type="url" required placeholder="文档、文件或文件夹的飞书链接" /></label>
+                <label>资料名称（可选）<input id="source-name" /></label>
+                <div><label class="check-label"><input id="source-watch" type="checkbox" />检查这份资料的正文变化</label><p id="source-watch-note" class="small-note">文件夹只读取目录，不能检查正文变化。</p></div>
+                <p id="source-form-status" class="action-status" role="status"></p><p id="source-form-error" class="form-error" role="alert"></p>
+                <div class="form-actions"><button class="primary" type="submit">添加资料</button></div>
+              </form>
+              <div id="source-list" class="source-list"></div>
+            </section>
+            <section class="panel">
+              <div class="section-title"><h2>成员与角色</h2><button id="add-user" class="secondary" type="button">新增成员</button></div>
+              <div id="people-list" class="item-list people-list"></div>
+            </section>
+            <section class="panel">
+              <div class="section-title"><h2>中央 Agent 运行</h2><button id="open-drawer" class="quiet" type="button">查看运行记录</button></div>
+              <div id="runtime-state"></div><p id="runtime-error" class="form-error" role="alert"></p>
+              <div class="inline-actions"><button id="toggle-runtime" class="secondary" type="button">暂停中央 Agent</button></div>
+              <p class="small-note">暂停不影响成员的 Agent。</p>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="workspace-drawer" class="drawer">
+      <div class="drawer-heading"><h2>运行记录</h2><button class="quiet" data-close="workspace-drawer" aria-label="关闭运行记录" type="button">✕</button></div>
+      <section id="chosen-run-detail" class="run-detail hidden"></section>
+      <div id="run-list" class="item-list"></div>
+    </dialog>
+    <dialog id="setup-dialog" class="proposal-dialog"><div class="dialog-content"><div class="dialog-heading"><h2>连接飞书帮助</h2><button class="quiet" data-close="setup-dialog" aria-label="关闭帮助" type="button">✕</button></div><div id="setup-content" class="markdown-content"></div></div></dialog>
+    <dialog id="project-dialog" class="form-dialog">
+      <form id="project-form" class="dialog-content stack-form">
+        <div class="dialog-heading"><h2 id="project-dialog-title">创建项目</h2><button class="quiet" data-close="project-dialog" aria-label="关闭项目表单" type="button">✕</button></div>
+        <label>项目名称<input id="project-form-name" required maxlength="160" /></label>
+        <label>项目说明（可选）<textarea id="project-form-description" rows="3"></textarea></label>
+        <fieldset><legend>参与成员</legend><div id="project-members" class="member-options"></div></fieldset>
+        <label>项目资料所在的飞书文件夹<input id="project-folder-url" type="url" required placeholder="粘贴现有项目资料文件夹的链接" /></label>
+        <p class="small-note">可以沿用已有资料文件夹。RDOS 会在其中新增项目反馈文档，不移动现有资料。</p>
+        <p id="project-form-status" class="action-status" role="status"></p><p id="project-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="secondary" data-close="project-dialog" type="button">取消</button><button id="save-project" class="primary" type="submit">创建项目</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="task-dialog" class="form-dialog">
+      <form id="task-form" class="dialog-content stack-form">
+        <div class="dialog-heading"><h2 id="task-dialog-title">新建任务</h2><button class="quiet" data-close="task-dialog" aria-label="关闭任务表单" type="button">✕</button></div>
+        <p id="task-current-project" class="scope-summary"></p>
+        <label id="task-project-label" class="hidden">任务属于哪个项目<select id="task-project" required></select></label>
+        <p id="task-dialog-description" class="muted">发布后，成员可从飞书读取当前任务要求。</p>
+        <label>任务要求<textarea id="task-instructions" rows="6" required></textarea></label>
+        <fieldset><legend>适用成员</legend><div id="task-members" class="member-options"></div><p id="task-member-hint" class="small-note hidden">先选项目，再选择成员。</p></fieldset>
+        <div class="form-grid"><label>任务类型<select id="task-kind"><option value="work">正常工作</option><option value="onboarding">接入任务</option></select></label><label>执行频率<select id="task-nature"><option>一次性</option><option>周期</option><option>每次接入执行</option></select></label></div>
+        <label id="task-stage-label" class="hidden">接入阶段<select id="task-stage"><option>第一阶段</option><option>第三阶段</option></select></label>
+        <details><summary>任务标记与关联</summary><div class="stack-form technical-fields"><label>任务 ID（可选）<input id="task-id" maxlength="100" placeholder="留空自动生成" /></label><label>关联任务（可选）<input id="task-related" placeholder="补充要求关联原任务标识" /></label></div></details>
+        <p id="task-form-status" class="action-status" role="status"></p><p id="task-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button id="task-reject" class="quiet danger hidden" type="button">退回草稿</button><button class="secondary" data-close="task-dialog" type="button">取消</button><button id="task-submit" class="primary" type="submit">发布任务</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="user-dialog" class="form-dialog">
+      <form id="user-form" class="dialog-content stack-form">
+        <div class="dialog-heading"><h2 id="user-dialog-title">新增成员</h2><button class="quiet" data-close="user-dialog" aria-label="关闭成员表单" type="button">✕</button></div>
+        <div class="form-grid"><label>账号<input id="user-username" autocomplete="off" required /></label><label>姓名或称呼<input id="user-display" required /></label></div>
+        <fieldset><legend>角色</legend><div class="member-options"><label class="check-label"><input id="user-admin" type="checkbox" />管理员</label><label class="check-label"><input id="user-researcher" type="checkbox" />研究员</label></div><p class="small-note">可多选：管理员管理，研究员参与工作。</p></fieldset>
+        <label>身份标记<select id="user-identity"><option value="actual">实际工作身份</option><option value="role_test">角色测试</option></select></label>
+        <label id="user-password-label">初始密码（可选）<input id="user-password" type="password" autocomplete="new-password" placeholder="留空自动生成，仅本次显示" /></label>
+        <p id="user-form-status" class="action-status" role="status"></p><p id="user-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="secondary" data-close="user-dialog" type="button">取消</button><button class="primary" type="submit">保存成员</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="proposal-dialog" class="proposal-dialog">
+      <div class="dialog-content"><div class="dialog-heading"><h2>审阅方法建议</h2><button class="quiet" data-close="proposal-dialog" aria-label="关闭方法建议" type="button">✕</button></div><div id="proposal-review"></div><p id="proposal-form-error" class="form-error" role="alert"></p></div>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="form-dialog">
+      <div class="dialog-content"><div class="dialog-heading"><h2 id="confirm-title"></h2><button class="quiet" data-close="confirm-dialog" aria-label="关闭确认" type="button">✕</button></div><p id="confirm-message"></p><label id="confirm-reason-label" class="hidden">退回说明（可选）<textarea id="confirm-reason" rows="3" placeholder="需要调整什么"></textarea></label><p id="confirm-error" class="form-error" role="alert"></p><div class="dialog-actions"><button id="confirm-cancel" class="secondary" type="button">取消</button><button id="confirm-action" class="primary" type="button">确认</button></div></div>
+    </dialog>
+
+    <dialog id="credential-dialog" class="form-dialog">
+      <div class="dialog-content"><div class="dialog-heading"><h2>保存初始密码</h2><button class="quiet" data-close="credential-dialog" aria-label="关闭密码界面" type="button">✕</button></div><p>密码仅显示一次，请保存后私下交给成员。</p><label>账号<input id="credential-username" readonly /></label><label>初始密码<input id="credential-password" type="password" readonly /></label><p id="credential-close-warning" class="form-error hidden" role="alert"></p><div class="dialog-actions"><button id="copy-credential" class="secondary" type="button">复制账号与密码</button><button id="credential-done" class="primary" type="button">我已保存，关闭</button></div></div>
+    </dialog>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+  </body>
+</html>

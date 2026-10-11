@@ -12,7 +12,8 @@ __pycache__/
 
 data/*.db
 data/*.db-*
-data/backups/*.db
+data/backups/
+data/local-trial-access.json
 
 runner-configs/*.json
 workspace/
@@ -23,3 +24,5 @@ workspace/*/control/*.json
 workspace/*/outbox/*.json
 workspace/*/outbox/sent/
 workspace/*/outbox/rejected/
+
+data/ux-review-*/
