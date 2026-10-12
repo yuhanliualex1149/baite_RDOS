@@ -32,7 +32,21 @@ if [[ $old == "$release" ]]; then
   curl -fsS --max-time 5 http://127.0.0.1:8010/api/health | "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("app_release")==sys.argv[1]' "$sha"
   echo "Already active and healthy: $sha"; exit 0
 fi
-git -C "$repo" fetch --no-tags origin main
+fetch_main_with_retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    if timeout --signal=TERM --kill-after=5s 60s git -C "$repo" fetch --no-tags origin main; then
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      echo "GitHub fetch failed (attempt $attempt/3); retrying..." >&2
+      sleep 2
+    fi
+  done
+  echo 'Failed to fetch main after 3 attempts; production unchanged' >&2
+  return 1
+}
+fetch_main_with_retry
 [[ $(git -C "$repo" rev-parse refs/remotes/origin/main) == "$sha" ]] || { echo 'Only the current main commit may deploy'; exit 1; }
 if [[ -e $release ]]; then
   [[ $(readlink -f "$base/previous" || true) != "$release" ]] || { echo 'Target is the retained rollback release; inspect before rebuilding'; exit 1; }
@@ -74,7 +88,7 @@ chmod 0644 "$meta"
 mv -Tf "$meta" "$sealed/tree/.verified"
 mv "$sealed/tree" "$release"
 # Recheck main after the build, before any service interruption.
-git -C "$repo" fetch --no-tags origin main
+fetch_main_with_retry
 [[ $(git -C "$repo" rev-parse refs/remotes/origin/main) == "$sha" ]] || { echo 'Superseded by a newer main commit; production unchanged'; exit 1; }
 backup=/var/lib/baite-rdos/backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$sha.sqlite3
 database_fingerprint() {
