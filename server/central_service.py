@@ -67,6 +67,7 @@ def human_error(exc: Exception) -> str:
             "not_configured": "飞书连接尚未准备好，请联系管理员检查这台电脑的连接设置。",
             "cli_unavailable": "暂时无法连接飞书，请联系管理员检查这台电脑的连接设置。",
             "remote_failed": "本次飞书操作未完成，请稍后重试；具体原因可查看技术详情。",
+            "folder_request_rejected": "飞书无法读取这个文件夹。请从飞书文件夹页面复制完整链接，并确认当前连接账号可以打开。",
             "invalid_response": "暂时无法解析飞书返回的资料，已有记录保留，可重新读取。",
             "timeout": "操作结果尚未确认，请先检查已有结果，再继续原操作。",
             "write_uncertain": "操作结果尚未确认，请先检查已有结果，再继续原操作。",

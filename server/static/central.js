@@ -190,7 +190,7 @@
     const buttons=[...$(id).querySelectorAll('button')],disabled=buttons.map(b=>b.disabled);
     buttons.forEach(b=>{b.disabled=true;b.setAttribute('aria-busy','true');});const inputs=[...$(id).querySelectorAll('input,textarea,select')],wasDisabled=inputs.map(n=>n.disabled);inputs.forEach(n=>n.disabled=true);
     try{return await action(f.context);}catch(e){if(sameSession(f.context)){errorAt(errorId,e);toast(e.message,true);}return null;}
-    finally{f.busy=false;if(sameSession(f.context)){inputs.forEach((n,i)=>{if(n.isConnected)n.disabled=wasDisabled[i];});if(id==='project-dialog'&&state.projectPending)$(id).querySelectorAll('input,textarea').forEach(n=>n.type==='checkbox'?n.disabled=true:n.readOnly=true);if(id==='task-dialog'&&state.taskPending)lockTask(true);buttons.forEach((b,i)=>{if(b.isConnected){b.disabled=disabled[i];b.removeAttribute('aria-busy');}});if(id==='proposal-dialog'&&$(id).open)updatePublishButton();}}
+    finally{f.busy=false;if(sameSession(f.context)){inputs.forEach((n,i)=>{if(n.isConnected)n.disabled=wasDisabled[i];});if(id==='project-dialog'&&state.projectPending&&!state.editProject?.id)$(id).querySelectorAll('input,textarea').forEach(n=>n.type==='checkbox'?n.disabled=true:n.readOnly=true);if(id==='task-dialog'&&state.taskPending)lockTask(true);buttons.forEach((b,i)=>{if(b.isConnected){b.disabled=disabled[i];b.removeAttribute('aria-busy');}});if(id==='proposal-dialog'&&$(id).open)updatePublishButton();}}
   }
   function copyKey(){return ['rdos-copied',state.user?.id,state.onboarding?.session_id,state.onboarding?.stage,state.instruction?.id||state.instruction?.url].join(':');}
   function copiedValue(){try{return !!state.instruction&&sessionStorage.getItem(copyKey())==='yes';}catch{return false;}}
@@ -488,6 +488,8 @@
   function saveRecovery(kind,target,value){try{sessionStorage.setItem(recoveryKey(kind,target),JSON.stringify(value));}catch{}}
   function getRecovery(kind,target=''){try{return JSON.parse(sessionStorage.getItem(recoveryKey(kind,target))||'null');}catch{return null;}}
   function clearRecovery(kind,target=''){try{sessionStorage.removeItem(recoveryKey(kind,target));}catch{}}
+  const projectFields=()=>({name:$('project-form-name').value.trim(),description:$('project-form-description').value.trim(),member_ids:[...$('project-members').querySelectorAll('input:checked')].map(i=>i.value),folder_url:$('project-folder-url').value.trim()});
+  const projectFieldsKey=fields=>JSON.stringify([fields.name,fields.description,fields.member_ids,fields.folder_url]);
   function showTask(task=null,mode='manual'){
     state.task=task;state.taskMode=mode;state.taskOperation=task?.publication_operation_id||uid();state.taskPending=null;state.taskPayloadKey=null;$('task-form').reset();errorAt('task-form-error','');setText('task-form-status','');
     state.taskTargetId=task?.project_id||state.projectId||'';
@@ -503,7 +505,18 @@
     state.editUser=user;$('user-form').reset();errorAt('user-form-error','');setText('user-form-status','');setText('user-dialog-title',user?'编辑成员':'新增成员');$('user-username').value=user?.username||'';$('user-username').disabled=!!user;$('user-display').value=user?.display_name||'';$('user-admin').checked=list(user?.roles).includes('admin');$('user-researcher').checked=user?list(user.roles).includes('researcher'):true;$('user-identity').value=user?.identity_mode||'actual';show('user-password-label',!user);rememberForm('user-dialog');open('user-dialog');
   }
   function showProject(project=null){
-    state.editProject=project;state.projectOperation=uid();state.projectPayloadKey=null;state.projectPending=null;$('project-form').reset();$('project-form').querySelectorAll('input,textarea').forEach(i=>{i.readOnly=false;i.disabled=false;});errorAt('project-form-error','');setText('project-form-status','');setText('project-dialog-title',project?'编辑项目':'创建项目');$('project-form-name').value=project?.name||'';$('project-form-description').value=project?.description||'';$('project-folder-url').value=project?.folder_url||'';$('project-folder-url').required=!project?.feedback_id;$('project-members').innerHTML=memberOptions(list(project?.member_ids));setText('save-project',project?'保存项目':'创建项目');const saved=getRecovery('project',project?.id||'');if(saved){state.projectPending=saved;state.projectOperation=saved.body.operation_id;$('project-form-name').value=saved.body.name;$('project-form-description').value=saved.body.description;$('project-folder-url').value=saved.body.folder_url;$('project-members').innerHTML=memberOptions(saved.body.member_ids);$('project-form').querySelectorAll('input,textarea').forEach(i=>i.type==='checkbox'?i.disabled=true:i.readOnly=true);setText('save-project','检查结果并继续原操作');setText('project-form-status','已恢复上次未确认的内容，将先核对已有反馈入口。');}rememberForm('project-dialog');open('project-dialog');
+    state.editProject=project;state.projectOperation=uid();state.projectPayloadKey=null;state.projectPending=null;$('project-form').reset();$('project-form').querySelectorAll('input,textarea').forEach(i=>{i.readOnly=false;i.disabled=false;});errorAt('project-form-error','');setText('project-form-status','');setText('project-dialog-title',project?'编辑项目':'创建项目');$('project-form-name').value=project?.name||'';$('project-form-description').value=project?.description||'';$('project-folder-url').value=project?.folder_url||'';$('project-folder-url').required=!project?.feedback_id;$('project-members').innerHTML=memberOptions(list(project?.member_ids));setText('save-project',project?'保存项目':'创建项目');
+    const saved=getRecovery('project',project?.id||'');
+    if(saved?.body){
+      state.projectPending=saved;state.projectOperation=saved.body.operation_id;state.projectPayloadKey=projectFieldsKey(saved.body);
+      $('project-form-name').value=saved.body.name;$('project-form-description').value=saved.body.description;$('project-folder-url').value=saved.body.folder_url;$('project-members').innerHTML=memberOptions(saved.body.member_ids);
+      if(!project?.id){$('project-form').querySelectorAll('input,textarea').forEach(i=>i.type==='checkbox'?i.disabled=true:i.readOnly=true);setText('save-project','检查创建结果');setText('project-form-status','上次创建结果还不清楚。先用原内容核对，确认后才能修改。');}
+      else setText('project-form-status',project.feedback_setup&&!project.feedback_id?'上次输入已保留。保存时会先核对原反馈位置，再处理修改。':'上次保存结果尚未确认。再次提交会核对已有结果。');
+    }else if(project?.feedback_setup&&!project.feedback_id){
+      setText('project-dialog-title','修复项目设置');setText('project-form-status','反馈入口尚未完成。可以修改资料文件夹；保存时会先核对原反馈位置。');
+      if(project.error)errorAt('project-form-error',readableError(project.error));
+    }
+    rememberForm('project-dialog');open('project-dialog');
   }
   function showProposal(item){
     state.proposal=item;state.publishOperation=item.publication_operation_id||uid();state.proposalEditing=false;
@@ -552,12 +565,43 @@
   $('open-setup').addEventListener('click',()=>busy($('open-setup'),async()=>{const c=context(),data=await api('/onboarding/setup',{text:true});if(!current(c))return;put('setup-content',markdown(data));open('setup-dialog');},'onboarding-action-error'));
   $('new-project').addEventListener('click',()=>showProject());
   $('project-form').addEventListener('submit',async e=>{
-    e.preventDefault();const ids=[...$('project-members').querySelectorAll('input:checked')].map(i=>i.value);if(!ids.length){errorAt('project-form-error','请至少选择一位参与成员。');return;}
-    const target=state.editProject;const inputKey=JSON.stringify([$('project-form-name').value,$('project-form-description').value,ids,$('project-folder-url').value]);if(!state.projectPending&&state.projectPayloadKey&&state.projectPayloadKey!==inputKey)state.projectOperation=uid();state.projectPayloadKey=inputKey;const op=state.projectOperation,body=state.projectPending?.body||{name:$('project-form-name').value.trim(),description:$('project-form-description').value.trim(),member_ids:ids,folder_url:$('project-folder-url').value.trim(),operation_id:op};
+    e.preventDefault();if(state.forms.get('project-dialog')?.busy)return;
+    const target=state.editProject,targetId=target?.id||'',fields=projectFields();if(!fields.member_ids.length){errorAt('project-form-error','请至少选择一位参与成员。');return;}
+    const inputKey=projectFieldsKey(fields);
+    // Reuse an operation only for exactly the same target and content. A changed
+    // folder must get a new ID; the server reconciles the old remote write first.
+    if(state.projectPayloadKey&&state.projectPayloadKey!==inputKey)state.projectOperation=uid();
+    state.projectPayloadKey=inputKey;
+    const body=state.projectPending&&!targetId?state.projectPending.body:{...fields,operation_id:state.projectOperation};
     await formAction('project-dialog','project-form-error',async c=>{
-      setText('project-form-status','正在保存并检查反馈入口…');
-      try{saveRecovery('project',target?.id||'',{body});await api(target?'/projects/'+encodeURIComponent(target.id):'/projects',{method:target?'PATCH':'POST',body,timeout_ms:180000});if(!current(c))return;clearRecovery('project',target?.id||'');close('project-dialog',true);await refresh();toast('项目已保存，反馈入口已检查。');}
-      catch(error){if(current(c)){setText('project-form-status','输入与本次操作记录已保留。');if(uncertain(error)){state.projectPending={body};$('project-form').querySelectorAll('input,textarea').forEach(i=>i.type==='checkbox'?i.disabled=true:i.readOnly=true);setText('save-project','检查结果并继续原操作');setText('project-form-status','结果尚未确认，下一次提交会沿用本次内容，先检查已有反馈入口。');}else clearRecovery('project',target?.id||'');await refresh();if(error.projectId&&!uncertain(error)){const failed=state.projects.find(p=>p.id===error.projectId);if(failed?.feedback_setup&&!failed.feedback_id){state.projectPending={body};saveRecovery('project',target?.id||'',{body});setText('save-project','检查结果并继续原操作');setText('project-form-status','反馈入口结果尚未确认，继续时使用原内容先核对。');}else if(failed){state.editProject=failed;state.projectOperation=uid();state.projectPayloadKey=null;setText('project-dialog-title','修复项目设置');setText('save-project','保存项目');setText('project-form-status','输入已保留，修正后将继续保存同一个项目。');}}}throw error;}
+      setText('project-form-status','正在核对反馈入口并保存项目…');
+      try{
+        saveRecovery('project',targetId,{body});
+        await api(targetId?'/projects/'+encodeURIComponent(targetId):'/projects',{method:targetId?'PATCH':'POST',body,timeout_ms:180000});
+        if(!current(c))return;
+        clearRecovery('project',targetId);state.projectPending=null;close('project-dialog',true);await refresh();toast('项目已保存，反馈入口已检查。');
+      }catch(error){
+        if(!current(c))return;
+        await refresh();if(!current(c))return;
+        if(error.projectId){
+          // The server has an actual project record. Continue against that
+          // record, with a fresh operation if the first request was a create.
+          const failed=state.projects.find(p=>p.id===error.projectId);
+          state.editProject=failed||{id:error.projectId,...fields};
+          clearRecovery('project',targetId);state.projectPending=null;
+          if(!targetId){state.projectOperation=uid();state.projectPayloadKey=inputKey;}
+          setText('project-dialog-title','修复项目设置');setText('save-project','保存项目');
+          setText('project-form-status',failed?.feedback_setup&&!failed.feedback_id?'输入已保留。保存时会先核对原反馈位置，再处理当前修改。':'输入已保留，修正后可再次保存。');
+        }else if(uncertain(error)){
+          state.projectPending={body,targetId};
+          if(!targetId){$('project-form').querySelectorAll('input,textarea').forEach(i=>i.type==='checkbox'?i.disabled=true:i.readOnly=true);setText('save-project','检查创建结果');setText('project-form-status','创建结果尚未确认，请先用原内容核对。');}
+          else setText('project-form-status','结果尚未确认。可修改输入；保存时会先核对原反馈位置。');
+        }else{
+          clearRecovery('project',targetId);state.projectPending=null;
+          setText('project-form-status','输入已保留，修正后可再次保存。');
+        }
+        throw error;
+      }
     });
   });
   $('copy-project-instruction').addEventListener('click',()=>copyInstruction('project'));

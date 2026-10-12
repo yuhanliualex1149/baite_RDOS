@@ -286,6 +286,7 @@ class CentralApiTest(unittest.TestCase):
             self.assertEqual(edited.json()["detail"]["project_id"], self.store.get("operation", "failed-edit")["result"]["project_id"])
             remote.read_source.side_effect = None
             remote.read_source.return_value = {"ok": True, "items": []}
+            remote.find_project_feedback.return_value = None
             remote.ensure_project_feedback.return_value = {"ok": True, "object_id": "recovered-feedback", "source_url": self.store.FEISHU_HOST + "/docx/recovered-feedback"}
             recovered = self.client.patch("/api/central/projects/" + record_id, json={**fields,
                 "folder_url": self.store.FEISHU_HOST + "/drive/folder/corrected-folder", "operation_id": "corrected-edit"})

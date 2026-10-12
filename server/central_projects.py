@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from server import central_store as store, db
@@ -84,6 +85,17 @@ def member_ids(values: list) -> list:
     return ids
 
 
+def _recent_feedback_attempt(item: dict) -> bool:
+    setup = item.get("feedback_setup") or {}
+    try:
+        started = datetime.fromisoformat(setup.get("started_at") or item.get("updated_at") or "")
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - started).total_seconds() < 30
+    except ValueError:
+        return False
+
+
 async def save_project(fields: dict, operation_id: str, user: dict, project_id: str = "") -> dict:
     from server import central_service as service
     async with service.WRITE_LOCK:
@@ -115,19 +127,39 @@ async def save_project(fields: dict, operation_id: str, user: dict, project_id: 
         folder_url = fields.get("folder_url", old.get("folder_url", ""))
         link = parse_link(folder_url, "folder") if folder_url else None
         setup = old.get("feedback_setup")
-        if setup and not old.get("feedback_id") and (name != old.get("name") or not link or link["id"] != setup["folder_id"]):
-            raise ValueError("上次创建反馈文档的结果尚未确认，请先使用原名称和文件夹继续核对，再调整项目。")
+        setup_changed = bool(setup and not old.get("feedback_id") and
+                             (name != old.get("name") or not link or link["id"] != setup["folder_id"]))
         if not link and not old:
             raise ValueError("请指定保存项目资料的飞书文件夹")
         op = store.operation(operation_id, "project", {"project_id": project_id, "fields": fields, "user_id": user["id"]})
         if op["status"] == "succeeded":
             return op["result"]
-        item = {**old, "id": record_id, "name": name, "description": fields.get("description", old.get("description", "")),
-                "member_ids": members, "created_by": old.get("created_by", user["id"]),
-                "created_at": old.get("created_at", db.utc_now()), "updated_at": db.utc_now()}
-        if feedback_link:
-            item["creation_operation_id"] = operation_id
+        item = None
         try:
+            if setup_changed:
+                if _recent_feedback_attempt(old):
+                    raise ValueError("上次反馈文档刚尝试创建，请稍后再保存；系统会先核对原文件夹，避免重复创建。")
+                old_folder = setup["folder_id"]
+                old_url = old.get("folder_url") or store.FEISHU_HOST + "/drive/folder/" + old_folder
+                prior_probe = service.feishu(project_id="", extra_sources=[{"id": old_folder, "kind": "folder", "source_url": old_url}])
+                # Read twice before changing target. A failed read is not evidence
+                # that the earlier creation did not happen.
+                existing = await asyncio.to_thread(prior_probe.find_project_feedback, old_folder, setup["title"], setup["operation_id"])
+                if not existing:
+                    existing = await asyncio.to_thread(prior_probe.find_project_feedback, old_folder, setup["title"], setup["operation_id"])
+                old = dict(old)
+                old.pop("feedback_setup", None)
+                if existing:
+                    old.update(feedback_id=existing["object_id"], feedback_doc_id=existing["object_id"],
+                               feedback_url=existing["source_url"], status="active", error="", technical_detail="")
+                # Save the remote finding before checking the new folder. If that
+                # folder fails, a later edit still sees the reconciled state.
+                store.put("project", record_id, old)
+            item = {**old, "id": record_id, "name": name, "description": fields.get("description", old.get("description", "")),
+                    "member_ids": members, "created_by": old.get("created_by", user["id"]),
+                    "created_at": old.get("created_at", db.utc_now()), "updated_at": db.utc_now()}
+            if feedback_link:
+                item["creation_operation_id"] = operation_id
             if link:
                 extra_sources = [{**link, "name": name + "资料"}]
                 if feedback_link:
@@ -151,18 +183,32 @@ async def save_project(fields: dict, operation_id: str, user: dict, project_id: 
                     item.update(feedback_id=feedback_link["id"], feedback_doc_id=feedback_link["id"],
                                 feedback_url=feedback_link["source_url"])
                 else:
-                    item.update(status="preparing", error="", feedback_setup={"folder_id": link["id"], "title": name + " · 工作反馈", "operation_id": "project:" + record_id})
-                    store.put("project", record_id, item)
-                    created = await asyncio.to_thread(probe.ensure_project_feedback, link["id"], name + " · 工作反馈", "project:" + record_id)
+                    title, marker = name + " · 工作反馈", "project:" + record_id
+                    # A failed read or duplicate check must not leave a write-
+                    # uncertain lock: no creation has been attempted yet.
+                    created = await asyncio.to_thread(probe.find_project_feedback, link["id"], title, marker)
+                    if not created:
+                        item.update(status="preparing", error="", feedback_setup={"folder_id": link["id"],
+                            "title": title, "operation_id": marker, "started_at": db.utc_now()})
+                        store.put("project", record_id, item)
+                        created = await asyncio.to_thread(probe.ensure_project_feedback, link["id"], title, marker)
                     item.update(feedback_id=created["object_id"], feedback_doc_id=created["object_id"], feedback_url=created["source_url"])
+            item.pop("feedback_setup", None)
             item.update(status="active", error="", technical_detail="", checked_at=db.utc_now())
             store.put("project", record_id, item)
             return store.finish_operation(op, item)
         except Exception as exc:
             # Retain a recoverable setup record; do not replace an existing healthy project's settings.
+            if item is None:
+                item = {**old, "id": record_id, "name": name, "description": fields.get("description", old.get("description", "")),
+                        "member_ids": members, "created_by": old.get("created_by", user["id"]),
+                        "created_at": old.get("created_at", db.utc_now()), "updated_at": db.utc_now()}
             if not old or old.get("status") in ("preparing", "failed"):
-                item.update(status="failed", error=service.human_error(exc), technical_detail=service.safe_error(exc))
-                store.put("project", record_id, item)
+                # A read/validation failure before a new creation must not
+                # silently save a different name against the old folder.
+                failed = item if not old or item.get("feedback_setup") else dict(old)
+                failed.update(status="failed", error=service.human_error(exc), technical_detail=service.safe_error(exc))
+                store.put("project", record_id, failed)
             store.finish_operation(op, {"error": service.safe_error(exc), "project_id": record_id}, "failed")
             raise
 

@@ -116,6 +116,20 @@ class FeishuTools:
             payload = {}
         if result.returncode or not isinstance(payload, dict) or payload.get("ok") is False or payload.get("code", 0) != 0:
             diagnostic = (result.stderr + result.stdout).lower()
+            # The CLI writes structured API errors to stderr after a progress
+            # line. Keep only the numeric code; never expose the raw response.
+            remote_code = None
+            for output in (result.stderr, result.stdout):
+                start = output.find("{")
+                if start < 0:
+                    continue
+                try:
+                    error_data = json.loads(output[start:])
+                    remote_code = (error_data.get("error") or {}).get("code") or error_data.get("code")
+                except (ValueError, AttributeError, TypeError):
+                    continue
+                if remote_code:
+                    break
             auth_error = any(term in diagnostic for term in ("unauthorized", "forbidden", "oauth", "expired", "999916", "999914", "permission denied"))
             readonly = tuple(args[:2]) in {
                 ("docs", "+fetch"), ("markdown", "+fetch"),
@@ -131,8 +145,11 @@ class FeishuTools:
                     verified = False
                 if verified:
                     return self._run(args, object_id, cwd, recover_auth=False)
+            if args[:3] == ["drive", "files", "list"] and remote_code == 1061002:
+                raise FeishuError("folder_request_rejected", "飞书拒绝文件夹读取请求（错误码 1061002）", object_id)
             raise FeishuError("authorization_failed" if auth_error else "remote_failed",
-                              "飞书授权失效或范围不足" if auth_error else "飞书操作失败，请检查本机授权和对象状态",
+                              "飞书授权失效或范围不足" if auth_error else
+                              "飞书操作失败" + (f"（错误码 {remote_code}）" if isinstance(remote_code, int) else "") + "，请检查本机授权和对象状态",
                               object_id)
         if not payload:
             raise FeishuError("invalid_response", "飞书没有返回有效 JSON", object_id)
@@ -298,7 +315,12 @@ class FeishuTools:
     def read_registered_source(self, object_id: str, kind: str) -> dict:
         return self.read_source(object_id, kind)
 
-    def ensure_project_feedback(self, folder_token: str, title: str, operation_id: str) -> dict:
+    def find_project_feedback(self, folder_token: str, title: str, operation_id: str) -> dict | None:
+        """Read the registered folder for this operation's feedback document.
+
+        This is deliberately read-only so an uncertain creation can be checked
+        without sending another create request.
+        """
         self._check_scope(folder_token, "folder")
         self._marker(operation_id)
         title = title.strip()
@@ -306,25 +328,27 @@ class FeishuTools:
             raise FeishuError("invalid_title", "项目反馈标题须为一至一百五十个字符", folder_token)
         marker = f"[RDOS 项目反馈标识:{operation_id}]"
         remote_title = title + " · " + hashlib.sha256(operation_id.encode()).hexdigest()[:12]
+        documents = [item for item in self.list_folder(folder_token)["items"] if item["kind"] == "docx"]
+        if len(documents) > 40:
+            raise FeishuError("read_limit", "项目目录文档超过四十份，无法完成创建前去重核对", folder_token)
+        found = []
+        for item in documents:
+            document = self.read_document(item["object_id"])
+            if marker in document["content"]:
+                found.append(document)
+            elif item["name"] == remote_title:
+                raise FeishuError("operation_conflict", "同名项目反馈缺少本次创建标识，请核对远端", item["object_id"])
+        if len(found) > 1:
+            raise FeishuError("operation_conflict", "同标识对应多份项目反馈，请核对远端", folder_token)
+        return found[0] if found else None
 
-        def find() -> dict | None:
-            documents = [item for item in self.list_folder(folder_token)["items"] if item["kind"] == "docx"]
-            if len(documents) > 40:
-                raise FeishuError("read_limit", "项目目录文档超过四十份，无法完成创建前去重核对", folder_token)
-            found = []
-            for item in documents:
-                document = self.read_document(item["object_id"])
-                if marker in document["content"]:
-                    found.append(document)
-                elif item["name"] == remote_title:
-                    raise FeishuError("operation_conflict", "同名项目反馈缺少本次创建标识，请核对远端", item["object_id"])
-            if len(found) > 1:
-                raise FeishuError("operation_conflict", "同标识对应多份项目反馈，请核对远端", folder_token)
-            return found[0] if found else None
-
-        existing = find()
+    def ensure_project_feedback(self, folder_token: str, title: str, operation_id: str) -> dict:
+        existing = self.find_project_feedback(folder_token, title, operation_id)
         if existing:
             return {**existing, "operation_id": operation_id, "status": "duplicate"}
+        title = title.strip()
+        marker = f"[RDOS 项目反馈标识:{operation_id}]"
+        remote_title = title + " · " + hashlib.sha256(operation_id.encode()).hexdigest()[:12]
         content = (f"# {title}\n\n项目工作反馈入口。请保留已有记录并追加本次反馈，注明项目ID、成员ID、"
                    f"关联任务及版本（如有）、本次运行标识和身份性质。区分实际成果、自述与尚未验证。\n\n{marker}")
         error = None
@@ -334,9 +358,9 @@ class FeishuTools:
         except FeishuError as exc:
             error = exc
         try:
-            created = find()
+            created = self.find_project_feedback(folder_token, title, operation_id)
             if not created:
-                created = find()  # Read lag never causes a second creation.
+                created = self.find_project_feedback(folder_token, title, operation_id)  # Read lag never causes a second creation.
         except FeishuError as exc:
             raise FeishuError("write_uncertain", "项目反馈创建结果无法回读；请先核对远端再重试", folder_token) from exc
         if not created:

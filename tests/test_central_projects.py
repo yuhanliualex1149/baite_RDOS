@@ -55,6 +55,7 @@ class CentralProjectTest(unittest.IsolatedAsyncioTestCase):
         fields = {**self.fields(), "folder_url": "https://shbebetter.feishu.cn/drive/folder/J8fdfE94klWRLwdl4gqcyGIZn1g"}
         remote = MagicMock()
         remote.read_source.return_value = {"ok": True, "items": []}
+        remote.find_project_feedback.return_value = None
         remote.ensure_project_feedback.return_value = {"ok": True, "object_id": "feedback-new",
             "source_url": "https://shbebetter.feishu.cn/docx/feedback-new"}
         with patch.object(service, "feishu", return_value=remote):
@@ -168,6 +169,7 @@ class CentralProjectTest(unittest.IsolatedAsyncioTestCase):
     async def test_project_create_readbacks_and_repeat_reuses_same_document(self):
         remote = MagicMock()
         remote.read_source.return_value = {"ok": True, "items": []}
+        remote.find_project_feedback.return_value = None
         remote.ensure_project_feedback.return_value = {"ok": True, "object_id": "feedback-new", "source_url": store.FEISHU_HOST + "/docx/feedback-new"}
         with patch.object(service, "feishu", return_value=remote):
             first = await projects.save_project(self.fields(), "create-one", self.admin)
@@ -185,6 +187,7 @@ class CentralProjectTest(unittest.IsolatedAsyncioTestCase):
     async def test_uncertain_create_records_failure_and_retry_retains_remote_marker(self):
         remote = MagicMock()
         remote.read_source.return_value = {"ok": True}
+        remote.find_project_feedback.return_value = None
         remote.ensure_project_feedback.side_effect = [FeishuError("write_uncertain", "文档写入尚未核对"),
             {"ok": True, "object_id": "already-created", "source_url": store.FEISHU_HOST + "/docx/already-created"}]
         with patch.object(service, "feishu", return_value=remote):
@@ -195,6 +198,89 @@ class CentralProjectTest(unittest.IsolatedAsyncioTestCase):
             result = await projects.save_project(self.fields(), "create-retry", self.admin)
         self.assertEqual(result["id"], pending["id"])
         self.assertEqual(remote.ensure_project_feedback.call_args_list[0].args, remote.ensure_project_feedback.call_args_list[1].args)
+
+    async def test_changed_folder_checks_old_creation_before_new_document(self):
+        pending = {"id": "prj_pending_01", "name": "旧项目", "status": "failed",
+                   "folder_id": "old-folder", "folder_url": store.FEISHU_HOST + "/drive/folder/old-folder",
+                   "feedback_id": "", "member_ids": [self.first["id"]], "updated_at": "2020-01-01T00:00:00+00:00",
+                   "feedback_setup": {"folder_id": "old-folder", "title": "旧项目 · 工作反馈",
+                                      "operation_id": "project:prj_pending_01"}}
+        store.put("project", pending["id"], pending)
+        remote = MagicMock()
+        remote.find_project_feedback.return_value = None
+        remote.read_source.return_value = {"ok": True, "object_id": "new-folder", "items": []}
+        remote.ensure_project_feedback.return_value = {"object_id": "feedback-new",
+            "source_url": store.FEISHU_HOST + "/docx/feedback-new"}
+        fields = {"name": "新项目", "member_ids": [self.first["id"]],
+                  "folder_url": store.FEISHU_HOST + "/drive/folder/new-folder"}
+        with patch.object(service, "feishu", return_value=remote):
+            result = await projects.save_project(fields, "change-after-check", self.admin, pending["id"])
+        self.assertEqual(result["folder_id"], "new-folder")
+        self.assertEqual(result["feedback_id"], "feedback-new")
+        self.assertNotIn("feedback_setup", result)
+        self.assertEqual(remote.find_project_feedback.call_count, 3)
+        remote.ensure_project_feedback.assert_called_once_with("new-folder", "新项目 · 工作反馈", "project:prj_pending_01")
+
+    async def test_changed_folder_keeps_old_setup_if_old_read_fails(self):
+        pending = {"id": "prj_pending_02", "name": "旧项目", "status": "failed",
+                   "folder_id": "old-folder", "folder_url": store.FEISHU_HOST + "/drive/folder/old-folder",
+                   "feedback_id": "", "member_ids": [self.first["id"]], "updated_at": "2020-01-01T00:00:00+00:00",
+                   "feedback_setup": {"folder_id": "old-folder", "title": "旧项目 · 工作反馈",
+                                      "operation_id": "project:prj_pending_02"}}
+        store.put("project", pending["id"], pending)
+        remote = MagicMock()
+        remote.find_project_feedback.side_effect = FeishuError("remote_failed", "旧目录读取失败")
+        with patch.object(service, "feishu", return_value=remote):
+            with self.assertRaises(FeishuError):
+                await projects.save_project({"name": "新项目", "member_ids": [self.first["id"]],
+                    "folder_url": store.FEISHU_HOST + "/drive/folder/new-folder"}, "unreadable-old", self.admin, pending["id"])
+        self.assertEqual(store.get("project", pending["id"])["feedback_setup"], pending["feedback_setup"])
+        remote.ensure_project_feedback.assert_not_called()
+
+    async def test_changed_folder_reuses_document_found_in_original_folder(self):
+        pending = {"id": "prj_pending_03", "name": "旧项目", "status": "failed",
+                   "folder_id": "old-folder", "folder_url": store.FEISHU_HOST + "/drive/folder/old-folder",
+                   "feedback_id": "", "member_ids": [self.first["id"]], "updated_at": "2020-01-01T00:00:00+00:00",
+                   "feedback_setup": {"folder_id": "old-folder", "title": "旧项目 · 工作反馈",
+                                      "operation_id": "project:prj_pending_03"}}
+        store.put("project", pending["id"], pending)
+        remote = MagicMock()
+        remote.find_project_feedback.return_value = {"object_id": "old-feedback", "source_url": store.FEISHU_HOST + "/docx/old-feedback"}
+        remote.read_source.return_value = {"ok": True, "object_id": "new-folder", "items": []}
+        fields = {"name": "新项目", "member_ids": [self.first["id"]],
+                  "folder_url": store.FEISHU_HOST + "/drive/folder/new-folder"}
+        with patch.object(service, "feishu", return_value=remote):
+            result = await projects.save_project(fields, "change-found", self.admin, pending["id"])
+        self.assertEqual(result["feedback_id"], "old-feedback")
+        self.assertEqual(result["folder_id"], "new-folder")
+        remote.find_project_feedback.assert_called_once_with("old-folder", "旧项目 · 工作反馈", "project:prj_pending_03")
+        remote.ensure_project_feedback.assert_not_called()
+
+    async def test_recent_uncertain_creation_does_not_switch_folders(self):
+        pending = {"id": "prj_pending_recent", "name": "旧项目", "status": "failed",
+                   "folder_id": "old-folder", "folder_url": store.FEISHU_HOST + "/drive/folder/old-folder",
+                   "feedback_id": "", "member_ids": [self.first["id"]],
+                   "feedback_setup": {"folder_id": "old-folder", "title": "旧项目 · 工作反馈",
+                                      "operation_id": "project:prj_pending_recent", "started_at": db.utc_now()}}
+        store.put("project", pending["id"], pending)
+        with patch.object(service, "feishu") as remote:
+            with self.assertRaisesRegex(ValueError, "刚尝试创建"):
+                await projects.save_project({"name": "旧项目", "member_ids": [self.first["id"]],
+                    "folder_url": store.FEISHU_HOST + "/drive/folder/new-folder"}, "recent-change", self.admin, pending["id"])
+            remote.assert_not_called()
+        self.assertEqual(store.get("project", pending["id"])["feedback_setup"], pending["feedback_setup"])
+
+    async def test_preflight_failure_does_not_lock_new_folder(self):
+        remote = MagicMock()
+        remote.read_source.return_value = {"ok": True, "items": []}
+        remote.find_project_feedback.side_effect = FeishuError("read_limit", "创建前目录读取失败")
+        with patch.object(service, "feishu", return_value=remote):
+            with self.assertRaises(FeishuError):
+                await projects.save_project(self.fields(), "preflight-failed", self.admin)
+        pending = next(item for item in store.items("project") if item["name"] == "新项目")
+        self.assertNotIn("feedback_setup", pending)
+        self.assertEqual(pending["status"], "failed")
+        remote.ensure_project_feedback.assert_not_called()
 
     async def test_project_folder_change_preserves_existing_feedback(self):
         remote = MagicMock()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -306,6 +307,33 @@ class CentralFeishuTests(unittest.TestCase):
         self.assertIn("人工补充", duplicate["content"])
         self.assertEqual(len(self.fake.writes(["docs", "+create"])), 1)
 
+    def test_find_project_feedback_is_read_only_for_absent_and_existing_document(self):
+        self.fake.folders["project-folder"] = []
+        tools = FeishuTools(executable="test-only-cli", sources=[{"id": "project-folder", "kind": "folder"}])
+        title, operation_id = "实际项目 · 工作反馈", "project:read-only"
+        self.assertIsNone(tools.find_project_feedback("project-folder", title, operation_id))
+        token = "existing-project-feedback"
+        self.fake.docs[token] = f"<title>{title}</title><p>人工内容 [RDOS 项目反馈标识:{operation_id}]</p>"
+        self.fake.folders["project-folder"].append({"token": token, "type": "docx", "name": title,
+                                                      "parent_token": "project-folder"})
+        found = tools.find_project_feedback("project-folder", title, operation_id)
+        self.assertEqual(found["object_id"], token)
+        self.assertIn("人工内容", found["content"])
+        self.assertEqual(self.fake.writes(["docs", "+create"]), [])
+
+    def test_find_project_feedback_rejects_ambiguous_remote_state_without_writing(self):
+        self.fake.folders["project-folder"] = []
+        tools = FeishuTools(executable="test-only-cli", sources=[{"id": "project-folder", "kind": "folder"}])
+        title, operation_id = "项目反馈", "project:ambiguous"
+        remote_title = title + " · " + hashlib.sha256(operation_id.encode()).hexdigest()[:12]
+        self.fake.docs["markerless"] = "<title>项目反馈</title><p>人工建立的文档</p>"
+        self.fake.folders["project-folder"].append({"token": "markerless", "type": "docx",
+                                                      "name": remote_title, "parent_token": "project-folder"})
+        with self.assertRaises(FeishuError) as caught:
+            tools.find_project_feedback("project-folder", title, operation_id)
+        self.assertEqual(caught.exception.code, "operation_conflict")
+        self.assertEqual(self.fake.writes(["docs", "+create"]), [])
+
     def test_project_feedback_link_keeps_its_folder_feishu_domain(self):
         self.fake.folders["project-folder"] = []
         tools = FeishuTools(executable="test-only-cli", sources=[{"id": "project-folder", "kind": "folder",
@@ -426,6 +454,14 @@ class CentralFeishuTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "authorization_failed")
         self.assertNotIn("secret", str(caught.exception))
         self.assertNotIn("sensitive", str(caught.exception))
+
+    def test_folder_parameter_error_is_distinguished_from_generic_remote_failure(self):
+        response = subprocess.CompletedProcess([], 1, "", '[page 1] fetching...\n{"ok":false,"error":{"code":1061002,"message":"params error"}}')
+        with patch("server.feishu_tools.subprocess.run", return_value=response):
+            with self.assertRaises(FeishuError) as caught:
+                self.tools._run(["drive", "files", "list", "--as", "user"], "folder-bad")
+        self.assertEqual(caught.exception.code, "folder_request_rejected")
+        self.assertNotIn("params error", str(caught.exception))
 
     def test_expired_read_revalidates_existing_grant_and_retries_once(self):
         calls = []
