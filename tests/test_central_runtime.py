@@ -89,6 +89,40 @@ class CentralRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["project_id"], "")
         self.assertEqual(store.get("message", run["id"] + ":assistant")["project_id"], "")
 
+    async def test_organization_chat_sees_saved_scheduled_check_without_tool_bodies(self):
+        state = store.get("state", "runtime")
+        state.update(schedule_verified=True, last_scheduled={
+            "id": "scheduled-latest", "at": "2026-10-12T00:40:00+00:00", "status": "succeeded"})
+        store.put("state", "runtime", state)
+        store.put("run", "scheduled-older", {"id": "scheduled-older", "operation_id": "scheduled-older", "trigger": "scheduled",
+            "project_id": store.PROJECT_ID, "status": "failed", "created_at": "2026-10-11T00:00:00+00:00",
+            "completed_at": "2026-10-11T00:02:00+00:00", "error": "读取反馈失败"})
+        store.put("run", "scheduled-latest", {"id": "scheduled-latest", "operation_id": "scheduled-latest", "trigger": "scheduled",
+            "project_id": store.PROJECT_ID, "status": "succeeded", "created_at": "2026-10-12T00:37:00+00:00",
+            "completed_at": "2026-10-12T00:40:00+00:00", "result": "已读回反馈，暂无新内容。",
+            "steps": [{"type": "tool_result", "name": "read_feedback", "ok": True,
+                       "arguments": {"secret": "do-not-share"}, "result": "do-not-share…（完整材料通过来源读取）"},
+                      {"type": "tool_result", "name": "list_tasks", "result": {"ok": False, "error": "not-shared"}}]})
+        store.put("run", "manual-other", {"id": "manual-other", "operation_id": "manual-other", "trigger": "manual",
+            "status": "succeeded", "created_at": "2026-10-12T00:45:00+00:00"})
+        run = service.new_run(self.user, "最近一次中央定时检查运行了吗？", "scheduled-history", project_id="")
+
+        async def answer(agent, messages, tools, execute_tool, **kwargs):
+            context = json.loads(messages[0]["content"].split("\n", 1)[1])
+            checks = context["central_scheduled_checks"]
+            self.assertTrue(checks["schedule_verified"])
+            self.assertEqual(checks["last_scheduled"], state["last_scheduled"])
+            self.assertEqual([item["id"] for item in checks["recent_runs"]], ["scheduled-latest", "scheduled-older"])
+            self.assertEqual(checks["recent_runs"][0]["tools"],
+                             [{"name": "read_feedback", "ok": True}, {"name": "list_tasks", "ok": False}])
+            self.assertEqual(checks["recent_runs"][0]["summary"], "已读回反馈，暂无新内容。")
+            self.assertNotIn("do-not-share", messages[0]["content"])
+            return {"content": "最近一次中央定时检查已成功，反馈已读回。", "model": "test", "usage": {}}
+
+        with patch.object(CentralAgent, "run", answer):
+            await service.run_agent(run["id"])
+        self.assertEqual(store.get("run", run["id"])["status"], "succeeded")
+
     async def test_same_organization_request_keeps_project_task_drafts_distinct(self):
         for project_id in ("team-one", "team-two"):
             store.put("project", project_id, {"id": project_id, "name": project_id,

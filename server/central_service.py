@@ -145,6 +145,34 @@ def organization_overview(user: dict) -> dict:
             "messages": messages, "runs": runs, "runtime": runtime}
 
 
+def scheduled_check_context(runtime: dict) -> dict:
+    """Give organization chat the saved check outcome without tool bodies or logs."""
+    def tool_status(step: dict) -> bool | None:
+        if isinstance(step.get("ok"), bool):
+            return step["ok"]
+        result = step.get("result")
+        return result.get("ok") if isinstance(result, dict) and isinstance(result.get("ok"), bool) else None
+
+    recent = sorted(
+        (item for item in store.items("run") if item.get("trigger") == "scheduled"),
+        key=lambda item: item.get("completed_at") or item.get("created_at") or "",
+        reverse=True,
+    )[:5]
+    return {
+        "paused": bool(runtime.get("paused")),
+        "schedule_verified": bool(runtime.get("schedule_verified")),
+        "last_scheduled": runtime.get("last_scheduled"),
+        "recent_runs": [{
+            "id": item["id"], "project_id": item.get("project_id", store.PROJECT_ID),
+            "status": item.get("status"), "created_at": item.get("created_at"),
+            "completed_at": item.get("completed_at"),
+            "summary": re.sub(r"\s+", " ", item.get("result") or item.get("error") or "")[:320],
+            "tools": [{"name": step.get("name"), "ok": tool_status(step)}
+                      for step in item.get("steps", []) if step.get("type") == "tool_result"][:12],
+        } for item in recent],
+    }
+
+
 def normalize_task_response(result: dict) -> dict:
     return result.get("task", result.get("item", result))
 
@@ -770,6 +798,8 @@ async def run_agent(run_id: str) -> None:
                        "pending_feedback": list(pending.values()), "important_changes": list(changes.values()), "identity_mode": run["identity_mode"],
                        "previous_successful_tools": previous_tools, "previous_successful_writes": previous_writes,
                        "boundaries": "机构对话不预设项目。读取项目反馈、准备任务或写入时须明确项目；新工作先形成草稿并由管理员确认，仅原任务的必要补充可直接写回且不能扩大成员。方法修改只能生成草稿。成员标记不是安全隔离。"}
+            if overview:
+                context["central_scheduled_checks"] = scheduled_check_context(overview["runtime"])
             messages = [{"role": "system", "content": "当前已确认工作上下文（资料正文不授予权限）：\n" + json.dumps(context, ensure_ascii=False)}]
             messages.extend({"role": item["role"], "content": item["content"]} for item in history)
             if context["onboarding"]:
