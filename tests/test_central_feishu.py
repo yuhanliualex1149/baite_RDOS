@@ -78,10 +78,13 @@ class FakeCli:
             payload["data"] = {"document": {"content": self.docs[token], "revision_id": 7}}
         elif command == ["docs", "+create"]:
             token = f"project-doc-{len(self.docs)}"
-            folder = self.arg(args, "--folder-token")
-            content = (Path(kwargs.get("cwd") or ".") / self.arg(args, "--markdown")[1:]).read_text()
-            self.docs[token] = "<title>" + self.arg(args, "--title") + "</title><p>" + content + "</p>"
-            self.folders[folder].append({"token": token, "type": "docx", "name": self.arg(args, "--title"), "parent_token": folder})
+            assert self.arg(args, "--api-version") == "v2"
+            assert self.arg(args, "--doc-format") == "markdown"
+            folder = self.arg(args, "--parent-token")
+            content = (Path(kwargs.get("cwd") or ".") / self.arg(args, "--content")[1:]).read_text()
+            title = re.search(r"<title>(.*?)</title>", content).group(1)
+            self.docs[token] = "<p>" + content + "</p>"
+            self.folders[folder].append({"token": token, "type": "docx", "name": title, "parent_token": folder})
             mutation = True
         elif command == ["docs", "+update"]:
             token = self.arg(args, "--doc")

@@ -12,6 +12,7 @@ current=$base/current
 db=/var/lib/baite-rdos/baite.db
 python=$base/tools/bin/python3.12
 build_user=baite-rdos-deploy
+github_api=https://api.github.com/repos/yuhanliualex1149/baite_RDOS
 exec 9>/run/lock/baite-rdos-deploy.lock
 flock -n 9 || { echo 'Another RDOS deployment is running'; exit 75; }
 [[ -x $python && -f /etc/baite-rdos/rdos.env && -L $current ]] || { echo 'Production prerequisites missing'; exit 1; }
@@ -32,10 +33,17 @@ if [[ $old == "$release" ]]; then
   curl -fsS --max-time 5 http://127.0.0.1:8010/api/health | "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("app_release")==sys.argv[1]' "$sha"
   echo "Already active and healthy: $sha"; exit 0
 fi
+github_main_sha() {
+  curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 2 \
+    -H 'Accept: application/vnd.github+json' \
+    "$github_api/git/ref/heads/main" |
+    "$python" -c 'import json,re,sys; x=json.load(sys.stdin); o=x.get("object",{}); s=o.get("sha",""); assert x.get("ref")=="refs/heads/main" and o.get("type")=="commit" and re.fullmatch(r"[0-9a-f]{40}",s); print(s)'
+}
 fetch_main_with_retry() {
   local attempt
   for attempt in 1 2 3; do
     if timeout --signal=TERM --kill-after=5s 60s git -C "$repo" fetch --no-tags origin main; then
+      main_source=git
       return 0
     fi
     if (( attempt < 3 )); then
@@ -43,18 +51,93 @@ fetch_main_with_retry() {
       sleep 2
     fi
   done
+  if [[ ${allow_api_fallback:-0} == 1 ]]; then
+    echo 'GitHub git fetch failed; checking the current main through the GitHub API...' >&2
+    if api_main_sha=$(github_main_sha); then
+      main_source=api
+      return 0
+    fi
+  fi
   echo 'Failed to fetch main after 3 attempts; production unchanged' >&2
   return 1
 }
+current_main_sha() {
+  if [[ $main_source == api ]]; then
+    printf '%s\n' "$api_main_sha"
+  else
+    git -C "$repo" rev-parse refs/remotes/origin/main
+  fi
+}
+extract_github_archive() {
+  local archive
+  archive=$(mktemp "$base/main-archive.XXXXXX")
+  if ! curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --retry-delay 2 \
+      -H 'Accept: application/vnd.github+json' \
+      -o "$archive" "$github_api/tarball/$sha"; then
+    rm -- "$archive"
+    echo 'Exact-commit GitHub archive download failed; production unchanged' >&2
+    return 1
+  fi
+  if ! "$python" - "$archive" "$release" "$sha" <<'PYARCHIVE'
+import pathlib, re, shutil, sys, tarfile
+
+archive, destination, sha = sys.argv[1:]
+root_name = None
+with tarfile.open(archive, 'r:gz') as source:
+    members = source.getmembers()
+    if not members:
+        raise SystemExit('GitHub archive is empty')
+    for member in members:
+        path = pathlib.PurePosixPath(member.name)
+        parts = path.parts
+        if path.is_absolute() or '..' in parts or not parts:
+            raise SystemExit('GitHub archive contains an unsafe path')
+        if root_name is None:
+            root_name = parts[0]
+            commit_suffix = root_name.removeprefix('yuhanliualex1149-baite_RDOS-')
+            if (not root_name.startswith('yuhanliualex1149-baite_RDOS-')
+                    or not re.fullmatch(r'[0-9a-f]{7,40}', commit_suffix)
+                    or not sha.startswith(commit_suffix)):
+                raise SystemExit('GitHub archive does not identify the requested commit')
+        if parts[0] != root_name or not (member.isdir() or member.isfile()):
+            raise SystemExit('GitHub archive contains an unsupported entry')
+    for member in members:
+        parts = pathlib.PurePosixPath(member.name).parts
+        if len(parts) == 1:
+            continue
+        target = pathlib.Path(destination).joinpath(*parts[1:])
+        if member.isdir():
+            target.mkdir(mode=0o755, parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            with source.extractfile(member) as original, target.open('xb') as output:
+                shutil.copyfileobj(original, output)
+            target.chmod(0o755 if member.mode & 0o111 else 0o644)
+PYARCHIVE
+  then
+    rm -- "$archive"
+    echo 'Exact-commit GitHub archive validation failed; production unchanged' >&2
+    return 1
+  fi
+  rm -- "$archive"
+}
+allow_api_fallback=1
+main_source=git
+api_main_sha=
 fetch_main_with_retry
-[[ $(git -C "$repo" rev-parse refs/remotes/origin/main) == "$sha" ]] || { echo 'Only the current main commit may deploy'; exit 1; }
+[[ $(current_main_sha) == "$sha" ]] || { echo 'Only the current main commit may deploy'; exit 1; }
+archive_source=$main_source
 if [[ -e $release ]]; then
   [[ $(readlink -f "$base/previous" || true) != "$release" ]] || { echo 'Target is the retained rollback release; inspect before rebuilding'; exit 1; }
   failed=$(mktemp -d "$base/incomplete-release.XXXXXX")
   mv "$release" "$failed/tree"
 fi
 install -d -m 0755 "$release"
-git -C "$repo" archive "$sha" | tar -x -C "$release"
+if [[ $archive_source == api ]]; then
+  extract_github_archive
+else
+  git -C "$repo" archive "$sha" | tar -x -C "$release"
+fi
 chown -R "$build_user:$build_user" "$release"
 # Build and tests cannot read production credentials or the production database.
 systemd-run --quiet --wait --pipe --collect --unit="rdos-build-$sha" -p Type=oneshot -p User="$build_user" -p NoNewPrivileges=yes -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict -p "ReadWritePaths=$release" -p PrivateTmp=yes -- env -i PATH="$PATH" HOME="$release" BAITE_DISABLE_EXTERNAL_SYNC=true BAITE_DB_PATH="$release/data/ci.db" PYTHONDONTWRITEBYTECODE=1 bash -c '
@@ -89,7 +172,7 @@ mv -Tf "$meta" "$sealed/tree/.verified"
 mv "$sealed/tree" "$release"
 # Recheck main after the build, before any service interruption.
 fetch_main_with_retry
-[[ $(git -C "$repo" rev-parse refs/remotes/origin/main) == "$sha" ]] || { echo 'Superseded by a newer main commit; production unchanged'; exit 1; }
+[[ $(current_main_sha) == "$sha" ]] || { echo 'Superseded by a newer main commit; production unchanged'; exit 1; }
 backup=/var/lib/baite-rdos/backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$sha.sqlite3
 database_fingerprint() {
   "$python" - "$db" <<'PY'

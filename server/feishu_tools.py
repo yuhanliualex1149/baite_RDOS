@@ -349,12 +349,13 @@ class FeishuTools:
         title = title.strip()
         marker = f"[RDOS 项目反馈标识:{operation_id}]"
         remote_title = title + " · " + hashlib.sha256(operation_id.encode()).hexdigest()[:12]
-        content = (f"# {title}\n\n项目工作反馈入口。请保留已有记录并追加本次反馈，注明项目ID、成员ID、"
+        content = (f"<title>{html.escape(remote_title)}</title>\n# {title}\n\n项目工作反馈入口。请保留已有记录并追加本次反馈，注明项目ID、成员ID、"
                    f"关联任务及版本（如有）、本次运行标识和身份性质。区分实际成果、自述与尚未验证。\n\n{marker}")
         error = None
         try:
-            self._write_content(["docs", "+create", "--as", "user", "--folder-token", folder_token,
-                                 "--title", remote_title], "--markdown", content, folder_token)
+            self._write_content(["docs", "+create", "--api-version", "v2", "--as", "user",
+                                 "--parent-token", folder_token, "--doc-format", "markdown"],
+                                "--content", content, folder_token)
         except FeishuError as exc:
             error = exc
         try:

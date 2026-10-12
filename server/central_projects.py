@@ -136,9 +136,20 @@ async def save_project(fields: dict, operation_id: str, user: dict, project_id: 
             return op["result"]
         item = None
         try:
+            if setup_changed and _recent_feedback_attempt(old):
+                raise ValueError("上次反馈文档刚尝试创建，请稍后再保存；系统会先核对原文件夹，避免重复创建。")
+            # A changed folder should be checked before the old uncertain
+            # creation. Otherwise an unreadable old folder masks every new
+            # URL with the same stale-setup error, even when the new URL itself
+            # is invalid. This is read-only and does not abandon the old write.
+            prechecked_folder = None
+            prechecked_probe = None
+            if setup_changed and link and link["id"] != setup["folder_id"]:
+                prechecked_probe = service.feishu(extra_sources=[{**link, "name": name + "资料"}])
+                prechecked_folder = await asyncio.to_thread(prechecked_probe.read_source, link["id"], "folder")
+                if not isinstance(prechecked_folder, dict) or prechecked_folder.get("ok") is not True or prechecked_folder.get("object_id") != link["id"]:
+                    raise ValueError("无法读取新项目文件夹，请检查链接和当前连接账号的权限")
             if setup_changed:
-                if _recent_feedback_attempt(old):
-                    raise ValueError("上次反馈文档刚尝试创建，请稍后再保存；系统会先核对原文件夹，避免重复创建。")
                 old_folder = setup["folder_id"]
                 old_url = old.get("folder_url") or store.FEISHU_HOST + "/drive/folder/" + old_folder
                 prior_probe = service.feishu(project_id="", extra_sources=[{"id": old_folder, "kind": "folder", "source_url": old_url}])
@@ -164,8 +175,8 @@ async def save_project(fields: dict, operation_id: str, user: dict, project_id: 
                 extra_sources = [{**link, "name": name + "资料"}]
                 if feedback_link:
                     extra_sources.append({**feedback_link, "name": name + "反馈"})
-                probe = service.feishu(extra_sources=extra_sources)
-                folder_read = await asyncio.to_thread(probe.read_source, link["id"], "folder")
+                probe = prechecked_probe or service.feishu(extra_sources=extra_sources)
+                folder_read = prechecked_folder or await asyncio.to_thread(probe.read_source, link["id"], "folder")
                 if feedback_link:
                     if not isinstance(folder_read, dict) or folder_read.get("ok") is not True or folder_read.get("object_id") != link["id"]:
                         raise ValueError("无法读取指定项目文件夹，请检查权限或链接")

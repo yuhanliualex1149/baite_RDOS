@@ -229,12 +229,30 @@ class CentralProjectTest(unittest.IsolatedAsyncioTestCase):
                                       "operation_id": "project:prj_pending_02"}}
         store.put("project", pending["id"], pending)
         remote = MagicMock()
+        remote.read_source.return_value = {"ok": True, "object_id": "new-folder", "items": []}
         remote.find_project_feedback.side_effect = FeishuError("remote_failed", "旧目录读取失败")
         with patch.object(service, "feishu", return_value=remote):
             with self.assertRaises(FeishuError):
                 await projects.save_project({"name": "新项目", "member_ids": [self.first["id"]],
                     "folder_url": store.FEISHU_HOST + "/drive/folder/new-folder"}, "unreadable-old", self.admin, pending["id"])
         self.assertEqual(store.get("project", pending["id"])["feedback_setup"], pending["feedback_setup"])
+        remote.ensure_project_feedback.assert_not_called()
+
+    async def test_changed_folder_reports_new_folder_error_before_old_uncertain_setup(self):
+        pending = {"id": "prj_pending_invalid_new", "name": "旧项目", "status": "failed",
+                   "folder_id": "old-folder", "folder_url": store.FEISHU_HOST + "/drive/folder/old-folder",
+                   "feedback_id": "", "member_ids": [self.first["id"]], "updated_at": "2020-01-01T00:00:00+00:00",
+                   "feedback_setup": {"folder_id": "old-folder", "title": "旧项目 · 工作反馈",
+                                      "operation_id": "project:prj_pending_invalid_new"}}
+        store.put("project", pending["id"], pending)
+        remote = MagicMock()
+        remote.read_source.side_effect = FeishuError("folder_request_rejected", "新文件夹读取被拒绝")
+        with patch.object(service, "feishu", return_value=remote):
+            with self.assertRaisesRegex(FeishuError, "新文件夹读取被拒绝"):
+                await projects.save_project({"name": "旧项目", "member_ids": [self.first["id"]],
+                    "folder_url": store.FEISHU_HOST + "/drive/folder/new-folder"}, "invalid-new", self.admin, pending["id"])
+        self.assertEqual(store.get("project", pending["id"])["feedback_setup"], pending["feedback_setup"])
+        remote.find_project_feedback.assert_not_called()
         remote.ensure_project_feedback.assert_not_called()
 
     async def test_changed_folder_reuses_document_found_in_original_folder(self):
