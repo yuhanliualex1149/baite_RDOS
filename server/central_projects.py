@@ -23,7 +23,10 @@ def project(record_id: str = store.PROJECT_ID, user: dict | None = None) -> dict
     if not item:
         raise ProjectNotFoundError("项目不存在，请重新选择项目")
     item = dict(item)
-    item.setdefault("member_ids", [member["id"] for member in store.users()] if record_id == store.PROJECT_ID else [])
+    members = store.users()
+    item.setdefault("member_ids", [member["id"] for member in members] if record_id == store.PROJECT_ID else [])
+    disabled_ids = {member["id"] for member in members if not member["enabled"]}
+    item["member_ids"] = [member_id for member_id in item["member_ids"] if member_id not in disabled_ids]
     item.setdefault("feedback_id", store.FEEDBACK_ID if record_id == store.PROJECT_ID else "")
     item["feedback_doc_id"] = item["feedback_id"]
     item.setdefault("feedback_url", store.FEISHU_HOST + "/docx/" + item["feedback_id"] if item["feedback_id"] else "")
@@ -31,7 +34,7 @@ def project(record_id: str = store.PROJECT_ID, user: dict | None = None) -> dict
     item.setdefault("status", "active")
     if user and "admin" not in user["roles"] and user["id"] not in item["member_ids"]:
         raise PermissionError("当前账号尚未加入这个项目，请联系管理员添加，或选择已加入的项目。")
-    item["member_names"] = {member["id"]: member["display_name"] for member in store.users()
+    item["member_names"] = {member["id"]: member["display_name"] for member in members
                             if member["id"] in item["member_ids"]}
     return item
 

@@ -144,6 +144,27 @@ class CentralProjectTest(unittest.IsolatedAsyncioTestCase):
             projects.project(self.project["id"], self.other)
         self.assertNotIn("member_names", store.get("project", self.project["id"]))
 
+    def test_disabled_user_is_not_an_active_project_member(self):
+        shared_admin = store.create_user("shared_admin", "共享管理员", ["admin"], "SharedTest123!")["user"]
+        self.project["member_ids"] = [self.first["id"], shared_admin["id"]]
+        store.put("project", self.project["id"], self.project)
+        store.update_user(shared_admin["id"], {"enabled": False})
+
+        current = projects.project(self.project["id"])
+        self.assertEqual(current["member_ids"], [self.first["id"]])
+        self.assertEqual(current["member_names"], {self.first["id"]: self.first["display_name"]})
+        listed = next(item for item in projects.list_projects(self.admin) if item["id"] == self.project["id"])
+        self.assertEqual(listed["member_ids"], [self.first["id"]])
+        self.assertEqual(store.get("project", self.project["id"])["member_ids"], self.project["member_ids"])
+
+        default = store.get("project", store.PROJECT_ID)
+        default.pop("member_ids", None)
+        store.put("project", store.PROJECT_ID, default)
+        self.assertNotIn(shared_admin["id"], projects.project(store.PROJECT_ID)["member_ids"])
+        store.update_user(shared_admin["id"], {"enabled": True})
+        self.assertIn(shared_admin["id"], projects.project(store.PROJECT_ID)["member_ids"])
+        self.assertIn(shared_admin["id"], projects.project(self.project["id"])["member_ids"])
+
     async def test_project_create_readbacks_and_repeat_reuses_same_document(self):
         remote = MagicMock()
         remote.read_source.return_value = {"ok": True, "items": []}
