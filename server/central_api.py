@@ -163,6 +163,8 @@ class TaskDraftEdit(Input):
     nature: Literal["一次性", "周期", "每次接入执行"] = "一次性"
     related_task: str = Field(default="", max_length=100)
     version: str = Field(default="", max_length=30)
+    draft_action: Optional[Literal["create", "update", "withdraw"]] = None
+    reason: Optional[str] = Field(default=None, max_length=3000)
 
 
 def current_user(token: Optional[str] = Cookie(default=None, alias=COOKIE),
@@ -240,7 +242,8 @@ def workspace(project_id: str = store.PROJECT_ID, user: dict = Depends(current_u
     is_admin = "admin" in user["roles"]
     tasks = [item for item in store.items("task") if projects.belongs(item, project_id) or (not item.get("project_id") and item.get("task_id") in ("ONB-FRAME-01", "ONB-REVIEW-01"))]
     feedback = [item for item in store.items("feedback") if projects.belongs(item, project_id)]
-    proposals = [item for item in store.items("proposal") if projects.belongs(item, project_id)]
+    proposals = [item for item in store.items("proposal") if projects.belongs(item, project_id)
+                 or (item.get("target_kind") == "template" and item.get("project_id") == "")]
     runtime = dict(store.get("state", "runtime") or {})
     project_runtime = runtime.get("project_runtime", {}).get(project_id)
     # A team-level chat must not appear as the selected project's latest work.
@@ -301,6 +304,11 @@ def overview(user: dict = Depends(admin)):
     return service.organization_overview(user)
 
 
+@router.get("/diagnostics")
+def diagnostics(user: dict = Depends(admin)):
+    return service.runtime_diagnostics(user)
+
+
 @router.post("/sync")
 async def sync(payload: ProjectOperation, user: dict = Depends(admin)):
     try:
@@ -335,7 +343,7 @@ async def retry(run_id: str, user: dict = Depends(admin)):
     if retry_count > 2:
         raise HTTPException(409, "这次处理已继续两次，请先查看错误和已有结果，再发起新操作。")
     item.setdefault("previous_attempts", []).append({key: item.get(key) for key in ("started_at", "completed_at", "status", "error", "steps", "usage", "result")})
-    item.update(status="queued", error="", technical_detail="", steps=[], result="", retry_count=retry_count)
+    item.update(status="queued", error="", error_code="", technical_detail="", steps=[], result="", retry_count=retry_count)
     for key in ("completed_at", "analysis_complete", "no_analysis", "usage", "model"):
         item.pop(key, None)
     store.put("run", run_id, item)
@@ -414,7 +422,13 @@ async def edit_proposal(proposal_id: str, payload: DraftEdit, user: dict = Depen
         if item["status"] == "published":
             raise HTTPException(409, "已发布内容请基于当前版本重新形成草稿")
         try:
-            material = await asyncio.to_thread(service.source_read, item["target_id"], item["target_kind"], item.get("project_id", store.PROJECT_ID))
+            if item["target_kind"] == "template":
+                from server import central_templates
+                material = central_templates.snapshot(item["target_id"])
+                if not payload.old_text:
+                    raise ValueError("模板修改须指出当前原文中的唯一位置")
+            else:
+                material = await asyncio.to_thread(service.source_read, item["target_id"], item["target_kind"], item.get("project_id", store.PROJECT_ID))
             if material["content_hash"] != item["base_hash"] or (payload.old_text and material["content"].count(payload.old_text) != 1):
                 raise ValueError("来源已变化或原文范围不准确，请重新读取并形成草稿")
             if payload.old_text == payload.new_text:
@@ -495,16 +509,29 @@ async def edit_task_draft(draft_id: str, payload: TaskDraftEdit, user: dict = De
         if old["status"] == "published" or old.get("publication_operation_id"):
             raise HTTPException(409, "这份任务已确认发布；请先核对发布结果，再另建修改草稿")
         try:
-            fields = {key: old[key] for key in ("instructions", "member_ids", "task_id", "task_kind", "stage", "nature", "related_task", "version") if key in old}
+            fields = {key: old[key] for key in ("instructions", "member_ids", "task_id", "task_kind", "stage", "nature", "related_task", "draft_action", "reason") if key in old}
             changes = payload.model_dump(exclude_unset=True)
             if changes.get("stage") in ("第一阶段", "第二阶段", "第三阶段") and "task_kind" not in changes:
                 changes["task_kind"] = "onboarding"
+            # The next version always comes from the latest remote task. A
+            # stale form must not pin the old number during explicit re-review.
+            changes.pop("version", None)
+            if (changes.get("draft_action") and changes["draft_action"] != old.get("draft_action")
+                    and not changes.get("reason")):
+                raise ValueError("改变任务操作时请说明原因")
             fields.update(changes)
             fields["task_id"] = fields.get("task_id") or old["task_id"]
-            checked = service.prepare_task(fields, {"id": old.get("run_id", ""), "project_id": old["project_id"], "operation_id": "edit:" + store.identifier("draft")}, user)
+            remote_tasks = (await asyncio.to_thread(service.feishu(old["project_id"]).list_tasks))["items"]
+            matches = [item for item in remote_tasks if item.get("task_id") == fields["task_id"]]
+            if len(matches) > 1:
+                raise ValueError("飞书存在重复任务 ID，请先核对原记录")
+            checked = service.prepare_task(fields, {"id": old.get("run_id", ""), "project_id": old["project_id"],
+                                                    "operation_id": "edit:" + store.identifier("draft")}, user,
+                                           existing_task=matches[0] if matches else {})
             store.remove("task_draft", checked["id"])
-            old.update({key: checked[key] for key in ("instructions", "member_ids", "task_id", "task_kind", "stage", "nature", "related_task", "version")},
-                       status="draft", edited_by=user["id"], edited_at=db.utc_now())
+            old.update({key: checked[key] for key in ("instructions", "member_ids", "task_id", "task_kind", "stage", "nature", "related_task", "version",
+                                                      "draft_action", "reason", "target_status", "base_task_version", "base_task_hash", "base_task_record_id", "base_task_instructions")},
+                       status="draft", edited_by=user["id"], edited_at=db.utc_now(), needs_review=False, last_publish_error="")
             old["draft_hash"] = service.task_draft_hash(old)
             store.put("task_draft", draft_id, old)
             return {"item": old}

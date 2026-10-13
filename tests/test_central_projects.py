@@ -387,7 +387,7 @@ class CentralProjectTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_agent_supplement_rejects_new_work_other_project_or_other_members(self):
         remote = MagicMock()
-        original = {"task_id": "ORIGINAL", "project_id": "project-one", "member_ids": [self.first["id"]], "status": "已发布", "task_kind": "work", "version": "1"}
+        original = {"task_id": "ORIGINAL", "project_id": "project-one", "member_ids": [self.first["id"]], "status": "已发布", "task_kind": "work", "version": "1", "record_id": "rec-original"}
         remote.list_tasks.return_value = {"items": [original]}
         remote.save_task.side_effect = lambda data, operation, record: {"task": {**data, "record_id": "rec-one"}}
         run = {"operation_id": "supplement", "project_id": "project-one"}

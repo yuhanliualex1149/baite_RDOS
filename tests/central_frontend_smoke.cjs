@@ -10,7 +10,7 @@ const autoStart = "  (async()=>{try{const data=await api('/auth/me');";
 const index = original.lastIndexOf(autoStart);
 assert(index >= 0, "The test must disable auto-start before evaluating UI code.");
 const source = original.slice(0, index) + `
-  globalThis.centralTest = {state, context, current, refresh, renderOnboarding, renderFeedback, renderMessages, renderConnection, renderProjects, taskTitle, workData, feedbackVersion, prepareInstruction, prepareProject,
+  globalThis.centralTest = {state, context, current, refresh, checkOnboarding, renderOnboarding, renderFeedback, renderMessages, renderConnection, renderProjects, renderTaskDrafts, renderProposals, renderDiagnostics, loadDiagnostics, taskTitle, workData, feedbackVersion, prepareInstruction, prepareProject,
     selectProject, clearProject, showProject, showTask, showProposal, startRun, put, close, rememberForm, formAction, resetSession, busy, markdown,
     setAPI(fn){api=fn;},setStartRun(fn){startRun=fn;},setRefresh(fn){refresh=fn;},
     stubRendering(){render=()=>{};renderNavigation=()=>{};renderProjects=()=>{};
@@ -35,6 +35,7 @@ function environment() {
     get innerHTML(){return this.html||"";}
     set innerHTML(value){
       this.html=value;this.children=[];
+      this.checkInputs=[...value.matchAll(/<input[^>]*type="checkbox"[^>]*value="([^"]+)"([^>]*)>/g)].map((m,i)=>{const n=new Node(`${this.id}-check-${i}`,"INPUT");n.value=m[1];n.checked=/\bchecked\b/.test(m[2]);return n;});
       if(this.id==="messages"){
         this.messageCards=[...value.matchAll(/<article class="message /g)].map((_,i)=>{const card=new Node(`message-${i}`);card.owner=this;card.messageIndex=i;return card;});
         this.scrollHeight=this.messageCards.length*120+100;
@@ -49,6 +50,7 @@ function environment() {
     addEventListener(type,callback){const handlers=this.events.get(type)||[];handlers.push(callback);this.events.set(type,handlers);}
     async dispatch(type,extra={}){for(const fn of this.events.get(type)||[])await fn({target:this,currentTarget:this,submitter:node(`${this.id}-submit`,"BUTTON"),preventDefault(){},...extra});}
     querySelectorAll(selector){
+      if(selector==="input:checked")return (this.checkInputs||[]).filter(n=>n.checked);
       if(selector===".message")return this.messageCards||[];
       if(selector==="input,textarea,select")return (dialogFields.get(this.id)||[]).map(node);
       if(selector==="button")return [node(`${this.id}-submit`,"BUTTON"),node(`${this.id}-cancel`,"BUTTON")];
@@ -185,7 +187,84 @@ function environment() {
     h.state.onboarding={session_id:"onboard-u",choice:"refresh",stage:0,stage_status:"blocked",missing:[]};h.state.onboardingError="反馈文档读取失败，请稍后重试。";
     node("onboarding-mode-label").parentElement=node("onboarding-mode-container");h.renderOnboarding();
     assert.equal(node("check-onboarding").textContent,"重试检查");assert(node("copy-onboarding-instruction").classList.contains("hidden"));
+    assert.equal(node("prepare-onboarding-instruction").classList.contains("hidden"),true);
+    assert.match(node("onboarding-check-error").textContent,/反馈文档读取失败/);
+    assert.equal(node("onboarding-action-error").textContent,"");
     assert.doesNotMatch(node("onboarding-status").innerHTML,/需要 Agent 补充/);
+  });
+  await test("completed onboarding step offers the next guide before asking for another check",async({h,node})=>{
+    h.state.onboarding={session_id:"onboard-u",choice:"new",stage:1,stage_status:"pending",completed_steps:[0],missing:[]};
+    node("onboarding-mode-label").parentElement=node("onboarding-mode-container");h.renderOnboarding();
+    assert.equal(node("continue-onboarding").textContent,"继续：确认工作范围");
+    assert.equal(node("continue-onboarding").classList.contains("hidden"),false);
+    assert.equal(node("copy-onboarding-instruction").classList.contains("hidden"),true);
+    const calls=[];h.setAPI(async(p,o)=>{calls.push({path:p,body:o.body});return {id:"guide-1",prompt:"仅完成当前步骤",url:"https://example.com/guide"};});
+    await node("continue-onboarding").dispatch("click");h.renderOnboarding();
+    assert.equal(calls.length,1);assert.equal(calls[0].path,"/onboarding/instruction");
+    assert.equal(node("continue-onboarding").classList.contains("hidden"),true);
+    assert.equal(node("copy-onboarding-instruction").classList.contains("hidden"),false);
+    h.state.instruction=null;h.state.onboarding.missing=["尚未收到这一步的反馈"];
+    h.renderOnboarding();assert.equal(node("continue-onboarding").classList.contains("hidden"),true);
+  });
+  await test("a real onboarding omission offers a supplement, while a read failure offers retry",({h,node})=>{
+    h.state.onboarding={session_id:"onboard-u",choice:"new",stage:1,stage_status:"blocked",completed_steps:[0],missing:["请确认允许分享的范围"]};
+    h.state.instruction={id:"guide-supplement",prompt:"只补缺项"};
+    node("onboarding-mode-label").parentElement=node("onboarding-mode-container");h.renderOnboarding();
+    assert.equal(node("copy-onboarding-instruction").textContent,"复制补充指令");
+    assert.equal(node("copy-onboarding-instruction").classList.contains("hidden"),false);
+    assert.equal(node("onboarding-check-error").textContent,"");
+    h.state.onboarding.error="反馈读取失败";h.renderOnboarding();
+    assert.equal(node("check-onboarding").textContent,"重试检查");
+    assert.equal(node("copy-onboarding-instruction").classList.contains("hidden"),true);
+    delete h.state.onboarding.error;h.state.onboarding.missing=[];h.renderOnboarding();
+    assert.equal(node("check-onboarding").textContent,"重试检查");
+    assert.equal(node("copy-onboarding-instruction").classList.contains("hidden"),true);
+  });
+  await test("onboarding check binds the current session and stage and ignores an earlier refresh",async({h})=>{
+    h.state.onboarding={session_id:"run-current",choice:"new",stage:0,stage_status:"pending",completed_steps:[]};
+    let releaseStatus,releaseCheck;const calls=[];
+    h.setAPI((p,o)=>{calls.push({path:p,body:o?.body});
+      if(p==="/projects")return Promise.resolve({items:[{id:"P",name:"测试项目"}]});
+      if(p==="/onboarding/status")return new Promise(resolve=>{releaseStatus=resolve;});
+      if(p==="/onboarding/check")return new Promise(resolve=>{releaseCheck=resolve;});
+      if(p==="/overview")return Promise.resolve({projects:[],tasks:[],feedback:[]});
+      return Promise.resolve({items:[]});
+    });
+    const oldRefresh=h.refresh();await tick();assert.equal(typeof releaseStatus,"function");
+    const check=h.checkOnboarding(true);assert.deepEqual(JSON.parse(JSON.stringify(calls.find(c=>c.path==="/onboarding/check").body)),{session_id:"run-current",expected_stage:0});
+    releaseCheck({session_id:"run-current",choice:"new",stage:1,stage_status:"pending",completed_steps:[0],missing:[]});await check;
+    releaseStatus({session_id:"run-current",choice:"new",stage:0,stage_status:"pending",completed_steps:[]});await oldRefresh;
+    assert.equal(h.state.onboarding.stage,1);
+  });
+  await test("refresh while onboarding check runs does not replace the check result",async({h})=>{
+    h.state.onboarding={session_id:"run-current",choice:"new",stage:0,stage_status:"pending",completed_steps:[]};
+    let releaseCheck;const calls=[];
+    h.setAPI((p,o)=>{calls.push(p);if(p==="/onboarding/check")return new Promise(resolve=>{releaseCheck=resolve;});if(p==="/projects")return Promise.resolve({items:[{id:"P",name:"测试项目"}]});if(p==="/overview")return Promise.resolve({projects:[],tasks:[],feedback:[]});return Promise.resolve({items:[]});});
+    const check=h.checkOnboarding(true);await h.refresh();
+    assert.equal(calls.includes("/onboarding/status"),false);
+    releaseCheck({session_id:"run-current",choice:"new",stage:1,stage_status:"pending",completed_steps:[0],missing:[]});await check;
+    assert.equal(h.state.onboarding.stage,1);
+  });
+  await test("a stale check reloads the current onboarding step",async({h})=>{
+    h.state.onboarding={session_id:"run-current",choice:"new",stage:0,stage_status:"pending",completed_steps:[]};
+    const calls=[];h.setAPI(async p=>{calls.push(p);if(p==="/onboarding/check"){const e=new Error("接入步骤已变化");e.status=409;throw e;}if(p==="/onboarding/status")return {session_id:"run-current",choice:"new",stage:1,stage_status:"pending",completed_steps:[0],missing:[]};return {};});
+    await h.checkOnboarding(true);
+    assert.deepEqual(calls,["/onboarding/check","/onboarding/status"]);
+    assert.equal(h.state.onboarding.stage,1);assert.equal(h.state.onboardingCheckError,"");
+  });
+  await test("a prior account's onboarding check cannot update a new login",async({h})=>{
+    h.state.onboarding={session_id:"old-run",choice:"new",stage:0,stage_status:"pending",completed_steps:[]};
+    let release;h.setAPI(()=>new Promise(resolve=>{release=resolve;}));const pending=h.checkOnboarding(true);
+    h.resetSession();h.state.user={id:"other",roles:["researcher"]};
+    release({session_id:"old-run",choice:"new",stage:1,stage_status:"pending",completed_steps:[0]});await pending;
+    assert.equal(h.state.onboarding,null);
+  });
+  await test("new account loading clears the previous onboarding instruction status",({h,node})=>{
+    node("onboarding-mode-label").parentElement=node("onboarding-mode");
+    node("onboarding-action-status").textContent="原指令已过期，重新生成后再复制。";
+    h.state.onboarding=null;h.renderOnboarding();
+    assert.equal(node("onboarding-action-status").textContent,"");
+    assert.equal(node("onboarding-instruction").classList.contains("hidden"),true);
   });
   await test("read-back feedback is received and stable revision ignores read time",({h,node})=>{
     const f={id:"f1",project_id:"P",member_id:"u",content:"完成了资料整理",content_hash:"body-1",source_readback:true,source_url:"https://example.com/feedback",observed_at:"2026-10-11T00:00:00Z"};
@@ -196,6 +275,31 @@ function environment() {
     h.state.overview.feedback=[{...f,source_readback:undefined,evidence_status:"Agent自述",content_hash:""}];h.renderFeedback();
     assert.match(node("feedback-list").innerHTML,/尚未读回/);
     assert.equal(h.feedbackVersion(f),h.feedbackVersion({...f,observed_at:"2026-10-12T00:00:00Z"}));
+  });
+  await test("structured project feedback highlights work and keeps method details optional",({h,node})=>{
+    h.state.projectId=null;h.state.overview={tasks:[],users:[{id:"u",display_name:"测试成员"}],feedback:[{
+      id:"f-six",project_id:"P",member_id:"u",source_readback:true,source_url:"https://example.com/feedback",
+      reported_at:"2026-10-12T09:00:00+08:00",observed_at:"2026-10-13T09:00:00+08:00",period:"2026-10-05 至 2026-10-11 Asia/Shanghai",template_version:"project-feedback-v1",
+      task_refs:[{task_id:"TASK-A",task_version:"2",version_status:"当前版本"}],version_status:"当前版本",
+      sections:{progress:"完成方案初稿；下周请评审。",outputs:"方案 v2 待评审",blockers:"需要潇斐确认数据",human_gate:"教案 v2 待负责人确认",skill_rag:"读取方法论并实际用于方案",local_skill:"本地调整评审 Skill，尚未共享"},
+      content:"原文",content_hash:"same-body"
+    }]};h.renderFeedback();
+    const html=node("feedback-list").innerHTML;
+    assert.match(html,/当前进度[\s\S]*完成方案初稿/);assert.match(html,/本期成果[\s\S]*方案 v2/);
+    assert.match(html,/需要协作[\s\S]*潇斐确认/);assert.match(html,/评审与确认线索[\s\S]*负责人确认/);
+    assert.match(html,/<details><summary>Skill 与方法使用<\/summary>/);
+    assert.match(html,/周期：2026-10-05 至 2026-10-11 Asia\/Shanghai/);
+    assert.match(html,/反馈时间：10\/12/);assert.match(html,/系统读取：10\/13/);
+    assert.doesNotMatch(html,/版本待核对|旧版本反馈/);
+  });
+  await test("legacy feedback without report time does not borrow the system read time",({h,node})=>{
+    h.state.projectId=null;h.state.overview={tasks:[],users:[{id:"u",display_name:"测试成员"}],feedback:[{
+      id:"f-old",project_id:"P",member_id:"u",content:"旧格式项目进展",observed_at:"2026-10-13T09:00:00+08:00",
+      task_id:"TASK-OLD",task_version:"1",version_status:"旧版本反馈"
+    }]};h.renderFeedback();const html=node("feedback-list").innerHTML;
+    assert.match(html,/反馈时间未注明/);assert.match(html,/系统读取：10\/13/);
+    assert.match(html,/旧版本反馈/);assert.match(html,/旧格式项目进展/);
+    assert.doesNotMatch(html,/反馈时间：10\/13/);
   });
   await test("chat submit preserves newly typed text and prevents duplicate submit",async({h,node})=>{
     let release,writes=0;h.setRefresh(async()=>({ok:true}));h.setStartRun(()=>{writes++;return new Promise(resolve=>{release=resolve;});});
@@ -228,6 +332,32 @@ function environment() {
     h.showProposal(item);assert.match(node("proposal-review").innerHTML,/id="publish-proposal"[^>]*disabled>确认发布/);
     assert.match(node("proposal-form-error").textContent,/重新读取来源并起草/);
     h.showProposal({...item,base_hash:"fresh-hash"});assert.equal(h.state.proposalSourceChanged,null);
+  });
+  await test("task draft shows action, reason and original version before confirmation",({h,node})=>{
+    h.state.projectId=null;h.state.overview={tasks:[],users:[{id:"u",display_name:"测试成员"}],task_drafts:[{id:"d1",project_id:"P",task_id:"TASK-1",draft_action:"update",reason:"调整交付时间",base_task_version:"2",instructions:"交付初稿",member_ids:["u"],status:"draft"}]};
+    h.renderTaskDrafts();assert.match(node("task-draft-list").innerHTML,/修改任务/);assert.match(node("task-draft-list").innerHTML,/理由：调整交付时间/);assert.match(node("task-draft-list").innerHTML,/原版本 2/);
+    h.showTask(h.state.overview.task_drafts[0],"draft");assert.match(node("task-draft-impact").innerHTML,/基于原版本 2/);assert.equal(node("task-reason").value,"调整交付时间");assert.equal(node("task-submit").textContent,"发布更新");
+    h.showTask({...h.state.overview.task_drafts[0],draft_action:"withdraw"},"draft");assert.equal(node("task-instructions").readOnly,true);assert.equal(node("task-reason").readOnly,false);assert.equal(node("task-submit").textContent,"确认停用");
+  });
+  await test("version conflict preserves task edits and requires a separate re-review",async({h,node})=>{
+    const draft={id:"d1",project_id:"P",task_id:"TASK-1",draft_action:"update",reason:"调整要求",base_task_version:"1",instructions:"新要求",member_ids:["u"],task_kind:"work",nature:"一次性",status:"draft",draft_hash:"hash-1"};
+    h.state.projectId=null;h.state.overview={tasks:[],users:[{id:"u",display_name:"测试成员"}],task_drafts:[draft]};h.state.projects=[{id:"P",name:"测试项目",member_ids:["u"]}];h.setRefresh(async()=>({ok:true}));h.showTask(draft,"draft");
+    let publish=0,edits=0;
+    h.setAPI(async(path)=>{if(path.endsWith("/publish")){publish++;if(publish===1){const e=new Error("飞书任务版本已变化");e.code="task_version_changed";e.status=409;throw e;}return {item:{...draft,status:"published"}};}if(path.endsWith("/edit")){edits++;return {item:{...draft,base_task_version:"2",draft_hash:"hash-2"}};}return {items:[]};});
+    await node("task-form").dispatch("submit");assert.equal(publish,1);assert.equal(h.state.taskConflict,true);assert.equal(node("task-instructions").value,"新要求");assert.equal(node("task-submit").textContent,"保存草稿并重新审阅");
+    await node("task-form").dispatch("submit");assert.equal(edits,1);assert.equal(publish,1);assert.equal(h.state.taskConflict,false);assert.match(node("task-form-status").textContent,/再次确认/);
+    await node("task-form").dispatch("submit");assert.equal(publish,2);
+  });
+  await test("template proposal is local and activation does not claim adoption",({h,node})=>{
+    const item={id:"t1",project_id:"P",target_id:"project.feedback",target_kind:"template",source_url:"rdos-template:project.feedback",summary:"简化反馈说明",old_text:"旧说明",new_text:"新说明",status:"published",adoption_status:""};
+    h.state.projectId=null;h.state.overview={tasks:[],proposals:[item]};h.renderProposals();assert.match(node("proposal-list").innerHTML,/项目反馈说明（本地模板）/);assert.match(node("proposal-list").innerHTML,/已生效/);assert.match(node("proposal-list").innerHTML,/尚待后续反馈核对/);assert.doesNotMatch(node("proposal-list").innerHTML,/href="rdos-template:/);
+    h.showProposal(item);assert.match(node("proposal-review").innerHTML,/所有项目新生成的工作指令/);assert.match(node("proposal-review").innerHTML,/本地模板/);
+  });
+  await test("administrator diagnosis shows observed evidence and retains last result on failure",async({h,node})=>{
+    const data={observed_at:"2026-10-12T01:00:00Z",scope:"本机记录",online:{onboarding:{ready_for_work:1,needs_attention:2},model:{last_success_at:"2026-10-12T01:00:00Z"},tools:{},feishu:{unresolved_operations:1},tasks:{known:3,pending_drafts:1},central_schedule:{}},local_agents:{feedback_readback_records:2,reported_actual_scheduled_trigger:0,evidence_boundary:"仅统计已读回反馈"},limits:["不能据此断定成员没有工作"]};
+    h.setAPI(async()=>data);await h.loadDiagnostics();assert.equal(h.state.diagnostics,data);assert.match(node("diagnostics-result").innerHTML,/已读回反馈 2 条/);assert.match(node("diagnostics-result").innerHTML,/仅统计已读回反馈/);
+    h.setAPI(async()=>{throw new Error("连接失败")});await h.loadDiagnostics();assert.equal(h.state.diagnostics,data);assert.match(node("diagnostics-error").textContent,/显示上次结果/);
+    let calls=0;h.state.user.roles=["researcher"];h.setAPI(async()=>{calls++;return data;});await h.loadDiagnostics();assert.equal(calls,0);
   });
   await test("dirty dialog asks to discard and cancellation retains input",async({h,node})=>{
     node("task-dialog").open=true;h.rememberForm("task-dialog");node("task-instructions").value="未保存要求";h.close("task-dialog");

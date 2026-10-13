@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>百特 RDOS</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="static/central.css?v=20261011-13" />
-    <script src="static/central.js?v=20261012-1" defer></script>
+    <link rel="stylesheet" href="static/central.css?v=20261013-workbench" />
+    <script src="static/central.js?v=20261013-workbench-4" defer></script>
   </head>
   <body>
     <section id="login-view" class="login-shell">
@@ -58,6 +58,7 @@
               </ol>
               <div id="onboarding-status"></div>
               <div id="onboarding-actions" class="inline-actions">
+                <button id="continue-onboarding" class="primary hidden" type="button">继续下一步</button>
                 <button id="copy-onboarding-instruction" class="primary" type="button">复制给我的 Agent</button>
                 <button id="onboarding-go-project" class="primary hidden" data-page="projects" type="button">进入项目</button>
                 <button id="prepare-onboarding-instruction" class="quiet hidden" type="button">重新生成指令</button>
@@ -73,6 +74,7 @@
                 <button id="check-onboarding" class="secondary" type="button">检查结果</button>
                 <p id="onboarding-check-hint">Agent 完成本步后点击</p>
               </div>
+              <p id="onboarding-check-error" class="form-error hidden" role="alert"></p>
               <details id="onboarding-check-details"><summary>查看检查依据</summary><div id="onboarding-check-report"></div></details>
             </div>
             <div class="onboarding-help"><button id="open-setup" class="quiet" type="button">飞书连接帮助</button></div>
@@ -84,7 +86,7 @@
           <div id="project-list" class="project-cards"></div>
           <section id="project-instruction" class="panel instruction-box hidden">
             <div class="section-title"><h2 id="project-instruction-title">给 Agent 的说明</h2><button id="copy-project-instruction" class="primary" type="button">复制给我的 Agent</button></div>
-            <p class="muted">复制后，粘贴到你的 Agent 对话中。</p>
+            <p id="project-copy-guidance" class="muted">复制后，粘贴到你的 Agent 对话中。</p>
             <div id="project-instruction-link" class="instruction-link"></div>
             <details id="project-copy-details"><summary>指令全文</summary><div id="project-prompt" class="plain-content"></div></details>
             <p id="project-instruction-status" class="action-status" role="status"></p><p id="project-instruction-error" class="form-error" role="alert"></p>
@@ -146,6 +148,7 @@
               <div class="section-title"><h2>中央 Agent 运行</h2><button id="open-drawer" class="quiet" type="button">查看运行记录</button></div>
               <div id="runtime-state"></div><p id="runtime-error" class="form-error" role="alert"></p>
               <div class="inline-actions"><button id="toggle-runtime" class="secondary" type="button">暂停中央 Agent</button></div>
+              <details id="diagnostics-details" class="diagnostics-details"><summary>查看运行诊断</summary><p id="diagnostics-status" class="action-status" role="status"></p><div id="diagnostics-result"></div><p id="diagnostics-error" class="form-error" role="alert"></p><button id="refresh-diagnostics" class="quiet" type="button">重新检查</button></details>
               <p class="small-note">暂停不影响成员的 Agent。</p>
             </section>
           </div>
@@ -178,10 +181,12 @@
         <p id="task-current-project" class="scope-summary"></p>
         <label id="task-project-label" class="hidden">任务属于哪个项目<select id="task-project" required></select></label>
         <p id="task-dialog-description" class="muted">发布后，成员可从飞书读取当前任务要求。</p>
+        <div id="task-draft-impact" class="task-draft-impact hidden"></div>
         <label>任务要求<textarea id="task-instructions" rows="6" required></textarea></label>
         <fieldset><legend>适用成员</legend><div id="task-members" class="member-options"></div><p id="task-member-hint" class="small-note hidden">先选项目，再选择成员。</p></fieldset>
         <div class="form-grid"><label>任务类型<select id="task-kind"><option value="work">正常工作</option><option value="onboarding">接入任务</option></select></label><label>执行频率<select id="task-nature"><option>一次性</option><option>周期</option><option>每次接入执行</option></select></label></div>
         <label id="task-stage-label" class="hidden">接入阶段<select id="task-stage"><option>第一阶段</option><option>第三阶段</option></select></label>
+        <label id="task-reason-label" class="hidden">修改理由<textarea id="task-reason" rows="3" placeholder="说明为什么需要这次调整"></textarea></label>
         <details><summary>任务标记与关联</summary><div class="stack-form technical-fields"><label>任务 ID（可选）<input id="task-id" maxlength="100" placeholder="留空自动生成" /></label><label>关联任务（可选）<input id="task-related" placeholder="补充要求关联原任务标识" /></label></div></details>
         <p id="task-form-status" class="action-status" role="status"></p><p id="task-form-error" class="form-error" role="alert"></p>
         <div class="dialog-actions"><button id="task-reject" class="quiet danger hidden" type="button">退回草稿</button><button class="secondary" data-close="task-dialog" type="button">取消</button><button id="task-submit" class="primary" type="submit">发布任务</button></div>

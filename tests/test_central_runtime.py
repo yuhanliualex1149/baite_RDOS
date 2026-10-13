@@ -350,7 +350,7 @@ class CentralRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         remote = TaskRemote()
         run = self.run_record()
-        remote.tasks = [{"task_id": "ORIGINAL", "project_id": store.PROJECT_ID, "member_ids": [self.user["id"]], "status": "已发布", "version": "1", "task_kind": "work"}]
+        remote.tasks = [{"task_id": "ORIGINAL", "project_id": store.PROJECT_ID, "member_ids": [self.user["id"]], "status": "已发布", "version": "1", "task_kind": "work", "record_id": "rec-original"}]
         fields = {"instructions": "读取实际材料后反馈", "member_ids": [self.user["id"]], "related_task": "ORIGINAL"}
         spec = next(item for item in service.tool_specs() if item["function"]["name"] == "save_task")
         self.assertIn("task_id", spec["function"]["parameters"]["required"])
@@ -391,7 +391,7 @@ class CentralRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         remote = TaskRemote()
         run = self.run_record("schedule:2026-10-10T08:00:00+00:00", "sync", "scheduled")
-        remote.tasks = [{"task_id": "ORIGINAL", "project_id": store.PROJECT_ID, "member_ids": [self.user["id"]], "status": "已发布", "version": "1", "task_kind": "work"}]
+        remote.tasks = [{"task_id": "ORIGINAL", "project_id": store.PROJECT_ID, "member_ids": [self.user["id"]], "status": "已发布", "version": "1", "task_kind": "work", "record_id": "rec-original"}]
         fields = {"task_id": "RDOS-SCHEDULED-FOLLOWUP", "instructions": "补充实际核对记录", "member_ids": [self.user["id"]], "related_task": "ORIGINAL"}
         self.assertEqual(service.agent_operation_prefix({"operation_id": "manual-original"}), "agent:manual-original:")
         with patch.object(service, "feishu", return_value=remote):

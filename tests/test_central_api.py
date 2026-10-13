@@ -374,12 +374,50 @@ class CentralApiTest(unittest.TestCase):
     def test_draft_text_edit_keeps_existing_onboarding_fields_when_omitted(self):
         item = self.service.prepare_task({"task_id": "ONB-EDIT-ONE", "task_kind": "onboarding", "stage": "第二阶段", "nature": "周期",
             "instructions": "当前接入要求", "member_ids": [self.researcher["id"]]}, {"operation_id": "draft-edit", "id": "draft-run"}, self.admin)
-        response = self.client.post(f"/api/central/task-drafts/{item['id']}/edit", json={
-            "instructions": "更清楚的接入要求", "member_ids": [self.researcher["id"]]})
+        remote = MagicMock()
+        remote.list_tasks.return_value = {"items": []}
+        with patch("server.central_service.feishu", return_value=remote):
+            response = self.client.post(f"/api/central/task-drafts/{item['id']}/edit", json={
+                "instructions": "更清楚的接入要求", "member_ids": [self.researcher["id"]]})
         self.assertEqual(response.status_code, 200, response.text)
         edited = response.json()["item"]
         self.assertEqual((edited["task_kind"], edited["stage"], edited["nature"]), ("onboarding", "第二阶段", "周期"))
         self.assertEqual(edited["task_id"], item["task_id"])
+
+    def test_stale_task_draft_can_be_rebased_by_saving_and_reviewed_again(self):
+        original = {"task_id": "WORK-EDIT-ONE", "project_id": self.store.PROJECT_ID,
+                    "instructions": "原任务要求", "member_ids": [self.researcher["id"]], "version": "2",
+                    "status": "已发布", "task_kind": "work", "stage": "", "nature": "一次性",
+                    "related_task": "", "record_id": "remote-one"}
+        draft = self.service.prepare_task({"task_id": original["task_id"], "instructions": "新的要求",
+            "draft_action": "update", "reason": "近期反馈指出需要更清楚的成果要求"},
+            {"operation_id": "edit-after-conflict", "id": "run-one"}, self.admin, existing_task=original)
+        original["instructions"] = "另一位管理员刚修改的原任务"
+        original["version"] = "3"
+        remote = MagicMock()
+        remote.list_tasks.side_effect = lambda: {"items": [dict(original)]}
+        with patch("server.central_service.feishu", return_value=remote):
+            conflict = self.client.post(f"/api/central/task-drafts/{draft['id']}/publish", json={
+                "expected_hash": draft["draft_hash"], "operation_id": "publish-stale"})
+            self.assertEqual(conflict.status_code, 409, conflict.text)
+            self.assertEqual(conflict.json()["detail"]["code"], "task_version_changed")
+            saved = self.client.post(f"/api/central/task-drafts/{draft['id']}/edit", json={
+                "instructions": "新的要求，保留原有决策", "member_ids": [self.researcher["id"]],
+                "reason": "已查看新版本，仍需补充成果要求"})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        revised = saved.json()["item"]
+        self.assertEqual(revised["base_task_hash"], self.service.task_body_hash(original))
+        self.assertEqual((revised["base_task_version"], revised["version"]), ("3", "4"))
+        self.assertNotEqual(revised["draft_hash"], draft["draft_hash"])
+        self.assertFalse(revised["needs_review"])
+        remote.save_task.assert_not_called()
+
+    def test_diagnostics_endpoint_keeps_researcher_out(self):
+        self.assertEqual(self.client.get("/api/central/diagnostics").status_code, 200)
+        self.login("researcher")
+        self.assertEqual(self.client.get("/api/central/diagnostics").status_code, 403)
+        self.login("dual")
+        self.assertEqual(self.client.get("/api/central/diagnostics").status_code, 200)
 
     def test_dialogue_filters_old_periodic_messages_beyond_run_window_by_metadata(self):
         text = "读取新的实际工作反馈和指定重要资料变化"
@@ -468,7 +506,7 @@ class CentralApiTest(unittest.TestCase):
             stale = self.client.post("/api/central/tasks", json={**body, "task_id": retry.json()["item"]["task_id"], "version": "1", "operation_id": "stale-task"})
             self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(len(tasks), 1)
-        self.assertEqual(remote.save_task.call_count, 2)  # First uncertain write, then remote-content reconciliation.
+        self.assertEqual(remote.save_task.call_count, 1)  # Readback reconciles without a second mutation.
 
     def test_restart_marks_running_interrupted_and_retry_keeps_original_identity(self):
         run = {"id": "run-restart", "status": "running", "operation_id": "original-operation", "user_id": self.admin["id"], "identity_mode": "actual", "message": "读取工作反馈", "trigger": "manual", "steps": [], "created_at": "2026-10-10T00:00:00+00:00"}

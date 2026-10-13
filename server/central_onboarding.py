@@ -7,13 +7,14 @@ import logging
 import re
 import secrets
 import time
-from typing import Literal
+from typing import Literal, Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 
-from server import central_store as store, central_service as service, db
+from server import central_store as store, central_service as service, central_templates, db, feedback_sections, project_feedback_guidance
 from server.central_api import current_user, failure
 from server.central_agent import CentralAgent
 from server.rag_sync import lark_content_to_markdown
@@ -21,7 +22,8 @@ from server.rag_sync import lark_content_to_markdown
 
 router = APIRouter(prefix="/api/central")
 LINK_HOURS = 24
-ASSESSMENT_VERSION = "2026-10-11-schedule-scope-check"
+ASSESSMENT_VERSION = "2026-10-13-record-boundary-evidence-v3"
+CHECK_BOOT = secrets.token_hex(12)
 
 
 class AssessmentResultError(ValueError):
@@ -49,6 +51,13 @@ class Context(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str = ""
     purpose: Literal["onboarding", "project"] = "onboarding"
+
+
+class CheckContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Older saved pages may omit these; new clients bind the exact step they saw.
+    session_id: Optional[str] = None
+    expected_stage: Optional[int] = None
 
 
 def project_for(project_id: str, user: dict) -> dict:
@@ -98,6 +107,12 @@ def completed_steps(item: dict) -> list[int]:
     return sorted(stages)
 
 
+def check_is_current(item: dict) -> bool:
+    started_at = item.get("check_started_at") or ""
+    expired = bool(started_at and started_at < store.future(-CentralAgent().max_seconds - 30))
+    return bool(item.get("checking") and item.get("check_boot") == CHECK_BOOT and not expired)
+
+
 def status_for(user: dict) -> dict:
     item = normalize_flow(store.get("onboarding_session", user["id"])) or {}
     stage = item.get("stage", 0)
@@ -110,7 +125,7 @@ def status_for(user: dict) -> dict:
             "missing": item.get("missing", []),
             "next_action": "先选择接入方式" if not item else "进入我的项目" if ready else "复制当前指令，交给你的 Agent",
             "error": item.get("error", ""), "checked_at": item.get("checked_at"),
-            "checking": bool(item.get("checking"))}
+            "checking": check_is_current(item)}
     if "admin" in user.get("roles", []):
         result.update(evidence=item.get("evidence", []), technical_detail=item.get("technical_detail", ""),
                       history=item.get("history", []), sources=sources())
@@ -161,6 +176,11 @@ def start(payload: Choice, user: dict = Depends(current_user)):
 
 
 def _feedback_template(user: dict, item: dict, project: dict, stage: int, purpose: str) -> str:
+    if purpose == "project":
+        return project_feedback_guidance.record_template(
+            member_id=user["id"], identity_mode=user["identity_mode"],
+            run_label=item["run_label"], project_id=project["id"],
+        )
     project_line = f"项目ID：{project['id']}\n" if purpose == "project" else ""
     onboarding_lines = f"接入阶段：{stage}\n接入路径：{item.get('path', 'new')}\n" if purpose == "onboarding" else ""
     template = f"""## 成员标识 {user['id']} 本次运行标识 {item['run_label']}
@@ -189,6 +209,8 @@ def instruction_body(user: dict, item: dict, project: dict, purpose: str, base_u
     if purpose == "project":
         return f"""# 百特项目说明：{project['name']}
 
+项目指令版本：v{central_templates.snapshot('project.instructions')['version']}
+
 ## 当前要做
 {_step_text(item, purpose)}
 直接使用已有飞书连接，实际失败时再排查。成员：{user['display_name']}（{user['id']}）；身份标记：{user['identity_mode']}。角色测试记录不能当作真实团队试用结论。
@@ -202,7 +224,8 @@ def instruction_body(user: dict, item: dict, project: dict, purpose: str, base_u
 读取任务表当前有效版本及适用成员，不按接入阶段筛日常任务。没有任务时也可开展已获准的工作，不虚构任务ID。
 
 ## 完成与反馈
-写清实际进展、成果、问题、Agent 参与及未核实部分；有任务时关联任务ID和版本。追加到本项目反馈文档，重试同一写入先查写回标识，保留原文，写后读回。私人路径、原始对话、memory和凭据留在本机。
+{project_feedback_guidance.guidance_text()}
+有任务时先核对当前适用版本；没有任务也可反馈获准的项目工作。沿用本机现有每日读取和每周反馈计划，不重复建立。新增适用要求应进入实际工作。追加到本项目反馈文档；重试同一写入先查标识，保留原文，写后读回。私人路径、原始对话、memory 和凭据留在本机。
 {_feedback_template(user, item, project, stage, purpose)}
 """
     document = store.ONBOARDING_IDS[0 if stage in (0, 1) else 2]
@@ -212,6 +235,7 @@ def instruction_body(user: dict, item: dict, project: dict, purpose: str, base_u
     help_line = f"连接实际失败时再读飞书连接帮助：{help_url}\n" if stage == 0 else f"只有连接实际失效时才查看飞书连接帮助：{help_url}\n"
     return f"""# 百特接入：{'连接飞书' if stage == 0 else '确认工作范围' if stage == 1 else '设置定时同步'}
 
+本步指令版本：v{central_templates.snapshot(f'onboarding.{stage}')['version'] if stage in (0, 1, 3) else 1}
 只完成本步。成员：{user['display_name']}（{user['id']}）；身份标记：{user['identity_mode']}；本轮标识：{item['run_label']}；路径：{item['path']}；步骤：{stage}。角色测试只证明本 Agent 借已授权连接执行，不能证明该角色拥有独立飞书账号授权。
 本步材料：{store.FEISHU_HOST}/docx/{document}
 反馈位置：{store.FEISHU_HOST}/docx/{feedback}
@@ -227,15 +251,13 @@ def instruction_body(user: dict, item: dict, project: dict, purpose: str, base_u
 
 def _step_text(item: dict, purpose: str) -> str:
     if purpose == "project":
-        return "读取项目背景、资料和适用于本人的当前任务。复用机构接入；仅对这个项目补确认本地工作与共享范围，并把项目、任务入口和正确反馈位置关联到已有本地记忆及定时检查。不要重做机构接入。"
+        return central_templates.text("project.instructions")
     stage = item["stage"]
     if stage == 0:
-        return "先检查已有飞书连接并复用。读取本步材料，在指定反馈位置只追加最少的连接检查：成员、标识、时间、读取来源和读写结果；真实读回。不要上传工作内容，也不要因本步测试扩大资料范围。若连接失败，按连接帮助定位具体缺口。"
-    return {
-        1: "按本步材料与本人确认身份、当前工作范围和允许共享范围；已有且未变化的确认可复用，新增范围才再次确认。核对已有记忆、资料入口和连接，只补缺失或过时项，并实际保存与读回。反馈脱敏的确认依据和结果；不迁移原文件，也不上传私人路径或记忆正文。",
-        2: "旧工作阶段已经取消为接入门槛；其历史反馈保留，请继续定时同步步骤。",
-        3: "按本步材料建立或更新本机现有定时任务，保留已有任务标识，不重复创建。先确认当前工作与共享范围仍符合本人此前确认；新增范围请本人决定。每日按本人及实际获分配项目读取当前要求；每周只在有真实工作或问题时整理反馈，不生成空日报。若尚未分配项目，不把接入测试项目当成业务项目。当前有关新要求须进入工作提醒与执行，不止是文件巡检。核对计划标识、频率、运行条件及目标项目选择后，在普通 Agent 对话中手动运行一次相同的读取→反馈写入→读回流程，并记录实际结果；仅配置而未执行不算完成。首次按时自动触发另记，不能用中央定时检查代替。",
-    }[stage]
+        return central_templates.text("onboarding.0")
+    if stage in (1, 3):
+        return central_templates.text(f"onboarding.{stage}")
+    return "旧工作阶段已经取消为接入门槛；其历史反馈保留，请继续定时同步步骤。"
 
 
 @router.post("/onboarding/instruction")
@@ -244,15 +266,21 @@ def instruction(payload: Context, request: Request, user: dict = Depends(current
     item = normalize_flow(store.get("onboarding_session", user["id"]))
     if payload.purpose == "onboarding" and not item:
         raise HTTPException(409, "先选择新接入或更新已有接入。")
-    item = item or {"run_label": store.identifier("project"), "stage": 0, "path": "project"}
+    # A project instruction is independent of any organization onboarding round.
+    if payload.purpose == "project":
+        item = {"run_label": store.identifier("project"), "stage": 0, "path": "project"}
     base = str(request.base_url).rstrip("/")
+    template_versions = central_templates.versions_for(payload.purpose, item["stage"])
     body = instruction_body(user, item, project, payload.purpose, base)
+    if template_versions != central_templates.versions_for(payload.purpose, item["stage"]):
+        raise HTTPException(409, "指令模板刚刚更新，请重新生成当前指令。")
     token = secrets.token_urlsafe(32)
     record_id = store.identifier("guide")
     expires = store.future(LINK_HOURS * 3600)
     store.put("instruction", record_id, {"id": record_id, "member_id": user["id"], "project_id": project["id"],
               "token_hash": store.digest(token), "body": body, "expires_at": expires,
-              "run_label": item["run_label"], "stage": item["stage"], "purpose": payload.purpose, "accessed_at": None})
+              "run_label": item["run_label"], "stage": item["stage"], "purpose": payload.purpose,
+              "template_versions": template_versions, "accessed_at": None})
     for old in store.items("instruction"):
         if old["expires_at"] < db.utc_now():
             store.remove("instruction", old["id"])
@@ -271,6 +299,11 @@ def read_instruction(key: str, request: Request):
         raise HTTPException(404, "说明链接无效或已过期，请本人在 Panel 重新复制当前指令。")
     if item["project_id"]:
         project_for(item["project_id"], user)
+    current_versions = central_templates.versions_for(item.get("purpose", "onboarding"), item.get("stage", 0))
+    # Pre-versioned capabilities were minted against all version-1 defaults.
+    minted_versions = item.get("template_versions") or {key: 1 for key in current_versions}
+    if minted_versions != current_versions:
+        raise HTTPException(410, "这份说明已有新版本，请本人在 Panel 重新复制当前指令。")
     body = item["body"]
     current = store.get("onboarding_session", user["id"])
     if item.get("purpose") == "onboarding":
@@ -284,25 +317,56 @@ def read_instruction(key: str, request: Request):
     return PlainTextResponse(body, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
 
 
+def _one_field(section: str, *names: str) -> str:
+    """Conflicting repeated identity fields invalidate this one record."""
+    values = []
+    for name in names:
+        pattern = r"(?m)^[ \t]*(?:[-*][ \t]*)?(?:\*\*)?" + re.escape(name) + r"(?:\*\*)?[ \t]*[:：][ \t]*([^\n]*)"
+        values.extend(match.strip() for match in re.findall(pattern, section))
+    return values[0] if values and len(set(values)) == 1 else ""
+
+
+def _expected_feedback_url() -> str:
+    return f"{store.FEISHU_HOST}/docx/{store.FEEDBACK_ID}"
+
+
+def _is_expected_feedback(document: dict) -> bool:
+    url = urlparse(str(document.get("source_url") or ""))
+    expected = urlparse(_expected_feedback_url())
+    return (url.scheme == expected.scheme and url.netloc == expected.netloc
+            and url.path.rstrip("/") == expected.path
+            and (not document.get("object_id") or document["object_id"] == store.FEEDBACK_ID))
+
+
 def matching_sections(document: dict, user: dict, item: dict) -> list[str]:
+    if not _is_expected_feedback(document):
+        raise ValueError("指定反馈文档返回了其他资料，请检查飞书连接与反馈位置后重试。")
     text = lark_content_to_markdown(document["content"])
     results = []
-    for chunk in re.split(r"(?m)(?=^##\s)", text):
-        for section in re.split(r"(?m)(?=^###\s)", chunk):
-            head = chunk.split("\n", 1)[0]
-            member = service.field(section, "成员ID", "member_id") or service.field(chunk, "成员ID", "member_id")
-            run = service.field(section, "本次运行标识", "运行ID", "run_id") or service.field(chunk, "本次运行标识", "run_id")
-            stage = service.field(section, "接入阶段", "onboarding_stage")
-            if (member == user["id"] or (not member and user["id"] in head)) and (run == item["run_label"] or (not run and item["run_label"] in head)) and stage == str(item["stage"]):
-                if "[RDOS 写回标识:" in section:
-                    results.append(section)
+    for section in feedback_sections.records(text):
+        member = _one_field(section, "成员ID", "member_id")
+        run = _one_field(section, "本次运行标识", "运行ID", "run_id")
+        stage = _one_field(section, "接入阶段", "onboarding_stage")
+        feedback_id = _one_field(section, "反馈ID", "feedback_id")
+        markers = re.findall(r"\[RDOS\s*写回标识\s*[:：]\s*([^\]\n]+)\]", section)
+        record_type = _one_field(section, "记录类型", "record_type")
+        path = _one_field(section, "接入路径")
+        mode = _one_field(section, "身份标记", "身份性质", "identity_mode")
+        if (member == user["id"] and run == item["run_label"] and stage == str(item["stage"])
+                and feedback_id.startswith(f"{run}-stage{stage}-")
+                and len(markers) == 1 and markers[0].strip() == feedback_id
+                and record_type == ("connection_check" if stage == "0" else "onboarding")
+                and (not path or path == item.get("path"))
+                and (not mode or mode == user.get("identity_mode"))):
+            results.append(section)
     return list(dict.fromkeys(results))
 
 
-def reusable_history(document: dict, user: dict, current: dict) -> dict | None:
+async def reusable_history(document: dict, user: dict, current: dict, budget: float) -> dict | None:
     """Reuse a prior verified connection/scope only while its Feishu evidence remains."""
     if current.get("path") != "refresh" or current.get("stage") != 0:
         return None
+    started = time.monotonic()
     for old in store.items("onboarding_history"):
         if (old.get("id") != user["id"] or old.get("run_label") == current.get("run_label")
                 or old.get("identity_mode") != user["identity_mode"]):
@@ -310,17 +374,22 @@ def reusable_history(document: dict, user: dict, current: dict) -> dict | None:
         passed = {entry.get("stage") for entry in old.get("history", [])}
         if not {0, 1}.issubset(passed):
             continue
-        if all(matching_sections(document, user, {"run_label": old["run_label"], "stage": stage}) for stage in (0, 1)):
+        connection = matching_sections(document, user, {"run_label": old["run_label"], "stage": 0,
+                                                       "path": old["path"]})
+        scope = matching_sections(document, user, {"run_label": old["run_label"], "stage": 1,
+                                                  "path": old["path"]})
+        if not scope or not any(connection_result_passed(section) for section in connection):
+            continue
+        # Old stage-1 judgments may have used weaker evidence rules. Read the
+        # original feedback again and re-evaluate it under the current rules.
+        remaining = budget - (time.monotonic() - started)
+        if remaining <= 0:
+            raise asyncio.TimeoutError("旧轮接入核对已达到本次时间上限")
+        judged = await asyncio.wait_for(assess(user, {**old, "stage": 1}, scope, document, remaining),
+                                        timeout=remaining)
+        if judged["ready"]:
             return old
     return None
-
-
-def status_for_pending(item: dict, user: dict) -> dict:
-    # Persist before returning from check's try block; its finally clause then
-    # records the elapsed time without replacing a newly selected run.
-    item.update(checking=False, checked_at=db.utc_now())
-    store.put("onboarding_session", user["id"], item)
-    return status_for(user)
 
 
 def assessment_scope(item: dict) -> str:
@@ -332,18 +401,74 @@ def assessment_scope(item: dict) -> str:
     }[item["stage"]]
 
 
+def _connection_evidence(section: str) -> dict:
+    """Only the current record's actual/result fields describe the test."""
+    result = _one_field(section, "连接测试结果")
+    actual = _one_field(section, "实际结果")
+    text = actual + "\n" + result
+    passed = bool(re.match(r"^通过(?:$|[（(：:；;，,。\s])", result))
+    failed = bool(re.search(r"未通过|不通过|失败|(?:未|尚未|没有|未能|无法)(?:读取|读到|读过|写入|追加|读回|回读|阅读|查阅|看过|看完)|没(?:读|写|看)|未完成|计划|准备|将(?:读取|写入|追加|读回)|(?:读取|写入|追加|读回).{0,5}待核对|以实际读回核对为准", text))
+    return {"reported_pass": passed, "failed_or_planned": failed,
+            "read": _completed_connection_action(text, "read"),
+            "write": bool(re.search(r"已(?:经)?追加|追加本条|已(?:经)?写入|写入成功|实际写入", text)),
+            "readback": bool(re.search(r"已(?:经)?读回|从线上读回|读回(?:核对|确认|成功|完成)", text)),
+            "actual": actual, "result": result}
+
+
 def connection_result_passed(section: str) -> bool:
-    """An annotated pass also needs a completed post-write readback in this record."""
-    result = service.field(section, "连接测试结果").strip()
-    if result == "通过":
-        return True
-    if (not re.match(r"^通过[（(：:；;，,。\s]", result)
-            or any(phrase in result for phrase in ("未通过", "不通过", "失败", "未写入", "未读回", "尚未读回", "未完成"))):
+    evidence = _connection_evidence(section)
+    return (evidence["reported_pass"] and not evidence["failed_or_planned"]
+            and evidence["read"] and evidence["write"] and evidence["readback"])
+
+
+def _completed_connection_action(text: str, action: str) -> bool:
+    """Require three distinct facts even when one sentence describes them all."""
+    if action == "read":
+        # A separate 读取来源 field only identifies the intended document. The
+        # completed action itself must say it read that onboarding material;
+        # reading the feedback document or reading back a write is different.
+        material = re.compile(
+            r"本步(?:接入)?(?:原文|资料|材料|文档|指引)|"
+            r"指定(?:的)?(?:本步)?(?:接入)?(?:原文|资料|材料|文档|指引)|"
+            r"(?:阶段一|第一阶段|阶段1|第1阶段)(?:的)?(?:原文|资料|材料|文档|指引)|"
+            r"接入(?:原文|资料|材料|文档|指引)|" + re.escape(store.ONBOARDING_IDS[0]))
+        for clause in re.split(r"[，,；;。\n]", text):
+            if re.search(r"读取|读到|读过|阅读|查阅|看过|看完", clause) and material.search(clause):
+                return True
         return False
-    actual = service.field(section, "实际结果")
-    return ("[RDOS 写回标识:" in section
-            and not re.search(r"(?:未|尚未|待).{0,4}读回|读回.{0,4}(?:待|未)|计划|准备", actual)
-            and bool(re.search(r"已(?:经)?读回|读回(?:成功|完成|确认)", actual)))
+    if action == "write":
+        return bool(re.search(r"追加|写入", text))
+    return bool(re.search(r"读回|回读", text))
+
+
+async def _connection_model_check(section: str, budget: float) -> bool:
+    """Resolve unusual completed-action wording without trusting invented citations."""
+    evidence = _connection_evidence(section)
+    if (not evidence["reported_pass"] or evidence["failed_or_planned"]
+            or not all(_completed_connection_action(evidence["actual"] + "\n" + evidence["result"], action)
+                       for action in ("read", "write", "readback"))):
+        return False
+    source_text = evidence["actual"] + "\n" + evidence["result"]
+    prompt = ("只核对这一条连接反馈是否明确报告：已读取指定材料、已向指定反馈追加写入、写后从线上读回。"
+              "不要借用其他记录或把计划当结果。只返回 JSON："
+              '{"read":"原文短句","write":"原文短句","readback":"原文短句"}。'
+              "某项没有可引用的已完成原文，填空字符串。")
+    async def no_tools(name, args):
+        return {"ok": False, "error": "本次仅核对材料"}
+    agent = CentralAgent()
+    agent.max_seconds = min(agent.max_seconds, budget)
+    result = await agent.run([{"role": "system", "content": prompt},
+                              {"role": "user", "content": source_text}], [], no_tools)
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", result["content"].strip())
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise AssessmentResultError("无法解析连接检查的补充判断，已有记录保留，可重新检查。")
+    for key in ("read", "write", "readback"):
+        quote = data.get(key)
+        if (not isinstance(quote, str) or not quote.strip() or quote.strip() not in source_text
+                or not _completed_connection_action(quote, key)):
+            return False
+    return True
 
 
 async def assess(user: dict, item: dict, sections: list[str], document: dict, budget: float = 180) -> dict:
@@ -351,23 +476,39 @@ async def assess(user: dict, item: dict, sections: list[str], document: dict, bu
     stage = item["stage"]
     if stage == 0:
         expected_source = store.FEISHU_HOST + "/docx/" + store.ONBOARDING_IDS[0]
-        matched = [s for s in sections if service.field(s, "记录类型") == "connection_check"
-                   and connection_result_passed(s)
-                   and service.field(s, "读取来源") == expected_source]
-        readback_unclear = any(
-            service.field(s, "记录类型") == "connection_check"
-            and service.field(s, "读取来源") == expected_source
-            and re.match(r"^通过[（(：:；;，,。\s]", service.field(s, "连接测试结果").strip())
-            and not any(phrase in service.field(s, "连接测试结果") for phrase in
-                        ("未通过", "不通过", "失败", "未写入", "未读回", "尚未读回", "未完成"))
-            and not connection_result_passed(s)
-            for s in sections)
-        missing = (["请让 Agent 读回这条连接检查，核对写回标识，并补记实际读回结果；现有读取和写入不用重做。"]
-                   if readback_unclear else ["请让你的 Agent 完成本步检查并提交反馈；已经提交时，请它重新核对记录。"])
-        return {"ready": bool(matched), "summary": "已收到并核对本步连接反馈，可以继续第一阶段。" if matched else "还没有收到本步完整连接检查的反馈。",
-                "missing": [] if matched else missing, "scheduled_verified": False}
+        candidates = [s for s in sections if _one_field(s, "记录类型") == "connection_check"
+                      and _one_field(s, "读取来源") == expected_source]
+        matched = [s for s in candidates if connection_result_passed(s)]
+        if not matched:
+            for section in candidates:
+                remaining = max(0.001, budget - (time.monotonic() - started))
+                if await _connection_model_check(section, remaining):
+                    matched.append(section)
+                    break
+        if matched:
+            return {"ready": True, "summary": "连接检查已核对，继续确认工作范围。", "missing": [],
+                    "scheduled_verified": False, "verification_scope": "指定资料读取、反馈追加和写后读回；独立账号授权及后续步骤未在本步验证。",
+                    "basis": [{"source_url": document["source_url"],
+                               "feedback_id": _one_field(s, "反馈ID"),
+                               "read_source": _one_field(s, "读取来源")} for s in matched]}
+        evidence = [_connection_evidence(s) for s in candidates]
+        if any(entry["failed_or_planned"] for entry in evidence):
+            missing = ["连接检查的读取、写入或读回仍有失败或待完成，请让 Agent 补交实际结果。"]
+        elif any(entry["reported_pass"] for entry in evidence):
+            missing = (["请让 Agent 补记实际读取本步接入材料的结果；读取或读回反馈文档不能代替这一步。"]
+                       if any(not entry["read"] for entry in evidence) else
+                       ["请让 Agent 在本条反馈中写清追加写入和写后读回的实际结果；只写“通过”不足以核对。"])
+        else:
+            missing = ["请让 Agent 完成当前连接检查，并提交可核对的实际结果。"]
+        return {"ready": False, "summary": "连接检查还缺少可核对的结果。",
+                "missing": missing, "scheduled_verified": False,
+                "verification_scope": "只检查当前连接步骤，后续步骤不作为缺项。",
+                "basis": [{"source_url": document["source_url"], "feedback_id": _one_field(s, "反馈ID")}
+                          for s in candidates]}
     # Content judgments use the real model, with no mutation tools or permission grants.
-    required = _step_text(item, "onboarding")
+    # Approved member-facing wording may change without changing the fixed
+    # evidence criteria used by the checker.
+    required = assessment_scope(item)
     originals = []
     indices = [0 if stage == 1 else 2 if stage == 3 else 1]
     for idx in indices:
@@ -444,27 +585,71 @@ remote_feedback_evidence 是中央真实读取并匹配本人、本轮和当前�
         raise AssessmentResultError("模型未返回符合要求的阶段结论，无法解析检查结果；已有成果保留。")
     if data["missing"]:
         data["ready"] = False
+    data["verification_scope"] = assessment_scope(item)
+    data["basis"] = [{"source_url": document["source_url"], "feedback_id": _one_field(s, "反馈ID")}
+                     for s in sections]
     data["model"] = result.get("model")
     data["usage"] = result.get("usage")
     return data
 
 
+def _claim_check(user_id: str, expected: CheckContext) -> tuple[dict, str, bool]:
+    """Claim exactly one current member step before the remote await."""
+    normalize_flow(store.get("onboarding_session", user_id))
+    with db.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT payload FROM central_records WHERE kind=? AND id=?",
+                           ("onboarding_session", user_id)).fetchone()
+        if not row:
+            raise HTTPException(409, "先选择接入方式，并让自己的 Agent 执行当前步骤。")
+        item = json.loads(row[0])
+        if ((expected.session_id is not None and expected.session_id != item.get("run_label"))
+                or (expected.expected_stage is not None and expected.expected_stage != item.get("stage"))):
+            raise HTTPException(409, "当前接入步骤已变化，请刷新后检查当前步骤。")
+        # A process can exit after claiming a remote check. Its persisted flag
+        # must not block this member's next check after a restart or timeout.
+        if check_is_current(item):
+            raise HTTPException(409, "正在检查这一步，请稍后查看。")
+        prior_error = bool(item.get("error"))
+        token = store.identifier("check")
+        item.update(checking=True, check_token=token, check_boot=CHECK_BOOT,
+                    check_started_at=db.utc_now(), error="", technical_detail="")
+        conn.execute("UPDATE central_records SET payload=?,updated_at=? WHERE kind=? AND id=?",
+                     (json.dumps(item, ensure_ascii=False), db.utc_now(), "onboarding_session", user_id))
+    return item, token, prior_error
+
+
+def _finish_check(user_id: str, claimed: dict, token: str, result: dict, started: float) -> bool:
+    """An old response must not replace a new round or an advanced step."""
+    with db.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT payload FROM central_records WHERE kind=? AND id=?",
+                           ("onboarding_session", user_id)).fetchone()
+        if not row:
+            return False
+        current = json.loads(row[0])
+        if (current.get("run_label") != claimed.get("run_label")
+                or current.get("stage") != claimed.get("stage")
+                or current.get("check_token") != token or not current.get("checking")):
+            return False
+        result.update(checking=False, check_token="", check_boot="", check_started_at="", checked_at=db.utc_now(),
+                      check_elapsed_seconds=round(time.monotonic() - started, 2))
+        conn.execute("UPDATE central_records SET payload=?,updated_at=? WHERE kind=? AND id=?",
+                     (json.dumps(result, ensure_ascii=False), db.utc_now(), "onboarding_session", user_id))
+    return True
+
+
 @router.post("/onboarding/check")
-async def check(payload: Context, user: dict = Depends(current_user)):
-    item = normalize_flow(store.get("onboarding_session", user["id"]))
-    if not item:
-        raise HTTPException(409, "先选择接入方式，并让自己的 Agent 执行当前步骤。")
-    if item.get("checking"):
-        raise HTTPException(409, "正在检查这一步，请稍后查看。")
-    prior_error = item.get("error")
-    item.update(checking=True, error="", technical_detail="")
-    store.put("onboarding_session", user["id"], item)
+async def check(payload: CheckContext, user: dict = Depends(current_user)):
+    item, token, prior_error = _claim_check(user["id"], payload)
+    claimed = {"run_label": item["run_label"], "stage": item["stage"]}
     started = time.monotonic()
     try:
         budget = CentralAgent().max_seconds
         document = await asyncio.wait_for(asyncio.to_thread(organization_feishu().read_document, store.FEEDBACK_ID), timeout=budget)
         sections = matching_sections(document, user, item)
-        prior = reusable_history(document, user, item) if not sections else None
+        remaining = max(0.001, budget - (time.monotonic() - started))
+        prior = await reusable_history(document, user, item, remaining) if not sections else None
         if prior:
             item.update(stage=3, stage_status="pending", checked_hash="", assessment_version="",
                         reused_from=prior["run_label"], missing=[], error="",
@@ -472,26 +657,34 @@ async def check(payload: Context, user: dict = Depends(current_user)):
                                  if entry.get("stage") in (0, 1)],
                         evidence=[{"source_url": document["source_url"], "summary": "已从飞书核对旧轮连接和范围反馈。"}],
                         summary="旧轮连接与工作范围已复用。请让 Agent 更新现有定时同步并完成一次手动反馈。")
-            return status_for_pending(item, user)
-        if not sections:
+        elif not sections:
             item.update(stage_status="pending", summary="还没有收到本步反馈，已有工作和记录保留。",
-                        missing=["请让你的 Agent 继续当前步骤并提交反馈；若已经提交，请它检查记录是否对应本步。"])
+                        missing=[], last_assessment={"ready": False, "verification_scope": "尚未读到本人本轮当前步骤的记录。",
+                                                     "basis": [{"source_url": document["source_url"]}]})
         else:
             item["evidence"] = [{"source_url": document["source_url"], "summary": "本人本轮当前步骤的反馈已从飞书读回，阶段判断单独核对。"}]
             fingerprint = store.digest(sections)
-            if fingerprint != item.get("checked_hash") or prior_error or item.get("assessment_version") != ASSESSMENT_VERSION:
+            if (fingerprint != item.get("checked_hash") or prior_error
+                    or item.get("assessment_version") != ASSESSMENT_VERSION
+                    or item.get("stage_status") == "pending"):
                 remaining = max(0.001, budget - (time.monotonic() - started))
                 result = await asyncio.wait_for(assess(user, item, sections, document, remaining), timeout=remaining)
                 item.update(checked_hash=fingerprint, assessment_version=ASSESSMENT_VERSION,
                             summary=str(result.get("summary", "")), missing=result["missing"],
                             evidence=[{"source_url": document["source_url"], "summary": "本轮反馈已从飞书读回。"}],
                             scheduled_verified=item.get("scheduled_verified", False) or result.get("scheduled_verified") is True,
-                            last_assessment=result, stage_status="verified" if result["ready"] else "blocked")
+                            last_assessment=result, verification_scope=result.get("verification_scope", ""),
+                            assessment_basis=result.get("basis", []),
+                            stage_status="verified" if result["ready"] else "blocked")
                 if not result["ready"]:
                     item["ready_for_work"] = False
                 if result["ready"] and not item.get("ready_for_work"):
                     prior_stage = item["stage"]
-                    item["history"].append({"stage": prior_stage, "summary": item["summary"], "at": db.utc_now(), "source_url": document["source_url"]})
+                    item["history"].append({"stage": prior_stage, "summary": item["summary"],
+                                            "at": db.utc_now(), "source_url": document["source_url"],
+                                            "rule_version": ASSESSMENT_VERSION,
+                                            "verification_scope": result.get("verification_scope", ""),
+                                            "basis": result.get("basis", [])})
                     if prior_stage == 3:
                         item.update(ready_for_work=True, summary="定时计划与手动反馈已核对，可以进入项目工作。")
                     else:
@@ -503,9 +696,5 @@ async def check(payload: Context, user: dict = Depends(current_user)):
     except Exception as exc:
         item.update(error=service.human_error(exc), technical_detail=service.safe_error(exc))
     finally:
-        # Do not overwrite a different path the member selected while checking.
-        current = store.get("onboarding_session", user["id"])
-        if current and current["run_label"] == item["run_label"]:
-            item.update(checking=False, checked_at=db.utc_now(), check_elapsed_seconds=round(time.monotonic() - started, 2))
-            store.put("onboarding_session", user["id"], item)
+        _finish_check(user["id"], claimed, token, item, started)
     return status_for(user)

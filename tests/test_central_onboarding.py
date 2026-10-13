@@ -9,22 +9,194 @@ from server import central_onboarding as onb
 
 
 class OnboardingTest(CentralApiTest):
+    XIAOFEI_RECORD = """连接检查：潇斐／第 0 步
+记录类型：connection_check
+成员：潇斐
+成员ID：mem_x_rLn9VBAe_z8xol
+身份标记：role_test
+本次运行标识：onb_ROizsqieaZZ1rNrs
+接入阶段：0
+接入路径：refresh
+反馈ID：onb_ROizsqieaZZ1rNrs-stage0-20261012-143143
+实际结果：复用现有飞书 CLI 用户连接；已读取指定本步材料（版本 6）；已读取指定反馈文档（写前版本 36），未发现本轮记录；追加本条最小连接检查。
+尚未验证：后续接入阶段；角色独立飞书账号授权。本次 role_test 仅证明 Agent 借当前已授权用户连接执行。
+[RDOS 写回标识:onb_ROizsqieaZZ1rNrs-stage0-20261012-143143]
+读取来源：https://scn33386s7ui.feishu.cn/docx/A1FrdvwproG7axxh6jtcOnk5nPd
+连接测试结果：通过。已真实读取本步材料、追加本条反馈并从线上读回核对正文及写回标识。
+检查时间：2026-10-12 14:31:43 +08:00
+"""
+
     def begin(self, path="new", **options):
         response = self.client.post("/api/central/onboarding/start", json={"path": path, **options})
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
     def record(self, state, stage=0, success=True, member=None):
+        feedback_id = f"{state['session_id']}-stage{stage}-test"
         return {"content": f"""## 成员标识 {member or self.admin['id']} 本次运行标识 {state['session_id']}
 ### 连接检查
-记录类型：connection_check
+记录类型：{'connection_check' if stage == 0 else 'onboarding'}
 成员ID：{member or self.admin['id']}
 本次运行标识：{state['session_id']}
 接入阶段：{stage}
+接入路径：{state['choice']}
+反馈ID：{feedback_id}
+实际结果：已读取指定本步材料；已追加本条最小连接检查，并从线上读回核对正文及写回标识。
 读取来源：{self.store.FEISHU_HOST}/docx/{self.store.ONBOARDING_IDS[0]}
-连接测试结果：{'通过' if success else '未通过'}
-[RDOS 写回标识:{state['session_id']}-check]
+连接测试结果：{'通过。已真实读取本步材料、追加本条反馈并从线上读回核对正文及写回标识。' if success else '未通过，写入失败。'}
+[RDOS 写回标识:{feedback_id}]
 """, "source_url": self.store.FEISHU_HOST + "/docx/" + self.store.FEEDBACK_ID}
+
+    def test_untitled_original_record_passes_only_its_current_step(self):
+        document = {"content": self.XIAOFEI_RECORD, "source_url":
+                    self.store.FEISHU_HOST + "/docx/" + self.store.FEEDBACK_ID}
+        user = {"id": "mem_x_rLn9VBAe_z8xol", "identity_mode": "role_test"}
+        item = {"run_label": "onb_ROizsqieaZZ1rNrs", "stage": 0, "path": "refresh"}
+        matched = onb.matching_sections(document, user, item)
+        self.assertEqual(matched, [self.XIAOFEI_RECORD.strip()])
+        outcome = asyncio.run(onb.assess(user, item, matched, document))
+        self.assertTrue(outcome["ready"])
+        self.assertEqual(outcome["missing"], [])
+        self.assertIn("独立账号授权", outcome["verification_scope"])
+
+    def test_adjacent_untitled_records_cannot_lend_each_other_evidence(self):
+        state = self.begin()
+        current = self.record(state)["content"].replace("## 成员标识 " + self.admin["id"] +
+            " 本次运行标识 " + state["session_id"] + "\n### 连接检查\n", "连接检查：本轮\n")
+        current = current.replace("连接测试结果：通过。已真实读取本步材料、追加本条反馈并从线上读回核对正文及写回标识。", "")
+        current = current.replace("并从线上读回核对正文及写回标识。", "。")
+        other = self.record(state, member=self.researcher["id"])["content"].replace(
+            "## 成员标识 " + self.researcher["id"] + " 本次运行标识 " + state["session_id"] +
+            "\n### 连接检查\n", "连接检查：另一成员\n")
+        document = {"content": current + "\n" + other,
+                    "source_url": self.store.FEISHU_HOST + "/docx/" + self.store.FEEDBACK_ID}
+        sections = onb.matching_sections(document, self.admin, {"run_label": state["session_id"],
+                                                              "stage": 0, "path": "new"})
+        self.assertEqual(len(sections), 1)
+        self.assertFalse(asyncio.run(onb.assess(self.admin, {"stage": 0, "path": "new"}, sections, document))["ready"])
+
+    def test_marker_identity_and_remote_document_must_match(self):
+        state = self.begin()
+        item = {"run_label": state["session_id"], "stage": 0, "path": "new"}
+        document = self.record(state)
+        document["content"] = document["content"].replace(
+            f"[RDOS 写回标识:{state['session_id']}-stage0-test]", "[RDOS 写回标识:another-feedback]")
+        self.assertEqual(onb.matching_sections(document, self.admin, item), [])
+        document["source_url"] = self.store.FEISHU_HOST + "/docx/unrelated"
+        with self.assertRaisesRegex(ValueError, "其他资料"):
+            onb.matching_sections(document, self.admin, item)
+
+    def test_bare_pass_and_planned_readback_never_pass(self):
+        state = self.begin()
+        item = {"run_label": state["session_id"], "stage": 0, "path": "new"}
+        document = self.record(state)
+        document["content"] = document["content"].replace(
+            "实际结果：已读取指定本步材料；已追加本条最小连接检查，并从线上读回核对正文及写回标识。",
+            "实际结果：计划读取、写入和读回。").replace(
+            "连接测试结果：通过。已真实读取本步材料、追加本条反馈并从线上读回核对正文及写回标识。",
+            "连接测试结果：通过")
+        sections = onb.matching_sections(document, self.admin, item)
+        self.assertFalse(asyncio.run(onb.assess(self.admin, item, sections, document))["ready"])
+
+    def test_model_check_cannot_count_feedback_readback_as_stage_material_read(self):
+        section = ("实际结果：已写入指定反馈文档并从线上读回。\n"
+                   "连接测试结果：通过。已写入指定反馈文档并从线上读回。")
+        with patch.object(onb, "CentralAgent") as agent:
+            self.assertFalse(asyncio.run(onb._connection_model_check(section, 5)))
+            agent.assert_not_called()
+        denied = ("实际结果：没有读取阶段一材料，已写入指定反馈文档并从线上读回。\n"
+                  "连接测试结果：通过。")
+        self.assertTrue(onb._connection_evidence(denied)["failed_or_planned"])
+        self.assertFalse(asyncio.run(onb._connection_model_check(denied, 5)))
+
+    def test_connection_read_must_name_onboarding_material_not_feedback_document(self):
+        state = self.begin()
+        original = self.record(state)
+        section = onb.matching_sections(original, self.admin, {
+            "run_label": state["session_id"], "stage": 0, "path": "new"})[0]
+        self.assertTrue(onb.connection_result_passed(section))
+
+        # 读取来源 still points at stage one, but the reported action only
+        # read the feedback document. It cannot prove the stage material read.
+        changed = dict(original)
+        changed["content"] = changed["content"].replace(
+            "已读取指定本步材料", "已读取本步反馈文档").replace(
+            "已真实读取本步材料", "已读取本步反馈文档")
+        sections = onb.matching_sections(changed, self.admin, {
+            "run_label": state["session_id"], "stage": 0, "path": "new"})
+        self.assertEqual(len(sections), 1)
+        self.assertFalse(onb.connection_result_passed(sections[0]))
+        with patch.object(onb, "CentralAgent") as model:
+            result = asyncio.run(onb.assess(self.admin, {"stage": 0, "path": "new"}, sections, changed))
+            model.assert_not_called()
+        self.assertFalse(result["ready"])
+        self.assertIn("本步接入材料", result["missing"][0])
+
+        unusual = "实际结果：阶段一反馈文档我已看过；反馈已写入并从线上回读。\n连接测试结果：通过。"
+        with patch.object(onb, "CentralAgent") as model:
+            self.assertFalse(asyncio.run(onb._connection_model_check(unusual, 5)))
+            model.assert_not_called()
+
+    def test_model_check_accepts_cited_unusual_material_read_wording(self):
+        actual = "阶段一原文我已看过；反馈已写入并从线上回读。"
+        section = f"实际结果：{actual}\n连接测试结果：通过。"
+        with patch.object(onb, "CentralAgent") as agent:
+            agent.return_value.max_seconds = 5
+            agent.return_value.run = AsyncMock(return_value={"content": json.dumps({
+                "read": "阶段一原文我已看过", "write": "反馈已写入", "readback": "从线上回读"
+            }, ensure_ascii=False)})
+            self.assertTrue(asyncio.run(onb._connection_model_check(section, 5)))
+
+    def test_reusing_multiple_old_runs_shares_one_check_budget(self):
+        old = [{"id": self.admin["id"], "run_label": f"old-{index}",
+                "identity_mode": self.admin["identity_mode"], "path": "refresh",
+                "history": [{"stage": 0}, {"stage": 1}]} for index in range(2)]
+        budgets = []
+
+        async def not_ready(_user, _item, _scope, _document, budget):
+            budgets.append(budget)
+            await asyncio.sleep(0.02)
+            return {"ready": False}
+
+        with (patch.object(onb.store, "items", return_value=old),
+              patch.object(onb, "matching_sections", return_value=["record"]),
+              patch.object(onb, "connection_result_passed", return_value=True),
+              patch.object(onb, "assess", side_effect=not_ready)):
+            outcome = asyncio.run(onb.reusable_history({"content": ""}, self.admin,
+                {"path": "refresh", "stage": 0, "run_label": "current"}, 0.2))
+        self.assertIsNone(outcome)
+        self.assertEqual(len(budgets), 2)
+        self.assertLess(budgets[1], budgets[0] - 0.01)
+
+    def test_older_check_result_cannot_replace_advanced_step(self):
+        state = self.begin()
+        payload = onb.CheckContext(session_id=state["session_id"], expected_stage=0)
+        claimed, token, _ = onb._claim_check(self.admin["id"], payload)
+        advanced = self.store.get("onboarding_session", self.admin["id"])
+        advanced.update(stage=1, checking=False, check_token="", summary="新版步骤")
+        self.store.put("onboarding_session", self.admin["id"], advanced)
+        self.assertFalse(onb._finish_check(self.admin["id"], claimed, token,
+                                          {**claimed, "stage": 3, "summary": "旧响应"}, 0))
+        self.assertEqual(self.store.get("onboarding_session", self.admin["id"])["summary"], "新版步骤")
+        response = self.client.post("/api/central/onboarding/check", json={
+            "session_id": state["session_id"], "expected_stage": 0})
+        self.assertEqual(response.status_code, 409)
+
+    def test_interrupted_check_can_resume_after_restart_without_old_result_winning(self):
+        state = self.begin()
+        item = self.store.get("onboarding_session", self.admin["id"])
+        item.update(checking=True, check_token="old-check", check_boot="previous-process",
+                    check_started_at=self.store.future(-10))
+        self.store.put("onboarding_session", self.admin["id"], item)
+        self.assertFalse(self.client.get("/api/central/onboarding/status").json()["checking"])
+        claimed, token, _ = onb._claim_check(self.admin["id"], onb.CheckContext(
+            session_id=state["session_id"], expected_stage=0))
+        self.assertNotEqual(token, "old-check")
+        self.assertFalse(onb._finish_check(self.admin["id"], claimed, "old-check",
+                                          {**claimed, "summary": "旧检查"}, 0))
+        self.assertTrue(onb._finish_check(self.admin["id"], claimed, token,
+                                         {**claimed, "summary": "已恢复检查"}, 0))
+        self.assertEqual(self.store.get("onboarding_session", self.admin["id"])["summary"], "已恢复检查")
 
     def test_institution_read_scope_does_not_depend_on_project_feedback(self):
         self.store.put("project", self.store.PROJECT_ID, {
@@ -186,13 +358,21 @@ class OnboardingTest(CentralApiTest):
         remote = MagicMock()
         documented = self.record(state)
         documented["content"] = documented["content"].replace(
-            "连接测试结果：通过", "连接测试结果：通过（已读取、追加，最终以实际读回核对为准）。")
+            "连接测试结果：通过。已真实读取本步材料、追加本条反馈并从线上读回核对正文及写回标识。",
+            "连接测试结果：通过（已读取、追加，最终以实际读回核对为准）。").replace(
+            "实际结果：已读取指定本步材料；已追加本条最小连接检查，并从线上读回核对正文及写回标识。",
+            "实际结果：已读取指定本步材料；已追加本条最小连接检查。")
         remote.read_document.return_value = documented
         with patch.object(onb, "organization_feishu", return_value=remote):
             incomplete = self.client.post("/api/central/onboarding/check", json={}).json()
         self.assertEqual(incomplete["stage"], 0)
         self.assertIn("读回", " ".join(incomplete["missing"]))
-        documented["content"] += "实际结果：写后已读回指定反馈，已核对本条写回标识。\n"
+        documented["content"] = documented["content"].replace(
+            "实际结果：已读取指定本步材料；已追加本条最小连接检查。",
+            "实际结果：已读取指定本步材料；已追加本条最小连接检查；写后已读回指定反馈，核对本条写回标识。")
+        documented["content"] = documented["content"].replace(
+            "连接测试结果：通过（已读取、追加，最终以实际读回核对为准）。",
+            "连接测试结果：通过。已读取、追加并从线上读回核对。")
         with patch.object(onb, "organization_feishu", return_value=remote):
             result = self.client.post("/api/central/onboarding/check", json={}).json()
         self.assertEqual(result["stage"], 1)
@@ -202,7 +382,7 @@ class OnboardingTest(CentralApiTest):
                 current = self.client.get("/api/central/onboarding/status").json()
                 remote.read_document.return_value = self.record(current)
                 remote.read_document.return_value["content"] = remote.read_document.return_value["content"].replace(
-                    "连接测试结果：通过", "连接测试结果：" + outcome)
+                    "连接测试结果：通过。已真实读取本步材料、追加本条反馈并从线上读回核对正文及写回标识。", "连接测试结果：" + outcome)
                 with patch.object(onb, "organization_feishu", return_value=remote):
                     checked = self.client.post("/api/central/onboarding/check", json={}).json()
                 self.assertEqual(checked["stage"], 0)
@@ -293,7 +473,7 @@ class OnboardingTest(CentralApiTest):
         self.assertEqual(connected["stage"], 1)
         scope = self.record(old, stage=1)["content"].replace(
             "记录类型：connection_check", "记录类型：onboarding").replace(
-            "### 连接检查", "### 身份与范围").replace("-check]", "-scope]")
+            "### 连接检查", "### 身份与范围")
         scope += "本人确认：身份、工作范围与共享范围沿用；持久记忆已保存并读回。\n"
         remote.read_document.return_value = {"content": connection + "\n" + scope,
             "source_url": self.store.FEISHU_HOST + "/docx/" + self.store.FEEDBACK_ID}
@@ -302,7 +482,8 @@ class OnboardingTest(CentralApiTest):
             scoped = self.client.post("/api/central/onboarding/check", json={}).json()
         self.assertEqual(scoped["stage"], 3)
         # A refresh should not demand another write to the same connection-test position.
-        with patch.object(onb, "organization_feishu", return_value=remote):
+        with patch.object(onb, "organization_feishu", return_value=remote), patch.object(onb, "assess", AsyncMock(return_value={
+            "ready": True, "summary": "旧轮范围仍适用", "missing": [], "scheduled_verified": False})):
             refreshed = self.begin("refresh")
             if refreshed["stage"] == 0:
                 refreshed = self.client.post("/api/central/onboarding/check", json={}).json()
@@ -400,7 +581,7 @@ class OnboardingTest(CentralApiTest):
             remote.read_document.side_effect = None
             result = self.client.post("/api/central/onboarding/check", json={}).json()
         self.assertEqual(result["error"], "")
-        self.assertIn("完整连接检查", result["summary"])
+        self.assertIn("可核对", result["summary"])
 
     def test_model_cannot_pass_with_missing_requirements_or_bad_types(self):
         remote = MagicMock()
