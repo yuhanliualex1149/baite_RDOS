@@ -13,9 +13,6 @@ import textwrap
 import unittest
 
 CODE = Path(__file__).resolve().parents[1]
-CLI = Path('/opt/homebrew/lib/node_modules/@larksuite/cli/bin/lark-cli')
-
-
 def isolated(body, *, guarded=True):
     with tempfile.TemporaryDirectory(prefix='rdos-phase3-egress-') as temporary:
         root = Path(temporary).resolve()
@@ -24,13 +21,19 @@ def isolated(body, *, guarded=True):
         for name in ('lab', 'server'):
             shutil.copytree(CODE / name, root / 'code' / name,
                             ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        # The external CLI boundary is synthetic; the adapter, argument
+        # validation, binary hash and real audit hook remain under test.
+        # Never depend on or execute the developer's installed Feishu CLI.
+        cli = root / 'runtime/offline-cli'
+        cli.write_text('#!/bin/sh\nexit 99\n', encoding='utf-8')
+        cli.chmod(0o700)
         cfg = {'schema_version': 1, 'environment': 'rdos_local_lab',
                'env_id': 'rdos2_lab_123456abcdef', 'root': str(root), 'port': 18761,
                'backends': {'documents': 'local_mock', 'model': 'local_mock'},
                'external_resources': {'enabled': False, 'folder': '', 'documents': [],
                                       'task_table': '', 'feedback': '', 'recipient': ''},
-               'phase3': {'enabled': True, 'cli_path': str(CLI),
-                          'cli_sha256': hashlib.sha256(CLI.read_bytes()).hexdigest(),
+               'phase3': {'enabled': True, 'cli_path': str(cli),
+                          'cli_sha256': hashlib.sha256(cli.read_bytes()).hexdigest(),
                           'registry_path': str(root / 'runtime/phase3_resources.json')}}
         (root / 'config/lab.json').write_text(json.dumps(cfg))
         (root / 'runtime/instance.json').write_text(json.dumps({'env_id': cfg['env_id'], 'generation': '1'*32}))
@@ -58,6 +61,7 @@ from unittest.mock import patch
 from lab import config, guard
 from server import phase3_feishu as fs
 root = Path(os.environ['RDOS_LAB_ROOT'])
+config.PHASE3_CLI = str(root / 'runtime/offline-cli')
 cfg = config.load(root)
 fs.configure(cfg)
 guard.install(root, cfg['port'])
