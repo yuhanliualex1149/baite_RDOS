@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RDOS current task",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "workspace_id",
+    "project_id",
+    "task_id",
+    "requirements_version",
+    "record_revision",
+    "requirements_hash",
+    "owner_id",
+    "executor_node_ids",
+    "goal",
+    "deliverable",
+    "task_type",
+    "deliverable_audience",
+    "completion_rule",
+    "business_status"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": 2
+    },
+    "workspace_id": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "requirements_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "record_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "requirements_hash": {
+      "type": "string",
+      "description": "Server-issued opaque requirement fingerprint; do not recompute from public aliases"
+    },
+    "owner_id": {
+      "type": "string"
+    },
+    "executor_node_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "task_type": {
+      "enum": [
+        "action",
+        "deliverable",
+        "review"
+      ]
+    },
+    "deliverable_audience": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "admin",
+          "project_members",
+          "researcher"
+        ]
+      }
+    },
+    "completion_rule": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "receipt_recorded",
+            "human",
+            "human_review",
+            "artifact_present",
+            "source_versions_match"
+          ]
+        }
+      }
+    },
+    "business_status": {
+      "enum": [
+        "active",
+        "pending_review",
+        "paused",
+        "closed"
+      ]
+    },
+    "dispatch_source": {
+      "enum": [
+        "peer"
+      ]
+    },
+    "peer_issuer_node_id": {
+      "type": "string"
+    },
+    "peer_binding_id": {
+      "type": "string"
+    },
+    "peer_task_scope": {
+      "type": "object",
+      "required": [
+        "input_refs",
+        "output_zone",
+        "output_folder_id"
+      ]
+    },
+    "peer_proof": {
+      "type": "object",
+      "required": [
+        "payload_json",
+        "signature"
+      ],
+      "description": "Complete canonical public task excluding this proof; node signs creation, central signs later revisions"
+    }
+  }
+}

@@ -139,6 +139,15 @@ def apply_approved(template_id: str, base_hash: str, old_text: str, new_text: st
         raise ValueError("请先选中当前模板中需要修改的原文")
     if not isinstance(new_text, str) or not new_text.strip():
         raise ValueError("模板修改内容不能为空")
+    from server import phase1_operations as ops
+    operation = store.get('operation', operation_id) or {}
+    authorization = operation.get('authorization') or {}
+    proposal = next((p for p in store.items('proposal') if p.get('publication_operation_id') == operation_id), None)
+    if not proposal or (proposal.get('target_id'), proposal.get('base_hash'), proposal.get('old_text'), proposal.get('new_text')) != (template_id, base_hash, old_text, new_text):
+        raise PermissionError('模板生效必须来自已确认的同一份草稿')
+    ops.require_confirmation(operation_id, actor_id=actor_id, project_id=proposal['project_id'],
+                             target_kind='template', target_id=template_id, draft_hash=proposal['draft_hash'],
+                             base={'hash': base_hash, 'version': proposal.get('base_version')})
     request_hash = store.digest([template_id, base_hash, old_text, new_text, actor_id])
     with db.connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -155,7 +164,8 @@ def apply_approved(template_id: str, base_hash: str, old_text: str, new_text: st
         row = conn.execute("SELECT payload FROM central_records WHERE kind='instruction_template' AND id=?",
                            (template_id,)).fetchone()
         current = _snapshot(template_id, json.loads(row[0]) if row else None)
-        if base_hash != current["content_hash"] or current["content"].count(old_text) != 1:
+        if (base_hash != current["content_hash"] or current["content"].count(old_text) != 1
+                or current['version'] != authorization.get('base', {}).get('version')):
             raise ValueError("模板来源已变化，请重新读取、修改并审阅当前版本")
         changed = _valid_content(current["content"].replace(old_text, new_text, 1), template_id)
         if changed == current["content"]:

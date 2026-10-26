@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -28,7 +30,7 @@ def reply(content=None, calls=None, usage=None, finish_reason=None, reasoning=No
     if reasoning is not None:
         message["reasoning_content"] = reasoning
     return {
-        "model": "actual-test-model",
+        "model": "local-protocol-test-model",
         "choices": [{"message": message, "finish_reason": finish_reason or ("tool_calls" if calls else "stop")}],
         "usage": usage or {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
     }
@@ -39,6 +41,25 @@ def tool_call(arguments='{"document":"feedback-doc"}', name="read_feedback", cal
 
 
 class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
+    def _callTestMethod(self, method):
+        """Keep every protocol assertion, running it behind the real lab guard.
+
+        Each test gets a fresh child because the audit hook is irreversible.
+        The child executes this same test class; no core method is patched.
+        """
+        if globals().get("_GUARDED_PROTOCOL_CHILD"):
+            return super()._callTestMethod(method)
+        from tests.phase1_support import run_guarded
+        source = Path(__file__).read_text(encoding="utf-8")
+        body = ("import unittest\n"
+                "namespace = {'__name__': 'guarded_central_agent_tests', '_GUARDED_PROTOCOL_CHILD': True}\n"
+                f"exec(compile({source!r}, '<guarded-central-agent-tests>', 'exec'), namespace)\n"
+                f"suite = unittest.TestSuite([namespace['CentralAgentTest']({method.__name__!r})])\n"
+                "result = unittest.TextTestRunner(verbosity=1).run(suite)\n"
+                "assert result.wasSuccessful(), 'guarded protocol test failed'\n")
+        result = run_guarded(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def setUp(self):
         self.requests = []
         self.executed = []
@@ -52,13 +73,21 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
         self.steps.append(step)
 
     def agent(self, handler):
-        def wrapped(request):
+        # This replaces only the provider response transport. The real model
+        # loop, parser, deadlines, retries, redaction and tool budget all run.
+        from server import lab_central_backend as backend
+        async def wrapped(request):
             self.requests.append(json.loads(request.content))
-            self.assertEqual(request.url.path, "/api/plan/v3/chat/completions")
-            self.assertEqual(request.headers["Authorization"], "Bearer test-secret-credential")
-            return handler(request)
+            self.assertEqual(str(request.url), "http://local-mock.invalid/chat/completions")
+            self.assertNotIn("Authorization", request.headers)
+            response = handler(request)
+            return await response if inspect.isawaitable(response) else response
 
-        return CentralAgent(api_key="test-secret-credential", transport=httpx.MockTransport(wrapped))
+        agent = backend.make_agent()
+        # A synthetic sentinel tests redaction without sending any credential.
+        agent.api_key = "test-secret-credential"
+        agent.transport.handle_async_request = wrapped
+        return agent
 
     async def run_agent(self, agent, **kwargs):
         return await agent.run(
@@ -75,7 +104,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
         result = await self.run_agent(agent)
         self.assertEqual(self.executed, [("read_feedback", {"document": "feedback-doc"})])
         self.assertIn("feedback-doc", result["content"])
-        self.assertEqual(result["model"], "actual-test-model")
+        self.assertEqual(result["model"], "local-protocol-test-model")
         self.assertEqual(result["usage"], {"model_calls": 2, "tool_calls": 1, "prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26})
         continued = self.requests[1]["messages"]
         self.assertEqual(continued[0], {"role": "system", "content": SYSTEM_PROMPT})
@@ -140,7 +169,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("hidden-token", json.dumps(self.steps))
         self.assertEqual(result["access_token"], "[凭据已隐藏]")
 
-    async def test_model_missing_uses_no_mock_default_and_sends_no_request(self):
+    async def test_direct_agent_missing_key_does_not_implicitly_use_local_mock(self):
         with patch.dict(os.environ, {"BAITE_LLM_API_KEY": "", "ARK_API_KEY": ""}):
             agent = CentralAgent(transport=httpx.MockTransport(lambda _: self.fail("missing key must not request")))
             with self.assertRaises(AgentError) as raised:
@@ -164,17 +193,19 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             await self.run_agent(agent)
         self.assertEqual(raised.exception.code, "model_incomplete")
         self.assertEqual(self.requests[0]["reasoning_effort"], "high")
-        self.assertEqual(self.requests[0]["max_completion_tokens"], 4096)
+        self.assertEqual(self.requests[0]["max_completion_tokens"], 8192)
         self.assertNotIn("thinking", self.requests[0])
 
-    async def test_default_deepseek_keeps_enabled_high_thinking_and_reports_stage_time(self):
+    async def test_deepseek_payload_keeps_enabled_high_thinking_and_reports_stage_time(self):
         with patch.dict(os.environ, {"BAITE_LLM_MODEL": "", "BAITE_LLM_REASONING_EFFORT": "high", "BAITE_LLM_THINKING": "enabled"}):
             responses = [reply(calls=[tool_call()]), reply("已读取真实反馈。")]
-            result = await self.run_agent(self.agent(lambda _: httpx.Response(200, json=responses.pop(0))))
+            agent = self.agent(lambda _: httpx.Response(200, json=responses.pop(0)))
+            agent.model = "deepseek-v4-pro"
+            result = await self.run_agent(agent)
         self.assertEqual(self.requests[0]["model"], "deepseek-v4-pro")
         self.assertEqual(self.requests[0]["thinking"], {"type": "enabled"})
         self.assertEqual(self.requests[0]["reasoning_effort"], "high")
-        self.assertEqual(self.requests[0]["max_completion_tokens"], 4096)
+        self.assertEqual(self.requests[0]["max_completion_tokens"], 8192)
         self.assertGreaterEqual(result["elapsed_seconds"], 0)
         for step in self.steps:
             self.assertIn("elapsed_seconds", step)
@@ -201,7 +232,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.1)
             return httpx.Response(200, json=reply("不能完成"))
 
-        agent = CentralAgent(api_key="test-secret-credential", transport=httpx.MockTransport(slow))
+        agent = self.agent(slow)
         agent.max_seconds = 0.06
         agent.request_timeout = 90
         with self.assertRaises(AgentError) as raised:
@@ -235,7 +266,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(503)
             return httpx.Response(200, json=reply("已恢复实际调用。"))
 
-        agent = CentralAgent(api_key="test-secret-credential", transport=httpx.MockTransport(flaky))
+        agent = self.agent(flaky)
         agent.max_seconds = 1
         result = await self.run_agent(agent)
         self.assertEqual(result["usage"]["model_calls"], 2)
@@ -347,7 +378,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.1)
             return httpx.Response(200, json=reply("should not finish"))
 
-        agent = CentralAgent(api_key="test-secret-credential", transport=httpx.MockTransport(slow))
+        agent = self.agent(slow)
         agent.max_seconds = 0.01
         with self.assertRaises(AgentError) as raised:
             await self.run_agent(agent)
@@ -362,7 +393,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             return httpx.Response(200, json=reply("should not finish"))
 
-        agent = CentralAgent(api_key="test-secret-credential", transport=httpx.MockTransport(slow))
+        agent = self.agent(slow)
         agent.request_timeout = 0.005
         with self.assertRaises(AgentError) as raised:
             await self.run_agent(agent)

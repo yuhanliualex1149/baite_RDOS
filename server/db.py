@@ -31,13 +31,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "baite.db"
 PASSWORD_ITERATIONS = 310_000
 _SNAPSHOT_CONNECTION: ContextVar = ContextVar("snapshot_connection", default=None)
-DEFAULT_RULE = """# 全局工作规则
+DEFAULT_RULE = """# RDOS 本地实验规则
 
-- 优先使用当前已同步的 Selected RAG；
-- Shared Skill 是机构推荐版本，Local Agent 可以保留个性化版本；
-- Local Skill 的稳定改进应通过 Proposal 提交给系统管理员；
-- 重大风险、对外发布和不可逆操作必须升级给系统管理员；
-- 日常执行步骤、Skill 选择和本地 Workflow 由 Local Agent 自主决定。
+仅使用本地模拟材料和反馈接口。阶段 0 不启用真实飞书、中央模型、Runner、定时任务或正式发布。
+两个客户端仍使用同一台电脑和同一使用者权限；本实验不构成系统级沙箱。
 """
 
 
@@ -46,8 +43,29 @@ def utc_now() -> str:
 
 
 def db_path() -> Path:
-    configured = os.environ.get("BAITE_DB_PATH")
-    return Path(configured).expanduser().resolve() if configured else DEFAULT_DB_PATH
+    if os.environ.get("RDOS_RUNTIME_MODE") == "production":
+        from server.production_runtime import require
+        formal = require()
+        path = formal.database
+        if path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1:
+            raise RuntimeError("正式数据库必须是已备份的原有普通文件")
+        return path
+    from lab.guard import require_active
+    require_active()
+    configured = os.environ.get("BAITE_DB_PATH", "")
+    runtime = os.environ.get("RDOS_LAB_RUNTIME", "")
+    if not configured or not runtime:
+        raise RuntimeError("实验数据库路径必须显式配置")
+    path = Path(configured)
+    root = Path(runtime)
+    if not path.is_absolute() or not root.is_absolute() or path.is_symlink() or root.is_symlink():
+        raise RuntimeError("实验数据库必须使用受控绝对路径")
+    resolved = path.resolve()
+    if resolved == root.resolve() or not resolved.is_relative_to(root.resolve()):
+        raise RuntimeError("实验数据库必须位于独立 runtime 目录")
+    if path.exists() and path.stat().st_nlink != 1:
+        raise RuntimeError("实验数据库不能使用硬链接")
+    return resolved
 
 
 def _secret_key() -> bytes:
@@ -636,53 +654,9 @@ def init_db() -> None:
                 (username, hash_password(password), now),
             )
 
-        folder_token = os.environ.get("BAITE_SELECTED_RAG_FOLDER_TOKEN", "").strip()
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO rag_sync_state(
-                id, folder_token, next_scheduled_at
-            ) VALUES (1, ?, ?)
-            """,
-            (folder_token, _next_monday_nine()),
-        )
-        if folder_token:
-            conn.execute(
-                "UPDATE rag_sync_state SET folder_token = ? WHERE id = 1",
-                (folder_token,),
-            )
-
-        _import_legacy_rag(conn)
-        workflow_token = os.environ.get(
-            "BAITE_RD_WORKFLOW_FILE_TOKEN", WORKFLOW_SOURCE_TOKEN
-        ).strip()
-        workflow_url = os.environ.get(
-            "BAITE_RD_WORKFLOW_SOURCE_URL", WORKFLOW_SOURCE_URL
-        ).strip()
-        workflow_hash = os.environ.get(
-            "BAITE_RD_WORKFLOW_EXPECTED_HASH", WORKFLOW_SOURCE_HASH
-        ).strip()
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO workflow_reference_state(
-                id, version, source_token, source_url, expected_hash, next_check_at
-            ) VALUES (1, ?, ?, ?, ?, ?)
-            """,
-            (
-                WORKFLOW_VERSION,
-                workflow_token,
-                workflow_url,
-                workflow_hash,
-                next_workday_nine(),
-            ),
-        )
-        conn.execute(
-            """
-            UPDATE workflow_reference_state
-            SET source_token = ?, source_url = ?, expected_hash = ?
-            WHERE id = 1
-            """,
-            (workflow_token, workflow_url, workflow_hash),
-        )
+        # The lab only needs the existing schema and its own admin account.
+        # Never seed a live RAG/workflow target, import historical material, or
+        # calculate a due time that could later be mistaken for scheduled work.
         _set_setting(conn, "schema_version", "8")
 
 
