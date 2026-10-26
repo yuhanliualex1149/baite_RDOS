@@ -168,7 +168,7 @@ def recover_local_table_rejection(executor, tables, journal):
     result = subprocess.run(argv, capture_output=True, text=True, timeout=40,
                             cwd=str(executor.runtime), env=dict(executor.child_env))
     try:
-        response = json.loads(result.stdout)
+        response = json.loads(result.stdout if result.stdout.strip() else result.stderr)
     except ValueError as exc:
         raise migration.MigrationError('未证明本地参数拒绝，仍须核对') from exc
     expected = {'type': 'validation', 'subtype': 'invalid_argument',
@@ -179,7 +179,7 @@ def recover_local_table_rejection(executor, tables, journal):
     # the corrected, explicitly schema-bound call to be sent for the first time.
     proof = {'previous_journal': dict(journal.values), 'error': expected,
              'cli_sha256': executor.binary_hash,
-             'response_sha256': hashlib.sha256(result.stdout.encode()).hexdigest(),
+             'response_sha256': hashlib.sha256((result.stdout + result.stderr).encode()).hexdigest(),
              'observed_at': datetime.now(timezone.utc).isoformat()}
     proof_path = journal.path.with_name('formal_schema_local_rejection.json')
     if proof_path.exists() or proof_path.is_symlink():

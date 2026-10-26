@@ -57,7 +57,8 @@ class SchemaMigrationTests(unittest.TestCase):
                                        runtime=Path(folder), child_env={'HOME':folder})
             response = {'ok':False, 'error':{'type':'validation','subtype':'invalid_argument',
                         'message':'required flag(s) "fields" not set'}}
-            with patch.object(migrate_cli.subprocess, 'run', return_value=subprocess.CompletedProcess([],1,json.dumps(response),'')) as call:
+            # The pinned CLI emits structured validation failures on stderr.
+            with patch.object(migrate_cli.subprocess, 'run', return_value=subprocess.CompletedProcess([],1,'',json.dumps(response))) as call:
                 migrate_cli.recover_local_table_rejection(executor, [], journal)
             self.assertEqual(call.call_args.args[0][-1], '--dry-run')
             self.assertEqual(journal.get('schema:event_table'), 'not_sent')
