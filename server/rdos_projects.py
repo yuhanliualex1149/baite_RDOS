@@ -90,6 +90,11 @@ def initialize(registry=None):
             central.put('project', DEFAULT_PROJECT_ID, item)
     if __import__('os').environ.get('RDOS_RUNTIME_MODE') == 'production':
         from cutover import production_config as formal
+        legacy_ai = central.get('project', formal.LEGACY_AI_PROJECT)
+        if legacy_ai and not legacy_ai.get('merged_into'):
+            legacy_ai.update(merged_into=DEFAULT_PROJECT_ID,
+                             status_before_merge=legacy_ai.get('status', 'active'), status='inactive')
+            central.put('project', formal.LEGACY_AI_PROJECT, legacy_ai)
         finance = central.get('project', formal.FINANCE_PROJECT)
         if finance is None:
             nodes = [n for n in local.node_registry() if n.get('enabled', True)]
@@ -135,7 +140,7 @@ def _record(project_id):
 
 def is_registered(project_id):
     item = central.get('project', project_id) if isinstance(project_id, str) else None
-    return bool(item and item.get('rdos_project_schema') == 1)
+    return bool(item and item.get('rdos_project_schema') == 1 and not item.get('merged_into'))
 
 
 def project_node_ids(project_id):

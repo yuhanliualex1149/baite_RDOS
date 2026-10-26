@@ -183,6 +183,8 @@ def _registry_payload():
             nodes.append({**rdos_contract.public_view({k:identity[k] for k in ('node_id','binding_id','public_key','ready')},registry), 'enabled':True})
     project_values=[]
     for project in projects.list_projects(None,True):
+        if project.get('merged_into'):
+            continue
         scope=projects.resource_scope(project['id'],registry)
         project_values.append(rdos_contract.public_view({'project_id':project['id'],'status':project['status'],'node_ids':project['node_ids'],'owner_id':project['owner_id'],'zones':scope['zones'],'registered_resources':[{k:v for k,v in document.items() if k in ('id','object_id','revision','content_hash')} for document in scope.get('documents',[])]},registry))
     return {'version':VERSION,'workspace_id':registry.get('workspace_id',rdos_contract.PUBLIC_WORKSPACE_ID),'nodes':nodes,'projects':project_values,'generated_at':now.isoformat(),'expires_at':(now+timedelta(days=8)).isoformat()}

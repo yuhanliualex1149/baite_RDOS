@@ -41,6 +41,11 @@ class FormalAppStartupTests(unittest.TestCase):
                                'folder_id': FINANCE_FOLDER, 'member_ids': ['mem_x_rLn9VBAe_z8xol']}
                     conn.execute('INSERT INTO central_records VALUES(?,?,?,?)',
                                  ('project', FINANCE_PROJECT, json.dumps(finance), '2026-01-01'))
+                    conn.execute('INSERT INTO central_records VALUES(?,?,?,?)',
+                                 ('project', 'prj_0d9b2a0ecec486cdf8', json.dumps({
+                                     'id':'prj_0d9b2a0ecec486cdf8','name':'百特 AI 项目','status':'active',
+                                     'rdos_project_schema':1,'member_ids':['mem_p6BbcYJrwAcv_M5Y'],
+                                     'node_ids':['node_yuhan'],'nodes_explicit':True,'revision':1}), '2026-01-01'))
                     conn.execute('CREATE TABLE phase3_local(kind TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(kind,id))')
                     marker = {'source_count': 18, 'task_ids': ['task-%02d' % i for i in range(18)], 'content_sha256': 'a'*64}
                     conn.execute('INSERT INTO phase3_local VALUES(?,?,?,?)',
@@ -73,7 +78,7 @@ class FormalAppStartupTests(unittest.TestCase):
                     from server.production_app import app
                 from server import peer_tasks
                 if Path(peer_tasks.BUNDLED_NODE).is_file():
-                    # External runtime fixture on macOS; Linux uses /usr/bin/node.
+                    # External runtime fixture on macOS; Linux uses LIVE_NODE.
                     production_runtime._PEER_NODE = Path(peer_tasks.BUNDLED_NODE)
                 from server import phase3_feishu
                 records = {TASK_TABLE: {}, 'tblFormalEvents123': {}}
@@ -126,6 +131,13 @@ class FormalAppStartupTests(unittest.TestCase):
                         assert projects.status_code == 200, projects.text[:300]
                         assert 'rdos-self' in projects.text
                         assert FINANCE_FOLDER in projects.text
+                        assert all(p['id'] != 'prj_0d9b2a0ecec486cdf8' for p in projects.json()['items'])
+                        from server import central_store
+                        archived_ai = central_store.get('project','prj_0d9b2a0ecec486cdf8')
+                        assert archived_ai['name'] == '百特 AI 项目' and archived_ai['merged_into'] == 'project_rdos'
+                        assert archived_ai['status'] == 'inactive'
+                        from server import rdos_projects
+                        assert not rdos_projects.is_registered(archived_ai['id'])
                         old_project = next(p for p in projects.json()['items'] if p['id'] == FINANCE_PROJECT)
                         assert old_project['name'] == '原财赋项目'
                         assert old_project['node_ids'] == ['node_xiaofei'], old_project
@@ -133,6 +145,11 @@ class FormalAppStartupTests(unittest.TestCase):
                         assert manifest.status_code == 200, manifest.text[:300]
                         assert manifest.json()['node_id'] == 'node_xiaofei'
                         assert manifest.json()['tasks_table_id'] == TASK_TABLE
+                        assert all(p['id'] != archived_ai['id'] for p in manifest.json()['projects'])
+                        assert manifest.json()['skill']['url'] == 'https://yjmt.cn/baite-rdos/nodes/node_xiaofei/skill.zip'
+                        package = client.get('/baite-rdos/nodes/node_xiaofei/skill.zip')
+                        assert package.status_code == 200
+                        assert hashlib.sha256(package.content).hexdigest() == manifest.json()['skill']['sha256']
                         assert manifest.json()['peer']['available'] is True, manifest.json()['peer']
                         proof = peer_tasks.signed({'body':'正式模式签名核对'})
                         assert peer_tasks.verified(proof, peer_tasks.public_config()['central_public_key']) == {'body':'正式模式签名核对'}

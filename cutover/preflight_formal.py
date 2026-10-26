@@ -38,7 +38,7 @@ def check(old_env=Path('/etc/baite-rdos/rdos.env'),
     configured = formal.load(environ=values)
     require_installed_marker(configured.database)
     command = ['/usr/sbin/runuser', '-u', 'baite-rdos', '--', '/usr/bin/env',
-               'HOME=/var/lib/baite-rdos', 'PATH=/usr/bin:/bin',
+               'HOME=/var/lib/baite-rdos', 'PATH='+str(formal.LIVE_NODE.parent)+':/usr/bin:/bin',
                str(configured.cli), 'auth', 'status']
     response = subprocess.run(command, capture_output=True, text=True, timeout=40)
     if response.returncode:

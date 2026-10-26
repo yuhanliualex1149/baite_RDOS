@@ -221,7 +221,11 @@ class _CLIExecutor:
         user_home = os.environ.get("HOME")
         if not user_home or not Path(user_home).is_absolute():
             _fail("invalid_environment", "阶段3原生CLI需要启动器明确提供现有用户HOME；未读取凭据且未调用CLI")
-        self.child_env = {"HOME": user_home, "PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8",
+        runtime_path = '/usr/bin:/bin'
+        if _FORMAL:
+            from cutover import production_config as formal_config
+            runtime_path = str(formal_config.LIVE_NODE.parent) + ':/usr/bin:/bin'
+        self.child_env = {"HOME": user_home, "PATH": runtime_path, "LANG": "en_US.UTF-8",
                           "TMPDIR": str(self.runtime / "tmp"), "NO_COLOR": "1"}
         self._pending = threading.local()
         _EXECUTORS.add(self)
@@ -819,6 +823,8 @@ class FeishuBackend:
         """Persist only administrator-registered project roots; shared Agent stays fixed."""
         values = []
         for project in projects:
+            if project.get('merged_into'):
+                continue
             values.append({'id': _identifier(project['id']),
                 'public_id': rdos_contract.public_view(project['id']),
                 'name': project['name'], 'status': project['status'],

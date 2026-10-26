@@ -282,6 +282,8 @@ def _manifest_data(node):
             'source_url':document.get('source_url','')})
     project_values = []
     for project in rdos_projects.list_projects(None, include_inactive=True):
+        if project.get('merged_into'):
+            continue
         if node['node_id'] not in project['node_ids']:
             continue
         public_id = rdos_contract.public_view(project['id'])

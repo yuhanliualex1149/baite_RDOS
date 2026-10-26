@@ -24,6 +24,7 @@ AGENT_FOLDER = "VCAHfzSZsl9iSmdrmnGcTCkWntg"
 SELECTED_RAG_FOLDER = "KQjyf6KrxlZ24MdkHirc9TP0n2d"
 SHARED_SKILLS_FOLDER = "ImWqfzWcvl5LWUdFmxKcLIfdntp"
 DEFAULT_PROJECT = "project_rdos"
+LEGACY_AI_PROJECT = "prj_0d9b2a0ecec486cdf8"
 FINANCE_PROJECT = "rdos-self"
 FINANCE_FOLDER = "NC02ftI7DlejwedufJ9cYVednzh"
 FINANCE_URL = "https://shbebetter.feishu.cn/drive/folder/" + FINANCE_FOLDER
@@ -31,6 +32,7 @@ LIVE_DATABASE = Path("/var/lib/baite-rdos/baite.db")
 # The npm .bin entry on the current server is a symlink. Pin the resolved
 # package script itself so replacement of the link cannot redirect execution.
 LIVE_CLI = Path("/var/lib/baite-rdos/feishu-cli/node_modules/@larksuite/cli/scripts/run.js")
+LIVE_NODE = Path('/www/server/nodejs/v26.1.0/bin/node')
 LIVE_MANIFEST = Path("/etc/baite-rdos/rdos2-resources.json")
 MODEL_URL = "https://ark.cn-beijing.volces.com/api/plan/v3"
 MODEL_NAME = "deepseek-v4-pro"

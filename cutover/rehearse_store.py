@@ -69,8 +69,11 @@ def main():
               'source_sqlite_sha256':source_hash, 'existing_accounts_preserved':len(accounts),
               'existing_projects_preserved':len(projects),
               'registered_projects':len(rdos_projects.list_projects(None, True)),
+              'active_projects':len(rdos_projects.list_projects(None)),
               'node_count':len(phase3_store.node_registry()), 'evidence_directory':str(root)}
     result['archived_memory_records'] = archived_memory
+    archived_ai = central_store.get('project', formal.LEGACY_AI_PROJECT)
+    assert archived_ai is None or archived_ai.get('merged_into') == formal.DEFAULT_PROJECT and archived_ai['status'] == 'inactive'
     (root / 'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
     (root / 'result.json').chmod(0o600)
     print(json.dumps(result,ensure_ascii=False))

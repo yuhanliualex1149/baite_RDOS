@@ -56,7 +56,7 @@ def build(*, cli: Path = formal.LIVE_CLI, state_root: Path = formal.LIVE_DATABAS
     if identity_response is None:
         result = subprocess.run([str(cli), 'auth', 'status'], capture_output=True,
                                 text=True, timeout=40,
-                                env={'HOME': str(state_root), 'PATH': '/usr/bin:/bin',
+                                env={'HOME': str(state_root), 'PATH': str(formal.LIVE_NODE.parent)+':/usr/bin:/bin',
                                      'LANG': 'en_US.UTF-8', 'NO_COLOR': '1'})
         if result.returncode:
             raise formal.ConfigurationError('既有飞书登录未通过校验，未建立正式资源登记')

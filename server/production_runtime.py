@@ -11,10 +11,10 @@ from pathlib import Path
 import subprocess
 import threading
 
-from cutover.production_config import FormalConfig, load
+from cutover.production_config import FormalConfig, load, LIVE_NODE
 
 _config: FormalConfig | None = None
-_PEER_NODE = Path('/usr/bin/node')
+_PEER_NODE = LIVE_NODE
 _peer_snapshot = None
 _peer_lock = threading.Lock()
 
