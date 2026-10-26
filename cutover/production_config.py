@@ -6,6 +6,7 @@ enable production mode, contact Feishu, or mutate the existing database.
 from __future__ import annotations
 
 import hashlib
+import grp
 import json
 import os
 import re
@@ -66,8 +67,15 @@ def _plain_file(path: Path, *, owner_only: bool = False) -> Path:
     info = path.stat()
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ConfigurationError("正式配置文件不能是特殊文件或硬链接")
-    if owner_only and (info.st_mode & 0o037 or ((info.st_mode & 0o040) and info.st_gid != os.getgid())):
-        raise ConfigurationError("正式资源登记权限过宽")
+    if owner_only:
+        service_group = None
+        try:
+            service_group = grp.getgrnam('baite-rdos').gr_gid
+        except KeyError:
+            pass
+        group_readable = info.st_gid == os.getgid() or (info.st_uid == 0 and info.st_gid == service_group)
+        if info.st_mode & 0o037 or ((info.st_mode & 0o040) and not group_readable):
+            raise ConfigurationError("正式资源登记权限过宽")
     return path
 
 

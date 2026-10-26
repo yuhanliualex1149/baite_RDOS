@@ -54,7 +54,7 @@ def build(*, cli: Path = formal.LIVE_CLI, state_root: Path = formal.LIVE_DATABAS
         raise formal.ConfigurationError('CLI 文件异常')
     cli_sha = hashlib.sha256(cli.read_bytes()).hexdigest()
     if identity_response is None:
-        result = subprocess.run([str(cli), 'auth', 'status'], capture_output=True,
+        result = subprocess.run([str(cli), 'auth', 'status', '--json', '--verify'], capture_output=True,
                                 text=True, timeout=40,
                                 env={'HOME': str(state_root), 'PATH': str(formal.LIVE_NODE.parent)+':/usr/bin:/bin',
                                      'LANG': 'en_US.UTF-8', 'NO_COLOR': '1'})

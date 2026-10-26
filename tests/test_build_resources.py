@@ -6,9 +6,19 @@ import unittest
 from pathlib import Path
 
 from cutover import build_resources, production_config as formal
+from server.phase3_feishu import account_fingerprint, FeishuTestError
 
 
 class CandidateResourceTests(unittest.TestCase):
+    def test_verified_current_cli_identity_preserves_the_same_user_binding(self):
+        previous = {'userOpenId':'ou_fixture','appId':'cli_fixture','brand':'feishu','identity':'user'}
+        current = {'appId':'cli_fixture','brand':'feishu','identity':'user',
+                   'identities':{'user':{'openId':'ou_fixture','available':True,'verified':True}}}
+        self.assertEqual(account_fingerprint(previous), account_fingerprint(current))
+        for change in ({'verified':False},{'available':False},{'openId':''}):
+            value = {**current, 'identities':{'user':{**current['identities']['user'],**change}}}
+            with self.assertRaises(FeishuTestError):account_fingerprint(value)
+
     def test_candidate_is_fixed_owner_only_and_does_not_overwrite_policy(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

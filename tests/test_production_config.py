@@ -5,6 +5,8 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from pathlib import Path
 
 from cutover import production_config as formal
@@ -108,6 +110,17 @@ class FormalConfigurationTests(unittest.TestCase):
         with self.assertRaises(formal.ConfigurationError):
             formal.load(self.manifest, environ=self.environment,
                         database=self.database, cli=self.cli, state_root=self.state)
+
+    def test_root_preflight_accepts_only_the_readonly_service_group(self):
+        self.manifest.write_text('{}')
+        def metadata(group):
+            return SimpleNamespace(st_mode=0o100640, st_nlink=1, st_uid=0, st_gid=group)
+        with patch.object(formal.os, 'getgid', return_value=0), patch.object(formal.grp, 'getgrnam', return_value=SimpleNamespace(gr_gid=1919)):
+            with patch.object(Path, 'stat', return_value=metadata(1919)):
+                self.assertEqual(formal._plain_file(self.manifest, owner_only=True), self.manifest)
+            with patch.object(Path, 'stat', return_value=metadata(2020)):
+                with self.assertRaises(formal.ConfigurationError):
+                    formal._plain_file(self.manifest, owner_only=True)
 
 
 if __name__ == "__main__":

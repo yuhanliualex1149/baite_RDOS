@@ -37,9 +37,14 @@ def check(old_env=Path('/etc/baite-rdos/rdos.env'),
     values = {**read_environment(old_env), **read_environment(overlay)}
     configured = formal.load(environ=values)
     require_installed_marker(configured.database)
+    readable = subprocess.run(['/usr/sbin/runuser', '-u', 'baite-rdos', '--',
+                               '/usr/bin/test', '-r', str(formal.LIVE_MANIFEST)],
+                              capture_output=True, timeout=10)
+    if readable.returncode:
+        raise formal.ConfigurationError('正式服务用户不能读取资源登记，未切换服务')
     command = ['/usr/sbin/runuser', '-u', 'baite-rdos', '--', '/usr/bin/env',
                'HOME=/var/lib/baite-rdos', 'PATH='+str(formal.LIVE_NODE.parent)+':/usr/bin:/bin',
-               str(configured.cli), 'auth', 'status']
+               str(configured.cli), 'auth', 'status', '--json', '--verify']
     response = subprocess.run(command, capture_output=True, text=True, timeout=40)
     if response.returncode:
         raise formal.ConfigurationError('既有服务用户的飞书登录预检失败')

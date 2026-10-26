@@ -141,6 +141,14 @@ def _knowledge_cli_failure(stdout, stderr):
 def account_fingerprint(response):
     """Hash only identity identifiers, never return raw account information."""
     value = _data(response)
+    if not value.get('userOpenId'):
+        identities = value.get('identities')
+        user = identities.get('user') if isinstance(identities, dict) else None
+        if (not isinstance(user, dict) or user.get('available') is not True
+                or user.get('verified') is not True or not isinstance(user.get('openId'), str)
+                or not user['openId'] or value.get('identity') != 'user'):
+            _fail('account_unverified', '当前CLI未返回已在线核验的用户身份')
+        value = {**value, 'userOpenId': user['openId']}
     identity = {k: value.get(k) for k in ("userOpenId", "appId", "brand")}
     if not all(isinstance(v, str) and v for v in identity.values()) or identity["brand"] != "feishu":
         _fail("account_unverified", "当前CLI不是已核实的飞书用户身份")
@@ -240,7 +248,7 @@ class _CLIExecutor:
 
     def _validate_args(self, args):
         """Recheck complete syntax and object scope, including private calls."""
-        if args == ["auth", "status"]:
+        if args == ["auth", "status"] or (_FORMAL and args == ['auth', 'status', '--json', '--verify']):
             return
         knowledge = getattr(self._pending, "knowledge", None)
         if args[:2] == ["drive", "+download"]:
@@ -451,7 +459,7 @@ class _CLIExecutor:
             self._pending.argv = None
 
     def identity(self):
-        fingerprint = account_fingerprint(self._run(["auth", "status"]))
+        fingerprint = account_fingerprint(self._run(['auth', 'status', '--json', '--verify'] if _FORMAL else ["auth", "status"]))
         if fingerprint != self.registry["account_fingerprint"]:
             _fail("account_changed", "CLI调用账号与阶段3固定账号不同")
         return {"provider": "feishu_user", "account_fingerprint": fingerprint,

@@ -22,8 +22,8 @@ flock -n 9 || { echo 'RDOS release operation already running' >&2; exit 75; }
 [[ -f $database && -f $envfile && -f $manifest && -L $current && ! -e $override && ! -L $override ]] || {
   echo 'Formal migration, configuration, or original unit state is not ready' >&2; exit 1;
 }
-[[ $(stat -c %a "$envfile") == 600 && $(stat -c %u "$envfile") == 0 && $(stat -c %a "$manifest") == 600 && $(stat -c %u "$manifest") == 0 ]] || {
-  echo 'Formal configuration permissions are not owner-only' >&2; exit 1;
+[[ $(stat -c %a "$envfile") == 600 && $(stat -c %u "$envfile") == 0 && $(stat -c %a "$manifest") == 640 && $(stat -c %u "$manifest") == 0 && $(stat -c %g "$manifest") == $(id -g baite-rdos) ]] || {
+  echo 'Formal configuration must be root-owned; only the service group may read the resource manifest' >&2; exit 1;
 }
 old=$(readlink -f "$current")
 [[ $old == "$base/releases/"* && -d $old && $old != "$release" ]] || exit 1
