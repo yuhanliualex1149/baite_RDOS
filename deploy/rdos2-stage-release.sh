@@ -3,7 +3,8 @@
 # This script does not stop or replace the running Panel.
 set -Eeuo pipefail
 umask 077
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+node_dir=/www/server/nodejs/v26.1.0/bin
+export PATH="$node_dir:/usr/sbin:/usr/bin:/sbin:/bin"
 [[ $(id -u) == 0 && $# == 1 && $1 =~ ^[0-9a-f]{40}$ ]] || exit 64
 sha=$1
 branch=codex/rdos2-release-prep
@@ -14,7 +15,9 @@ python=$base/tools/bin/python3.12
 build_user=baite-rdos-deploy
 exec 9>/run/lock/baite-rdos-deploy.lock
 flock -n 9 || { echo 'RDOS release operation already running' >&2; exit 75; }
-[[ -x $python && -d $repo && -L $base/current ]] || { echo 'Existing release prerequisites missing' >&2; exit 1; }
+[[ -x $python && -x $node_dir/node && -d $repo && -L $base/current ]] || {
+  echo 'Existing release prerequisites missing' >&2; exit 1;
+}
 git -C "$repo" fetch --no-tags origin "$branch"
 actual=$(git -C "$repo" rev-parse FETCH_HEAD)
 [[ $actual == "$sha" ]] || { echo 'Requested SHA is not the published preparation branch head' >&2; exit 1; }
