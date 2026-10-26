@@ -438,8 +438,13 @@ def _logs(args):
         _fail('unavailable_correlation', '该日志没有可靠的对象关联字段，请改查运行或操作记录')
     offset = _integer(args.get('offset'), 0, 0, 10000)
     limit = _integer(args.get('limit'), 30, 1, 50)
-    path = db.db_path().parent / name
-    if path.is_symlink() or path.resolve().parent != db.db_path().parent:
+    root = db.db_path().parent
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
+        from server.production_runtime import require
+        require()
+        root = Path('/var/log/baite-rdos') if name == 'server.log' else root / 'runtime'
+    path = root / ('panel.log' if os.environ.get('RDOS_RUNTIME_MODE') == 'production' and name == 'server.log' else name)
+    if path.is_symlink() or path.resolve().parent != root.resolve():
         _fail('out_of_scope', '日志路径不属于当前运行目录')
     if not path.exists():
         return {'log': name, 'items': [], 'source_available': False, 'reason': '当前没有该日志', 'next_offset': None}

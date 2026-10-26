@@ -90,6 +90,8 @@ def init_formal() -> None:
         now = db.utc_now()
         conn.execute("INSERT OR IGNORE INTO phase3_local VALUES('state','phase3_schema',?,?)",
                      (json.dumps({'version': 1, 'created_at': now}), now))
+        conn.execute("INSERT OR IGNORE INTO phase3_local VALUES('state','business_workflow',?,?)",
+                     (json.dumps({'version': 1, 'source': 'formal_migration'}), now))
     if not central.get('project', PROJECT_ID):
         central.put('project', PROJECT_ID, {'id': PROJECT_ID, 'name': 'RDOS建设',
             'member_ids': list(nodes.values()), 'status': 'active',

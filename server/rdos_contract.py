@@ -5,6 +5,7 @@ This adapter changes representation, never task authority or requirements.
 from __future__ import annotations
 
 import copy
+import os
 
 PROTOCOL_VERSION = 2
 PUBLIC_PROJECT_ID = 'project_rdos'
@@ -18,10 +19,15 @@ PRIVATE_KEYS = frozenset({'env_id', 'generation', 'identity_mode', 'source_envir
 
 def identifiers(registry=None):
     registry = registry or {}
-    pairs = {registry.get('default_project_id', 'lab_project_phase3_collab'): PUBLIC_PROJECT_ID,
-             'mem_lab_admin_0001': 'member_admin', 'mem_lab_codex_0001': 'member_codex',
-             'mem_lab_workbuddy_0001': 'member_workbuddy'}
-    pairs.update(DEFAULT_NODES)
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
+        # Formal identifiers are already business identifiers. A missing
+        # optional registry must never route project_rdos back into the lab.
+        pairs = {registry.get('default_project_id', PUBLIC_PROJECT_ID): PUBLIC_PROJECT_ID}
+    else:
+        pairs = {registry.get('default_project_id', 'lab_project_phase3_collab'): PUBLIC_PROJECT_ID,
+                 'mem_lab_admin_0001': 'member_admin', 'mem_lab_codex_0001': 'member_codex',
+                 'mem_lab_workbuddy_0001': 'member_workbuddy'}
+        pairs.update(DEFAULT_NODES)
     for node in registry.get('nodes', []):
         if node.get('node_id') and node.get('public_id'):
             pairs[node['node_id']] = node['public_id']

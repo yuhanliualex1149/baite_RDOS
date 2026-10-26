@@ -40,6 +40,10 @@ def _accepting_writes() -> None:
 
 
 def _environment() -> tuple[str, str]:
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
+        from server.lab_panel import environment
+        current = environment()  # requires the validated formal launcher
+        return current['env_id'], current['generation']
     from lab.guard import require_active
     require_active()
     env = os.environ.get("RDOS_LAB_ENV_ID", "")

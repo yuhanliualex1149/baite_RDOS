@@ -144,6 +144,21 @@ def _same_columns(actual, desired):
     return all(actual.get(key) == value for key, value in desired.items())
 
 
+def archive_initial_memory(conn):
+    """One-time cutover reset; protected archives cannot enter normal recall."""
+    rows = conn.execute("""SELECT kind,id,payload FROM central_records WHERE
+        kind IN ('central_memory','central_memory_history','central_memory_suppression',
+                 'central_memory_operation','central_agent_policy_history')
+        OR (kind='state' AND id='central_agent_policy')""").fetchall()
+    for kind, key, body in rows:
+        archive = {'original_kind': kind, 'original_id': key, 'record': json.loads(body)}
+        conn.execute('INSERT OR IGNORE INTO central_records VALUES(?,?,?,?)',
+                     ('cutover_memory_archive', digest([kind, key]), canonical(archive),
+                      datetime.now(timezone.utc).isoformat()))
+        conn.execute('DELETE FROM central_records WHERE kind=? AND id=?', (kind, key))
+    return len(rows)
+
+
 def apply_remote(prepared, transport, journal):
     """Transport exposes get_record(record_id) and update_record(record_id, fields).
 
@@ -201,6 +216,8 @@ def install_authority(database, prepared, receipts):
         conn.execute('''CREATE TABLE IF NOT EXISTS phase3_history (
             task_id TEXT NOT NULL,version INTEGER NOT NULL,payload_hash TEXT NOT NULL,payload TEXT NOT NULL,
             PRIMARY KEY(task_id,version))''')
+        if not conn.execute("SELECT 1 FROM phase3_local WHERE kind='state' AND id='formal_migration'").fetchone():
+            archive_initial_memory(conn)
         def immutable(kind, key, value):
             payload = canonical(value)
             row = conn.execute('SELECT payload FROM phase3_local WHERE kind=? AND id=?',

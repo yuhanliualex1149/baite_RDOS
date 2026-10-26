@@ -189,6 +189,8 @@ def runtime_diagnostics(user: dict) -> dict:
     if "admin" not in user.get("roles", []):
         raise PermissionError("只有管理员可以查看运行诊断")
     observed_at = db.utc_now()
+    formal_mode = os.environ.get('RDOS_RUNTIME_MODE') == 'production'
+    live_model = formal_mode or os.environ.get('RDOS_LAB_MODEL_MODE') == 'agent_plan'
     runs = store.items("run")
     operations = store.items("operation")
     feedback = store.items("feedback")
@@ -250,8 +252,9 @@ def runtime_diagnostics(user: dict) -> dict:
     project_health = runtime.overview()['project_health']
     return {
         "observed_at": observed_at,
-        "scope": ("本地实验运行及登记后端读回记录；模型、飞书及客户端按实际调用分别核验。"
-                  if os.environ.get('RDOS_LAB_MODEL_MODE') == 'agent_plan' else
+        "scope": ("正式运行及登记后端读回记录；模型、飞书及客户端按实际调用分别核验。" if formal_mode else
+                  "本地实验运行及登记后端读回记录；模型、飞书及客户端按实际调用分别核验。"
+                  if live_model else
                   "本地实验运行及模拟后端读回记录；未验证真实模型、飞书或客户端。"),
         "health": runtime.overview(),
         "online": {
@@ -259,7 +262,7 @@ def runtime_diagnostics(user: dict) -> dict:
                            "needs_attention": sum(item.get("stage_status") in ("blocked", "check_failed") for item in sessions),
                            "last_checked_at": newest(checked, "checked_at")},
             "model": {"configured": True,
-                      "backend": "agent_plan" if os.environ.get('RDOS_LAB_MODEL_MODE') == 'agent_plan' else "local_mock",
+                      "backend": "agent_plan" if live_model else "local_mock",
                       "last_success_at": newest(successes, "completed_at"), "last_failure_at": newest(model_failures, "completed_at"),
                       "last_failed_central_run_at": newest(failures, "completed_at"),
                       "last_successful_model": next((item.get("model") for item in sorted(successes, key=lambda item: item.get("completed_at") or "", reverse=True)), "")},

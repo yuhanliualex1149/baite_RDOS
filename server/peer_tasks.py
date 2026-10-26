@@ -36,6 +36,15 @@ def canonical(value):
 
 def crypto(request):
     """Only the frozen helper is executable; guard authorizes this exact stdin."""
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
+        from server.production_runtime import run_peer_crypto
+        try:
+            result = run_peer_crypto(request)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            raise PeerError('runtime_unavailable', '现有 Node 签名功能不可用；未自动安装或修复') from None
+        if not isinstance(result, dict) or result.get('error'):
+            raise PeerError('invalid_signature', '签名或验签失败')
+        return result
     from lab import guard
     binary = BUNDLED_NODE if Path(BUNDLED_NODE).is_file() else shutil.which('node')
     if not binary:
@@ -60,6 +69,9 @@ def crypto(request):
     return result
 
 def _runtime():
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
+        from server.production_runtime import require
+        return require().database.parent / 'runtime'
     return Path(os.environ['RDOS_LAB_RUNTIME']).resolve()
 
 def _central_keys(*,create=False):

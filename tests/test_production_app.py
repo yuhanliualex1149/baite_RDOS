@@ -15,7 +15,7 @@ import unittest
 class FormalAppStartupTests(unittest.TestCase):
     def test_existing_accounts_and_subpath_boot_without_lab_guard(self):
         source = textwrap.dedent(r'''
-            import hashlib, os, sqlite3, tempfile
+            import hashlib, os, sqlite3, tempfile, subprocess, json
             from pathlib import Path
             from unittest.mock import patch
             from fastapi.testclient import TestClient
@@ -36,7 +36,11 @@ class FormalAppStartupTests(unittest.TestCase):
                         ('mem_x_rLn9VBAe_z8xol', 'xiaofei', 'Xiaofei', '["researcher"]', 'placeholder', 'actual', 1, '2026-01-01'),
                         ('mem_g3nKLUxRovywCSTk', 'duoduo', 'Duoduo', '["researcher"]', 'placeholder', 'actual', 1, '2026-01-01'),
                     ])
-                    import json
+                    conn.execute('CREATE TABLE central_records(kind TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(kind,id))')
+                    finance = {'id': FINANCE_PROJECT, 'name': '原财赋项目', 'status': 'active',
+                               'folder_id': FINANCE_FOLDER, 'member_ids': ['mem_x_rLn9VBAe_z8xol']}
+                    conn.execute('INSERT INTO central_records VALUES(?,?,?,?)',
+                                 ('project', FINANCE_PROJECT, json.dumps(finance), '2026-01-01'))
                     conn.execute('CREATE TABLE phase3_local(kind TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(kind,id))')
                     marker = {'source_count': 18, 'task_ids': ['task-%02d' % i for i in range(18)], 'content_sha256': 'a'*64}
                     conn.execute('INSERT INTO phase3_local VALUES(?,?,?,?)',
@@ -67,8 +71,39 @@ class FormalAppStartupTests(unittest.TestCase):
                     BAITE_LLM_MODEL='deepseek-v4-pro', BAITE_LLM_THINKING='enabled', BAITE_LLM_REASONING_EFFORT='high')
                 with patch.object(production_runtime, 'load', return_value=formal):
                     from server.production_app import app
+                from server import peer_tasks
+                if Path(peer_tasks.BUNDLED_NODE).is_file():
+                    # External runtime fixture on macOS; Linux uses /usr/bin/node.
+                    production_runtime._PEER_NODE = Path(peer_tasks.BUNDLED_NODE)
                 from server import phase3_feishu
-                with patch.object(phase3_feishu._CLIExecutor, 'identity', return_value={'account_fingerprint': fingerprint}):
+                records = {TASK_TABLE: {}, 'tblFormalEvents123': {}}
+                task_writes = []
+                native_run = subprocess.run
+                def transport(argv, **kwargs):
+                    if argv[0] != str(cli):
+                        if str(argv[-1]).endswith('peer_crypto.cjs'):
+                            assert set(kwargs['env']) == {'HOME','PATH','TMPDIR'}
+                        return native_run(argv, **kwargs)
+                    a = argv[1:]
+                    def flag(key): return a[a.index(key)+1]
+                    table = flag('--table-id') if '--table-id' in a else ''
+                    if a[:3] == ['drive', 'files', 'list']:
+                        folder = json.loads(flag('--params'))['folder_token']
+                        value = {'data': {'files': ([{'token':BASE_TOKEN,'type':'bitable','name':'原Base','parent_token':AGENT_FOLDER}]
+                                                   if folder == AGENT_FOLDER else []), 'has_more':False}}
+                    elif a[:2] == ['base', '+record-list']:
+                        value = {'data': {'items': list(records[table].values()), 'has_more': False}}
+                    elif a[:2] == ['base', '+record-upsert']:
+                        rid = flag('--record-id') if '--record-id' in a else 'recFormal'+str(len(records[table])+1)
+                        records[table][rid] = {'record_id': rid, 'fields': json.loads(flag('--json'))}
+                        if table == TASK_TABLE: task_writes.append(rid)
+                        value = {'data': {'record_id': rid}}
+                    elif a[:2] == ['base', '+record-get']:
+                        value = {'data': {'record': records[table][flag('--record-id')]}}
+                    else:
+                        return subprocess.CompletedProcess(argv, 1, '', 'offline presentation unavailable')
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(value), '')
+                with patch.object(phase3_feishu._CLIExecutor, 'identity', return_value={'account_fingerprint': fingerprint}), patch.object(phase3_feishu.subprocess, 'run', side_effect=transport):
                     with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn') as client:
                         page = client.get('/baite-rdos/')
                         assert page.status_code == 200, page.text[:300]
@@ -91,6 +126,44 @@ class FormalAppStartupTests(unittest.TestCase):
                         assert projects.status_code == 200, projects.text[:300]
                         assert 'rdos-self' in projects.text
                         assert FINANCE_FOLDER in projects.text
+                        old_project = next(p for p in projects.json()['items'] if p['id'] == FINANCE_PROJECT)
+                        assert old_project['name'] == '原财赋项目'
+                        assert old_project['node_ids'] == ['node_xiaofei'], old_project
+                        manifest = client.get('/baite-rdos/nodes/node_xiaofei/manifest')
+                        assert manifest.status_code == 200, manifest.text[:300]
+                        assert manifest.json()['node_id'] == 'node_xiaofei'
+                        assert manifest.json()['tasks_table_id'] == TASK_TABLE
+                        assert manifest.json()['peer']['available'] is True, manifest.json()['peer']
+                        proof = peer_tasks.signed({'body':'正式模式签名核对'})
+                        assert peer_tasks.verified(proof, peer_tasks.public_config()['central_public_key']) == {'body':'正式模式签名核对'}
+                        try: production_runtime.run_peer_crypto({'action':'execute','command':'outside'})
+                        except ValueError: pass
+                        else: raise AssertionError('generic command escaped crypto boundary')
+                        assert client.get('/baite-rdos/api/central/peer/nodes').status_code == 200
+                        from server import central_service, phase3_store, phase1_operations, lab_panel
+                        assert phase3_store.get('state', 'business_workflow')
+                        assert phase1_operations._environment() == tuple(lab_panel.environment()[k] for k in ('env_id','generation'))
+                        specs = central_service.tool_specs({'project_id':'', 'allowed_projects':['project_rdos',FINANCE_PROJECT]})
+                        assert any(t['function']['name'] == 'phase3_list_tasks' for t in specs)
+                        assert not any(t['function']['name'] == 'list_tasks' for t in specs)
+                        headers = {'Origin': 'https://yjmt.cn'}
+                        draft = client.post('/baite-rdos/api/central/phase3/drafts', headers=headers,
+                            json={'operation_id':'formal-draft-proof', 'project_id':'project_rdos',
+                                  'payload':{'title':'隔离动作验证','goal':'核对真实核心路径','deliverable':'结构化结果',
+                                             'executor_node_ids':['node_yuhan']}})
+                        assert draft.status_code == 200, draft.text[:600]
+                        item = draft.json()['item']
+                        action = {'operation_id':'formal-start-proof','expected_revision':0,'expected_requirements_version':0,
+                                  'payload':{'draft_id':item['id'],'expected_hash':item['draft_hash']}}
+                        published = client.post('/baite-rdos/api/central/phase3/tasks/'+item['task_id']+'/actions/start',
+                                                headers=headers,json=action)
+                        assert published.status_code == 200, published.text[:800]
+                        assert published.json()['item']['business_status'] == 'active'
+                        repeated = client.post('/baite-rdos/api/central/phase3/tasks/'+item['task_id']+'/actions/start',
+                                               headers=headers,json=action)
+                        assert repeated.status_code == 200, repeated.text[:500]
+                        assert len(task_writes) == 1, task_writes
+                        assert len(records[TASK_TABLE]) == 1 and len(records['tblFormalEvents123']) == 1
                 with sqlite3.connect(database) as conn:
                     assert conn.execute('SELECT COUNT(*) FROM central_users').fetchone()[0] == 3
                     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='phase3_mock'").fetchone()[0] == 0

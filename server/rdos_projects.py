@@ -105,8 +105,19 @@ def initialize(registry=None):
                 'source_environment': 'feishu_production',
                 'migration_source': 'existing_project:rdos-self',
             })
-        elif finance.get('folder_id') != formal.FINANCE_FOLDER:
-            _error('out_of_scope', '财赋项目目录与原范围不符，停止启动', 503)
+        else:
+            if finance.get('folder_id', finance.get('folder_token')) != formal.FINANCE_FOLDER:
+                _error('out_of_scope', '财赋项目目录与原范围不符，停止启动', 503)
+            if finance.get('rdos_project_schema') != 1:
+                # Keep the existing project name, members, body and history.
+                members = list(finance.get('member_ids', []))
+                finance.update(rdos_project_schema=1, is_default=False, revision=1,
+                    owner_id=finance.get('owner_id') or local.OWNER_ID,
+                    node_ids=[n['node_id'] for n in local.node_registry() if n.get('member_id') in members],
+                    nodes_explicit=True, folder_source='explicit',
+                    folder_id=formal.FINANCE_FOLDER, folder_url=formal.FINANCE_URL,
+                    source_environment='feishu_production', migration_source='existing_project:rdos-self')
+                central.put('project', formal.FINANCE_PROJECT, finance)
     # Add registration ownership to already migrated projects without touching
     # task requirements, confirmation versions, or administrator-edited fields.
     for project in central.items('project'):

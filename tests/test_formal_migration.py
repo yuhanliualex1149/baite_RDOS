@@ -101,14 +101,24 @@ class FormalMigrationTests(unittest.TestCase):
             database = Path(directory) / 'original.db'
             with sqlite3.connect(database) as conn:
                 conn.execute('CREATE TABLE central_users(id TEXT PRIMARY KEY)')
+                conn.execute('CREATE TABLE central_records(kind TEXT,id TEXT,payload TEXT,updated_at TEXT,PRIMARY KEY(kind,id))')
+                conn.executemany('INSERT INTO central_records VALUES(?,?,?,?)', [
+                    ('central_memory','old-memory','{"content":"old agreement"}','before'),
+                    ('message','retained-chat','{"content":"original dialogue"}','before')])
             with self.assertRaises(migration.MigrationError):
                 migration.install_authority(database, plan, receipts[:-1])
             marker = migration.install_authority(database, plan, receipts)
             self.assertEqual(marker['source_count'], 18)
+            with sqlite3.connect(database) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM central_records WHERE kind='central_memory'").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM central_records WHERE kind='cutover_memory_archive'").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM central_records WHERE kind='message'").fetchone()[0], 1)
+                conn.execute('INSERT INTO central_records VALUES(?,?,?,?)', ('central_memory','new-memory','{"content":"new agreement"}','after'))
             migration.install_authority(database, plan, receipts)
             with sqlite3.connect(database) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM phase3_local WHERE kind='task_authority'").fetchone()[0], 18)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM phase3_local WHERE kind='state' AND id='formal_migration'").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM central_records WHERE kind='central_memory'").fetchone()[0], 1)
 
 
 if __name__ == '__main__':

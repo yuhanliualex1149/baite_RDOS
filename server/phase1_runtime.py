@@ -210,8 +210,13 @@ def initialize() -> None:
         # migration enables manual mock orchestration once, never a scheduler.
         state['paused'] = False
         store.put('state', 'phase1_schema', {'version': 2, 'migrated_at': now(),
-                  'manual_mock_enabled': True, 'reason': 'approved_phase1_transition'})
-    state.update(phase=1, scheduler_enabled=False, model_mode='mock', backend='local_mock')
+                  **({'manual_enabled': True, 'reason': 'approved_rdos2_cutover'}
+                     if os.environ.get('RDOS_RUNTIME_MODE') == 'production' else
+                     {'manual_mock_enabled': True, 'reason': 'approved_phase1_transition'})})
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
+        state.update(phase=3, scheduler_enabled=False, model_mode='agent_plan', backend='feishu_production')
+    else:
+        state.update(phase=1, scheduler_enabled=False, model_mode='mock', backend='local_mock')
     state.pop('schedule_verified', None)
     store.put('state', 'runtime', state)
     for project in store.items('project'):

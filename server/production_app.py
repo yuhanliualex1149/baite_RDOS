@@ -19,6 +19,7 @@ from server.central_accounts import router as account_router
 from server.shared_knowledge import router as knowledge_router
 from server.central_settings import router as settings_router
 from server.central_maintenance import router as maintenance_router
+from server.peer_tasks import router as peer_router
 
 STATIC = Path(__file__).with_name('static')
 
@@ -30,8 +31,10 @@ async def lifespan(_: FastAPI):
     from cutover.formal_migration import require_installed_marker
     require_installed_marker(FORMAL.database)
     phase3_feishu.configure_formal(FORMAL)
-    from server import phase3_service, central_memory, central_settings, central_maintenance
+    from server import phase3_service, central_memory, central_settings, central_maintenance, phase1_runtime, peer_tasks
+    phase1_runtime.initialize()
     phase3_service.initialize()
+    peer_tasks.initialize()
     from server.central_api import _sync_registered_projects
     _sync_registered_projects()
     central_memory.initialize()
@@ -48,7 +51,7 @@ app = FastAPI(title='百特教育研发协同工作台 RDOS', docs_url=None,
               redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=STATIC), name='static')
 for router in (central_router, phase3_router, onboard_router, account_router,
-               knowledge_router, settings_router, maintenance_router):
+               knowledge_router, settings_router, maintenance_router, peer_router):
     app.include_router(router)
 
 

@@ -62,6 +62,10 @@ class LegacyConversionTest(unittest.TestCase):
         row = {**ROW, "任务ID": "RDOS-77CBA792EB4D", "任务性质": ["周期"]}
         result = convert("rec-old", row, "ongoing", MAP)
         self.assertEqual(result["proposal"]["business_status"], "active")
+        self.assertEqual(result['proposal']['requirements_version'], 4)
+        self.assertEqual(result['proposal']['migration_source']['legacy_requirements_version'], 3)
+        self.assertEqual(result['proposal']['title'], 'Default 项目周报')
+        self.assertIn(row['任务说明'], result['proposal']['goal'])
         self.assertEqual(result["proposal"]["periodicity"], {
             "unit": "week", "timezone": "Asia/Shanghai",
             "deadline_weekday": 4, "deadline_time": "17:00",

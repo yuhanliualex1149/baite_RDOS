@@ -132,10 +132,16 @@ def convert(record_id: str, row: dict, decision: str, mapping: Mapping) -> dict:
     if periodic and task_id == WEEKLY_TASK:
         requirement['periodicity'] = {'unit': 'week', 'timezone': 'Asia/Shanghai',
                                       'deadline_weekday': 4, 'deadline_time': '17:00'}
+        if decision == 'ongoing':
+            requirement.update(title='Default 项目周报',
+                goal='汇总 Default（RDOS建设，承接原百特AI项目）本周真实进展、成果、问题与下一步。'
+                     '仍由原执行成员负责，每周五北京时间17:00前写入统一协作记录表；父任务持续有效，每期分别结算。\n\n'
+                     '原要求（在上述项目与反馈入口调整后延续）：\n'+description)
+    effective_version = version + 1 if periodic and task_id == WEEKLY_TASK and decision == 'ongoing' else version
     status = "active" if decision == "ongoing" else "closed" if decision in ("disabled", "completed") else "paused"
     task = {
         "id": task_id, "task_id": task_id, "project_id": current_project,
-        **requirement, "requirements_version": version, "record_revision": 1,
+        **requirement, "requirements_version": effective_version, "record_revision": 1,
         "requirements_hash": business_digest(requirement), "business_status": status,
         "operation_id": operation_id, "grant_operation_id": operation_id,
         "migration_source": {
@@ -143,11 +149,12 @@ def convert(record_id: str, row: dict, decision: str, mapping: Mapping) -> dict:
             "legacy_publication": publication, "legacy_nature": nature,
             "source_fields_sha256": source_hash, "evidence_decision": decision,
             "legacy_writeback_marker": one(row["写回标识"]),
+            "legacy_requirements_version": version,
         },
     }
     columns = {
         "标题": task["title"], "状态": status,
-        "执行节点": node_id, "要求版本": str(version),
+        "执行节点": node_id, "要求版本": str(effective_version),
         "记录修订": "1", "操作ID": operation_id,
         "记录数据": canonical_json(task), "当前项目ID": current_project,
     }
