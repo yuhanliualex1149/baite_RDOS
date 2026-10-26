@@ -28,6 +28,9 @@ git -C "$repo" archive "$sha" | tar -x -C "$release"
   echo 'Commit lacks formal entry or release suite' >&2; exit 1;
 }
 chown -R "$build_user:$build_user" "$release"
+# Git's archive umask can preserve group-write bits independently of the shell
+# umask. Test the same non-group-writable source boundary required at runtime.
+chmod -R go-w "$release"
 # Build/test receives neither the live database nor production credentials.
 systemd-run --quiet --wait --pipe --collect --unit="rdos2-stage-$sha" \
   -p Type=oneshot -p User="$build_user" -p NoNewPrivileges=yes \
