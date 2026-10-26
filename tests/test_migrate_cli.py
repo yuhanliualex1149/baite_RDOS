@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import unittest
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from cutover import migrate_cli
 from cutover.formal_migration import MigrationError
+from cutover.formal_migration import FileJournal
 
 
 class Journal(dict):
@@ -42,6 +49,37 @@ class SchemaExecutor:
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_proven_local_missing_schema_rejection_can_resume_without_erasing_evidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            journal = FileJournal(Path(folder) / 'journal.json')
+            journal.mark('schema:event_table', 'sent')
+            executor = SimpleNamespace(binary='/fixed/cli', binary_hash='a'*64,
+                                       runtime=Path(folder), child_env={'HOME':folder})
+            response = {'ok':False, 'error':{'type':'validation','subtype':'invalid_argument',
+                        'message':'required flag(s) "fields" not set'}}
+            with patch.object(migrate_cli.subprocess, 'run', return_value=subprocess.CompletedProcess([],1,json.dumps(response),'')) as call:
+                migrate_cli.recover_local_table_rejection(executor, [], journal)
+            self.assertEqual(call.call_args.args[0][-1], '--dry-run')
+            self.assertEqual(journal.get('schema:event_table'), 'not_sent')
+            proof = json.loads((Path(folder)/'formal_schema_local_rejection.json').read_text())
+            self.assertEqual(proof['previous_journal']['schema:event_table'], 'sent')
+            transport = SchemaExecutor()
+            migrate_cli.ensure_table(transport, transport.tables(), journal)
+            self.assertEqual(transport.tables_created,1)
+            self.assertEqual(journal.get('schema:event_table'),'verified')
+
+    def test_unknown_remote_error_cannot_clear_uncertain_schema_marker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            journal = FileJournal(Path(folder)/'journal.json')
+            journal.mark('schema:event_table','sent')
+            executor = SimpleNamespace(binary='/fixed/cli',binary_hash='a'*64,
+                                       runtime=Path(folder),child_env={'HOME':folder})
+            with patch.object(migrate_cli.subprocess, 'run', return_value=subprocess.CompletedProcess([],1,'{"ok":false,"error":{"type":"network"}}','')):
+                with self.assertRaises(MigrationError):
+                    migrate_cli.recover_local_table_rejection(executor,[],journal)
+            self.assertEqual(journal.get('schema:event_table'),'sent')
+            self.assertFalse((Path(folder)/'formal_schema_local_rejection.json').exists())
+
     def test_lost_response_is_resolved_by_fresh_table_and_field_lists(self):
         executor = SchemaExecutor(lose_table_response=True, lose_field_response=True)
         journal = Journal()

@@ -93,9 +93,12 @@ def remote(argv, **kw):
     elif a[:2] == ['base','+table-list']:
         response={'data':{'items':list(tables.values()),'has_more':False}}
     elif a[:2] == ['base','+table-create']:
+        primary = '任务ID' if flag('--name') == '阶段3任务登记' else '事件ID'
+        schema = json.loads(flag('--fields'))
+        assert schema == [{'name': primary, 'type': 'text'}]
         identifier='tblCreated'+str(len(tables)+1)
         tables[identifier]={'table_id':identifier,'name':flag('--name')}
-        field_rows[identifier]=[]
+        field_rows[identifier]=schema
         response={'data':{'table_id':identifier}}
     elif a[:2] == ['base','+field-list']:
         response={'data':{'items':field_rows[flag('--table-id')],'has_more':False}}

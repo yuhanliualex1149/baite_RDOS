@@ -314,10 +314,13 @@ class _CLIExecutor:
                     if flags["--limit"] != "100" or not flags["--offset"].isdigit():
                         _fail("command_denied", "表分页参数无效")
                 else:
-                    exact(("--as", "--base-token", "--name"))
+                    exact(("--as", "--base-token", "--name", "--fields"))
                     allowed_names = ("协作记录",) if self.registry.get('env_id') == 'rdos_formal' else ("阶段3任务登记", "阶段3协作记录")
                     if flags["--name"] not in allowed_names:
                         _fail("setup_denied", "只能创建两张指定表")
+                    primary = '任务ID' if flags['--name'] == '阶段3任务登记' else '事件ID'
+                    if json.loads(flags['--fields']) != [{'name': primary, 'type': 'text'}]:
+                        _fail('setup_denied', '建表只能指定固定的文本主字段')
                 return
             self._table(flags.get("--table-id"))
             common = ("--as", "--base-token", "--table-id")
@@ -796,7 +799,9 @@ class _CLIExecutor:
         allowed_names = ("协作记录",) if self.registry.get('env_id') == 'rdos_formal' else ("阶段3任务登记", "阶段3协作记录")
         if not self.setup or name not in allowed_names:
             _fail("setup_denied", "仅允许本轮两张指定表")
-        return self._run(["base", "+table-create", "--as", "user", "--base-token", self.registry["base_token"], "--name", name], mutation=True)
+        primary = '任务ID' if name == '阶段3任务登记' else '事件ID'
+        return self._run(["base", "+table-create", "--as", "user", "--base-token", self.registry["base_token"],
+                          "--name", name, '--fields', _json([{'name': primary, 'type': 'text'}])], mutation=True)
 
     def fields(self, table):
         return _data(self._run(["base", "+field-list", *self._table(table), "--limit", "100", "--offset", "0"]))

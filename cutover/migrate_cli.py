@@ -155,6 +155,39 @@ def save_manifest(path, resources):
         stream.flush(); os.fsync(stream.fileno())
 
 
+def recover_local_table_rejection(executor, tables, journal):
+    """Recover only the pre-2.0 command rejected for its missing --fields.
+
+    Re-run that exact syntax in dry-run mode with the unchanged pinned CLI.
+    Network/permission errors or an unknown response cannot clear a send marker.
+    """
+    if unique_named(tables, '协作记录') or journal.get('schema:event_table') != 'sent':
+        raise migration.MigrationError('建表现场不符合本地参数拒绝恢复条件')
+    argv = [executor.binary, 'base', '+table-create', '--as', 'user',
+            '--base-token', formal.BASE_TOKEN, '--name', '协作记录', '--dry-run']
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=40,
+                            cwd=str(executor.runtime), env=dict(executor.child_env))
+    try:
+        response = json.loads(result.stdout)
+    except ValueError as exc:
+        raise migration.MigrationError('未证明本地参数拒绝，仍须核对') from exc
+    expected = {'type': 'validation', 'subtype': 'invalid_argument',
+                'message': 'required flag(s) "fields" not set'}
+    if not result.returncode or response.get('ok') is not False or response.get('error') != expected:
+        raise migration.MigrationError('未证明本地参数拒绝，仍须核对')
+    # Preserve the original marker and deterministic rejection before allowing
+    # the corrected, explicitly schema-bound call to be sent for the first time.
+    proof = {'previous_journal': dict(journal.values), 'error': expected,
+             'cli_sha256': executor.binary_hash,
+             'response_sha256': hashlib.sha256(result.stdout.encode()).hexdigest(),
+             'observed_at': datetime.now(timezone.utc).isoformat()}
+    proof_path = journal.path.with_name('formal_schema_local_rejection.json')
+    if proof_path.exists() or proof_path.is_symlink():
+        raise migration.MigrationError('恢复证据已存在，须核对原恢复结果')
+    save_manifest(proof_path, proof)
+    journal.mark('schema:event_table', 'not_sent')
+
+
 def main():
     parser = argparse.ArgumentParser(description='RDOS 2.0 original-Base migration')
     parser.add_argument('--resources', type=Path, required=True)
@@ -162,11 +195,12 @@ def main():
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--prepare-schema', action='store_true')
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--recover-schema-rejection', action='store_true')
     parser.add_argument('--plan-sha256')
     parser.add_argument('--source-sha256')
     args = parser.parse_args()
-    if sum((args.check, args.prepare_schema, args.apply)) != 1:
-        parser.error('specify exactly one of --check, --prepare-schema or --apply')
+    if sum((args.check, args.prepare_schema, args.apply, args.recover_schema_rejection)) != 1:
+        parser.error('specify exactly one migration action')
     if os.environ.get('RDOS_RUNTIME_MODE') != 'production' or not feishu._FORMAL:
         raise migration.MigrationError('正式迁移须显式启用 production 模式')
     resources = json.loads(require_file(args.resources).read_text(encoding='utf-8'))
@@ -199,6 +233,13 @@ def main():
         elif args.decisions:
             summary['plan_pending_schema'] = True
         print(json.dumps(summary, ensure_ascii=False))
+        return
+    if args.recover_schema_rejection:
+        if args.source_sha256 != source_hash:
+            raise migration.MigrationError('原任务快照已变化，停止恢复')
+        journal = migration.FileJournal(state_root / 'runtime/formal_migration_journal.json')
+        recover_local_table_rejection(executor, tables, journal)
+        print(json.dumps({'status': 'local_validation_rejection_verified', 'remote_mutations': 0}))
         return
     service = subprocess.run(['systemctl', 'is-active', 'baite-rdos'], check=False,
                              capture_output=True, text=True)

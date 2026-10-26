@@ -45,8 +45,10 @@ class FileJournal:
         return self.values.get(key)
 
     def mark(self, key, value):
-        if value not in ('sent', 'verified'):
+        if value not in ('sent', 'verified', 'not_sent'):
             raise MigrationError('迁移操作状态无效')
+        if value == 'not_sent' and (key != 'schema:event_table' or self.values.get(key) != 'sent'):
+            raise MigrationError('只有已证明本地拒绝的建表调用可恢复为未发送')
         if self.values.get(key) == 'verified' and value != 'verified':
             raise MigrationError('已核对操作不能回退')
         self.values[key] = value
