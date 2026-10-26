@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +43,17 @@ def unique_named(rows, name):
 
 def table_id(row):
     return row.get('table_id', row.get('id', '')) if isinstance(row, dict) else ''
+
+
+def read_created_named(read, name):
+    # Schema metadata can lag creation. Only repeat independent reads, never
+    # the mutation; unreadable/ambiguous results still stop the migration.
+    for attempt in range(5):
+        rows = read()
+        found = unique_named(rows, name)
+        if found or attempt == 4:
+            return rows, found
+        time.sleep(1)
 
 
 def make_executor(resources, state_root):
@@ -82,6 +94,8 @@ def ensure_table(executor, tables, journal):
         token = table_id(existing)
         if not token or token == formal.TASK_TABLE:
             raise migration.MigrationError('协作记录表标识无效')
+        if journal.get('schema:event_table') == 'sent':
+            journal.mark('schema:event_table', 'verified')
         return token
     if journal.get('schema:event_table') == 'sent':
         raise migration.MigrationError('建表结果待核对，不能再次创建')
@@ -90,7 +104,7 @@ def ensure_table(executor, tables, journal):
         executor.create_table('协作记录')
     except Exception:
         pass  # The response may be lost; only a fresh table list can decide.
-    existing = unique_named(executor.tables(), '协作记录')
+    _, existing = read_created_named(executor.tables, '协作记录')
     if not existing or not table_id(existing):
         raise migration.MigrationError('建表尚未独立读回，停止')
     journal.mark('schema:event_table', 'verified')
@@ -103,9 +117,11 @@ def ensure_fields(executor, table, names, journal):
         return result.get('items', result.get('fields', []))
     existing = current()
     for name in names:
-        if unique_named(existing, name):
-            continue
         key = 'schema:' + table + ':' + name
+        if unique_named(existing, name):
+            if journal.get(key) == 'sent':
+                journal.mark(key, 'verified')
+            continue
         if journal.get(key) == 'sent':
             raise migration.MigrationError('字段建立结果待核对，不能再次创建')
         journal.mark(key, 'sent')
@@ -113,8 +129,8 @@ def ensure_fields(executor, table, names, journal):
             executor.create_field(table, name)
         except Exception:
             pass
-        existing = current()
-        if not unique_named(existing, name):
+        existing, found = read_created_named(current, name)
+        if not found:
             raise migration.MigrationError('字段尚未独立读回，停止')
         journal.mark(key, 'verified')
 

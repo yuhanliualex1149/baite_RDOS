@@ -49,6 +49,23 @@ class SchemaExecutor:
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_delayed_schema_visibility_retries_only_reads(self):
+        class DelayedSchema(SchemaExecutor):
+            remaining = 2
+            def fields(self, table):
+                rows = super().fields(table)
+                if self.fields_created and self.remaining:
+                    self.remaining -= 1
+                    return {'items':[]}
+                return rows
+        executor = DelayedSchema()
+        journal = Journal()
+        with patch.object(migrate_cli.time, 'sleep') as sleep:
+            migrate_cli.ensure_fields(executor,'tblOriginal',('标题',),journal)
+        self.assertEqual(executor.fields_created,1)
+        self.assertEqual(sleep.call_count,2)
+        self.assertEqual(journal['schema:tblOriginal:标题'],'verified')
+
     def test_proven_local_missing_schema_rejection_can_resume_without_erasing_evidence(self):
         with tempfile.TemporaryDirectory() as folder:
             journal = FileJournal(Path(folder) / 'journal.json')

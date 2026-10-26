@@ -143,7 +143,10 @@ def plan(rows, decisions, resources):
 
 
 def _same_columns(actual, desired):
-    return all(actual.get(key) == value for key, value in desired.items())
+    # All added columns are text fields. Feishu reads a cleared text cell as
+    # null; that is equivalent only to the explicitly empty string we wrote.
+    return all(actual.get(key) == value or (value == '' and actual.get(key) is None)
+               for key, value in desired.items())
 
 
 def archive_initial_memory(conn):

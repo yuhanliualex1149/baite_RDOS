@@ -85,6 +85,20 @@ class FormalMigrationTests(unittest.TestCase):
         self.assertEqual(transport.writes, 18)
         self.assertEqual(transport.get_record('recMigration00')['fields']['项目ID'], None)
 
+    def test_empty_text_read_as_null_is_verified_without_a_second_write(self):
+        class FeishuTextTransport(Transport):
+            def update_record(self, record_id, fields):
+                super().update_record(record_id, {k: None if v == '' else v for k,v in fields.items()})
+        plan = migration.plan(self.rows, self.decisions, self.resources)
+        transport = FeishuTextTransport(self.rows)
+        journal = Journal()
+        self.assertEqual(len(migration.apply_remote(plan, transport, journal)),18)
+        self.assertIsNone(transport.rows['recMigration00']['fields']['执行节点'])
+        migration.apply_remote(plan, transport, journal)
+        self.assertEqual(transport.writes,18)
+        self.assertFalse(migration._same_columns({'状态':None},{'状态':'active'}))
+        self.assertFalse(migration._same_columns({'记录数据':None},{'记录数据':'{}'}))
+
     def test_uncertain_write_without_visible_result_never_resends(self):
         plan = migration.plan(self.rows, self.decisions, self.resources)
         transport = Transport(self.rows)
