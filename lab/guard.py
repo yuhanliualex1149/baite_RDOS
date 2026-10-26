@@ -8,6 +8,7 @@ import threading
 import contextvars
 import hashlib
 import socket
+import shutil
 import weakref
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -186,8 +187,12 @@ def install(root: Path, port: int) -> None:
         read_files.add(Path(_cli_executor.binary))
     helper = root/'code/node_skills/rdos-workflow/scripts/peer_crypto.cjs'
     bundled = Path('/Users/alexliu/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')
-    if helper.is_file() and bundled.is_file() and not helper.is_symlink():
-        binary = bundled.resolve()
+    linux_node = Path('/www/server/nodejs/v26.1.0/bin/node')
+    discovered = shutil.which('node')
+    trusted_node = (bundled if bundled.is_file() else
+                    linux_node if discovered and Path(discovered).resolve() == linux_node.resolve() else None)
+    if helper.is_file() and trusted_node and trusted_node.is_file() and not helper.is_symlink():
+        binary = trusted_node.resolve()
         _peer_crypto = {'argv':(str(binary),str(helper.resolve())),
                         'hashes':{str(binary):hashlib.sha256(binary.read_bytes()).hexdigest(),
                                   str(helper.resolve()):hashlib.sha256(helper.read_bytes()).hexdigest()}}
