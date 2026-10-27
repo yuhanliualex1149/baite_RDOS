@@ -185,6 +185,38 @@ class FormalAppStartupTests(unittest.TestCase):
                         event = phase3_backend.get_backend().list_events()[0]
                         assert event['verified_actor']['identity_mode'] == 'role_test'
                         assert central_store.user('mem_p6BbcYJrwAcv_M5Y')['identity_mode'] == 'role_test'
+                        # Exercise the formal node receipt and automatic close,
+                        # whose private provenance is a shared-account claim.
+                        from server import phase3_service, rdos_contract
+                        # Only the external CLI response is synthetic. Nodes
+                        # write Feishu directly; the node HTTP path is closed.
+                        receipt = {'id':'formal-node-receipt','operation_id':'formal-node-receipt',
+                            **phase3_service.environment(),'project_id':'project_rdos',
+                            'event_type':'submission','body':'配置完成；到点运行另验。','result_status':'completed',
+                            'claimed_node_id':'node_yuhan','origin':'node_report','artifact_refs':[], 'created_at':db.utc_now(),
+                            'recipients':['agent'],'task_refs':[{'task_id':item['task_id'],'requirements_version':1}]}
+                        wire_receipt = rdos_contract.encode(receipt,phase3_backend.get_backend().resources)
+                        records['tblFormalEvents123']['recNodeReceipt']={'record_id':'recNodeReceipt','fields':{
+                            '事件ID':receipt['id'],'类型':'submission','自报节点':'node_yuhan',
+                            '任务引用':phase3_feishu._json(receipt['task_refs']),'操作ID':receipt['operation_id'],
+                            '记录数据':json.dumps(wire_receipt,ensure_ascii=False)}}
+                        synchronized = client.post('/baite-rdos/api/central/phase3/sync',headers=headers,
+                            json={'operation_id':'formal-node-result-sync'})
+                        assert synchronized.status_code == 200, synchronized.text[:500]
+                        task = phase3_backend.get_backend().read_task(item['task_id'])
+                        assert task['business_status']=='closed' and task['receipt_status']=='verified', phase3_store.items('quarantine')
+                        assert task['quality_status']=='not_evaluated'
+                        assert all(o['status']=='succeeded' for o in central_store.items('operation')
+                                   if o.get('prepared_event'))
+                        settled = next(e for e in phase3_backend.get_backend().list_events()
+                                       if e.get('origin')=='task_execution_grant')
+                        assert settled['verified_actor']['identity_mode']=='shared_account_claim'
+                        grant_key=item['task_id']+'@1'
+                        grant=phase3_store.get('grant',grant_key)
+                        phase3_store.put('grant',grant_key,{**grant,'requirements_hash':'mismatched'})
+                        untrusted = next(e for e in phase3_backend.get_backend().list_events() if e['id']==settled['id'])
+                        assert untrusted['verified_actor']['identity_mode']=='actual'
+                        phase3_store.put('grant',grant_key,grant)
                         # A changed public body cannot inherit the original
                         # operation's private provenance or trusted event hash.
                         raw = next(iter(records['tblFormalEvents123'].values()))

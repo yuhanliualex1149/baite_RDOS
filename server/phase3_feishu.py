@@ -993,9 +993,27 @@ class FeishuBackend:
                 operation_id = str(wire.get('operation_id', ''))
                 operation = central_store.get('operation', operation_id[:-6]) if operation_id.endswith(':event') else None
                 prepared = (operation or {}).get('prepared_event')
-                if (operation or {}).get('authorization') and isinstance(prepared, dict) and rdos_contract.encode(prepared, self.resources) == wire:
+                binding = (operation or {}).get('authorization')
+                authorized = isinstance(binding, dict) and central_store.digest(binding) == operation.get('authorization_hash')
+                # Automatic result settlement is authorized by the original
+                # task grant, not by a new human confirmation. Its actor is
+                # still only a shared-account node claim, never a proven user.
+                if not authorized and (operation or {}).get('authority_kind') == 'task_execution_grant':
+                    from server import phase3_store
+                    task_id, version = operation.get('task_id'), operation.get('requirements_version')
+                    grant = phase3_store.get('grant', str(task_id) + '@' + str(version)) or {}
+                    history = next((v for v in phase3_store.history(task_id)
+                                    if v.get('requirements_version') == version), {}) if task_id else {}
+                    requirements = {k: v for k, v in history.items() if k != 'requirements_version'}
+                    actor = (prepared or {}).get('verified_actor') or {}
+                    authorized = (bool(operation.get('dispatched_at')) and bool(history)
+                        and grant.get('operation_id') == operation.get('grant_operation_id')
+                        and grant.get('requirements_hash') == operation.get('requirements_hash')
+                        and central_store.digest(requirements) == grant.get('requirements_hash')
+                        and actor.get('id') in requirements.get('executor_node_ids', []))
+                if authorized and isinstance(prepared, dict) and rdos_contract.encode(prepared, self.resources) == wire:
                     mode = (prepared.get('verified_actor') or {}).get('identity_mode')
-                    if mode in ('actual', 'role_test') and isinstance(value.get('verified_actor'), dict):
+                    if mode in ('actual', 'role_test', 'shared_account_claim') and isinstance(value.get('verified_actor'), dict):
                         value['verified_actor']['identity_mode'] = mode
             self._check_scope(value)
             fields = row.get("fields", {})
