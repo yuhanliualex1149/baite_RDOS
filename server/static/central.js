@@ -170,7 +170,7 @@
         if(response.status===401){message=path==='/auth/login'?'账号或密码不正确，请检查后重试。':'登录已过期，请重新登录。';if(state.user&&session===state.session){captureLoginDraft();resetSession(message);}}
         else if(d?.code==='session_changed'){message='当前登录账号已变化，请重新登录。';if(session===state.session)resetSession(message);}
         else if(response.status===403)message='当前账号不能执行此操作。请联系管理员核对权限。';
-        else if(response.status===422)message='请检查表单中必填内容和格式，再重新提交。';
+        else if(response.status===422&&(!d?.code||!message||!/[\u3400-\u9fff]/.test(message)))message='请检查表单中必填内容和格式，再重新提交。';
         else if(!message||!/[\u3400-\u9fff]/.test(message))message=response.status>=500?'服务暂时无法完成操作，请稍后重试。':'操作未完成，请检查当前内容后重试。';
         if(!developerMode&&/实验环境|合成|阶段\s*[0-9]|role_test|node_lab/.test(message))message='当前操作无法完成，请联系管理员检查服务状态。';
         const error=new APIError(message,response.status,d?.code||'',technical);error.projectId=d?.project_id;throw error;
@@ -1457,7 +1457,7 @@
     if(b.dataset.phase3Action)showPhase3Action(phase3Tasks().find(t=>phase3TaskId(t)===b.dataset.phase3Id),b.dataset.phase3Action);
     if(b.dataset.phase3Draft){const d=phase3Drafts().find(d=>d.id===b.dataset.phase3Draft);if(d)showPhase3Action(phase3Tasks().find(t=>phase3TaskId(t)===d.task_id)||{...d.payload,task_id:d.task_id},d.base_requirements_version?'update':'start',d);}
     if(b.dataset.phase3History)showPhase3History(b.dataset.phase3History,b);
-    if(b.dataset.phase3Copy)busy(b,async()=>{const id=b.dataset.phase3Copy,url=new URL('nodes/'+encodeURIComponent(id)+'/start',document.baseURI||location.href).href;await navigator.clipboard.writeText('请读取 RDOS 接入说明并按其中的执行 Skill 检查当前任务：'+url+'\n本节点：'+id+'。使用已有飞书连接读取任务；连接失败时按接入说明排查。');toast('已复制接入短指令。');},'member-management-error');
+    if(b.dataset.phase3Copy)busy(b,async()=>{const id=b.dataset.phase3Copy,url=new URL('nodes/'+encodeURIComponent(id)+'/start',document.baseURI||location.href).href;await navigator.clipboard.writeText('请读取 RDOS 接入说明，按本客户端的 Skill 机制持久安装并启用 RDOS 执行 Skill，再检查当前任务：'+url+'\n本节点：'+id+'。使用已有飞书连接；无任务时如实报告，不自行创建定时安排。');toast('已复制接入短指令。');},'member-management-error');
     if(b.dataset.tab){state.tab=b.dataset.tab;document.querySelectorAll('.tab').forEach(t=>{t.classList.toggle('active',t.dataset.tab===state.tab);t.setAttribute('aria-selected',String(t.dataset.tab===state.tab));});document.querySelectorAll('.tab-view').forEach(v=>v.classList.toggle('hidden',v.id!=='view-'+state.tab));}
     if(b.dataset.chatRetry){const pending=pendingChat();if(pending?.id===b.dataset.chatRetry)sendChat(pending);}
     if(b.dataset.chatExample){$('chat-message').value=b.dataset.chatExample;$('chat-message').focus();}

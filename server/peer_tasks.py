@@ -302,7 +302,7 @@ def ingest_system_event(raw,*,tasks=None):
         if not identity:raise PeerError('peer_not_bound','节点尚未绑定')
         claim=verified(raw.get('peer_ack'),identity['public_key'])
         public=rdos_contract.public_view(node['node_id'],backends.get_backend().registry())
-        if claim.get('skill_version') not in ('1.1.0','1.1.1','1.1.2') or claim != {'node_id':public,'binding_id':identity['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
+        if claim.get('skill_version') not in ('1.1.0','1.1.1','1.1.2','1.1.3') or claim != {'node_id':public,'binding_id':identity['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
             raise PeerError('invalid_ack','节点能力回执与当前绑定不一致')
         identity.update(ready=True,skill_version=claim['skill_version'])
         if identity.get('binding_source')=='approved_node_public_key':

@@ -276,7 +276,12 @@ class Workflow(PeerMixin):
             except WorkflowError as exc:
                 if exc.code!="unregistered_project":raise
                 for reference in value["task_refs"]:
-                    task=self.task(reference.get("task_id"))
+                    try:task=self.task(reference.get("task_id"))
+                    except WorkflowError as unavailable:
+                        # Scoped reads exclude other projects. Their receipts
+                        # do not prove that the shared table lost a task.
+                        if unavailable.code=="task_unavailable":raise exc
+                        raise
                     if task.get("dispatch_source")!="peer" or task["project_id"]!=value["project_id"]:raise
                     if value.get("claimed_node_id") not in task["executor_node_ids"]:raise
                 return self._peer_project(task)

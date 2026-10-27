@@ -141,6 +141,20 @@ class FormalAppStartupTests(unittest.TestCase):
                         old_project = next(p for p in projects.json()['items'] if p['id'] == FINANCE_PROJECT)
                         assert old_project['name'] == '原财赋项目'
                         assert old_project['node_ids'] == ['node_xiaofei'], old_project
+                        # The original tenant folder is a registered location;
+                        # adding a node must not relocate or re-register it.
+                        legacy_url='https://shbebetter.feishu.cn/drive/folder/'+FINANCE_FOLDER
+                        saved=central_store.get('project',FINANCE_PROJECT)
+                        saved.update(folder_url=legacy_url)
+                        central_store.put('project',FINANCE_PROJECT,saved)
+                        edited=client.patch('/baite-rdos/api/central/projects/'+FINANCE_PROJECT,
+                            headers={'Origin':'https://yjmt.cn'}, json={'operation_id':'formal-finance-members',
+                                'expected_revision':old_project['revision'], 'name':old_project['name'],
+                                'description':old_project.get('description',''), 'folder_url':legacy_url,
+                                'node_ids':['node_xiaofei','node_yuhan']})
+                        assert edited.status_code==200,edited.text
+                        assert edited.json()['item']['folder_url']==legacy_url
+                        assert edited.json()['item']['node_ids']==['node_xiaofei','node_yuhan']
                         manifest = client.get('/baite-rdos/nodes/node_xiaofei/manifest')
                         assert manifest.status_code == 200, manifest.text[:300]
                         assert manifest.json()['node_id'] == 'node_xiaofei'

@@ -245,13 +245,19 @@ def resource_scope(project_id, registry, *, published_tasks=None):
     return result
 
 
-def _folder(value):
+def _folder(value, previous=None):
     if not isinstance(value, str):
         _error('invalid_project', '项目工作文件夹须为飞书目录链接', 422)
     if not value.strip():
         return '', ''
     parsed = urlsplit(value.strip())
     match = re.fullmatch(r'/drive/folder/([A-Za-z0-9]+)', parsed.path.rstrip('/'))
+    # Editing a migrated project does not re-register its unchanged location.
+    if (previous and value.strip() == previous.get('folder_url')
+            and parsed.scheme == 'https' and not parsed.fragment and match
+            and re.fullmatch(r'[A-Za-z0-9-]+\.feishu\.cn', parsed.netloc)
+            and match[1] == previous.get('folder_id')):
+        return previous['folder_url'], previous['folder_id']
     if (parsed.scheme != 'https' or parsed.netloc != 'scn33386s7ui.feishu.cn'
             or not match or parsed.fragment):
         _error('invalid_project', '请使用当前飞书空间的项目文件夹链接', 422)
@@ -272,7 +278,7 @@ def _fields(payload, previous=None):
     registered = {node['node_id'] for node in local.node_registry()}
     if not isinstance(nodes, list) or any(not isinstance(node, str) or node not in registered for node in nodes):
         _error('invalid_project', '请选择已登记的参与节点', 422)
-    folder_url, folder_id = _folder(payload.get('folder_url', previous.get('folder_url', '')))
+    folder_url, folder_id = _folder(payload.get('folder_url', previous.get('folder_url', '')), previous)
     return {'name': name.strip(), 'description': description.strip(), 'node_ids': list(dict.fromkeys(nodes)),
             'member_ids': [node['member_id'] for node in local.node_registry() if node['node_id'] in nodes],
             'folder_url': folder_url, 'folder_id': folder_id,

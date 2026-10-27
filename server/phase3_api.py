@@ -327,10 +327,10 @@ def node_start(node_id: str, request: Request):
     text=f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RDOS 工作接入 · {label}</title><style>body{{font:16px/1.8 system-ui;max-width:800px;padding:24px;margin:auto;color:#222}}a{{overflow-wrap:anywhere}}</style>
 <main><h1>RDOS 工作接入 · {label}</h1><p>节点：<code>{escape(public_id)}</code>。通过飞书领取当前任务、读取资料并提交结果。</p>
-<h2>启用执行规范</h2><p>读取<a href="{manifest_href}">节点配置与 Skill 校验信息</a>，下载并按客户端原生方式启用 <a href="{package_href}">RDOS 执行 Skill</a>。规范、业务校验脚本和 JSON 模板均在包内，复用已有飞书连接。</p>
+<h2>启用执行规范</h2><p>读取<a href="{manifest_href}">节点配置与 Skill 校验信息</a>，下载并按客户端原生 Skill 机制持久安装、启用 <a href="{package_href}">RDOS 执行 Skill</a>，确认后续会话可以调用；只在临时目录运行不算安装完成。保留已有检查点，不修改全局或其他项目规则。规范、业务校验脚本和 JSON 模板均在包内，复用已有飞书连接。项目参与范围调整后，重新取得本节点当前配置，保留工作检查点。</p>
 <h2>节点互派</h2><p>研究员明确要求向其他节点派发工作时，由 Skill 核对条件、直接发布到原任务表并独立读回。首次启用时，Skill 按接入任务在节点本地生成密钥并自动提交公钥登记。管理员在成员卡片确认节点归属后，节点下次检查自动核对。私钥不离开节点，无需传递文件；未完成登记的节点继续原有任务流程。已发布任务的调整、暂停、恢复与取消仍交中央办理。</p>
 <h2>开始工作</h2><ol><li>使用 Skill 检查分配给本节点的当前有效任务。无任务就报告无任务。</li><li>按任务指定的目标、资料、交付对象和完成方式执行；在关键操作前重新核对要求版本与状态。</li><li>暂停或取消后停止新增工作；要求变化时保留旧成果，按变更说明处理。</li><li>进展、问题、Review 和回执写入同一张协作记录表；长篇成果引用确切版本。有效完成回执经中央核对后按任务规则收尾。</li></ol>
 <h2>飞书入口</h2><ul>{links}</ul>
 <h2>无法读取飞书时</h2><p>先复用已有飞书工具或 CLI，核对登录及指定对象读取能力。已有 lark-cli 可执行 <code>lark-cli auth status --verify</code>；需要重新授权时通过官方登录页由使用者核对账号和权限。不要索取密码、验证码或 Token。</p><p>若工具缺失，报告具体缺项及<a href="https://github.com/larksuite/cli">飞书官方 CLI 说明</a>，由使用者决定接入。成功标准是完整读到登记资料和任务；写回另以有效结果及独立读回核对。</p>
-<p>任务检查由客户端原生定时任务或使用者提示触发。已有计划仅在有效任务要求时更新，避免重复创建。通过飞书交换业务，不读取 Panel 文件或其他节点目录。</p></main></html>'''
+<p>接入本身不自动生成业务任务或定时安排。首次定时配置由管理员通过任务登记明确下发；已有计划仅在有效任务要求时原位更新，避免重复创建。任务检查由客户端原生定时任务或使用者提示触发。通过飞书交换业务，不读取 Panel 文件或其他节点目录。</p></main></html>'''
     return HTMLResponse(text,headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})

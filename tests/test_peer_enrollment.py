@@ -54,7 +54,7 @@ class EnrollmentSkillTest(unittest.TestCase):
         self.assertEqual(installed['private_key'],operation['private_key'])
         self.assertEqual(installed['binding_id'],'binding_approved')
         ack=[json.loads(item['fields']['记录数据']) for item in self.transport.events if item['fields']['类型']=='peer_capability_ack'][0]
-        self.assertEqual(json.loads(ack['peer_ack']['payload_json'])['skill_version'],'1.1.2')
+        self.assertEqual(json.loads(ack['peer_ack']['payload_json'])['skill_version'],'1.1.3')
         self.workflow.check();self.assertEqual(self.transport.append_count,2)
 
     def test_invalid_task_cannot_generate_a_new_key(self):

@@ -626,6 +626,26 @@ class NodeBusinessTests(unittest.TestCase):
         self.assertEqual(error.exception.code,'not_assigned')
         self.assertEqual(self.transport.create_count+self.transport.append_count,0)
 
+    def test_unassigned_project_receipts_do_not_report_missing_tasks(self):
+        registration=manifest()
+        registration['projects']=[]
+        workflow=node.Workflow(registration,self.transport,self.workflow.state)
+        event={'protocol_version':2,'workspace_id':'ws_rdos','project_id':'project_rdos',
+            'id':'evt_other_task','operation_id':'other-task-op','claimed_node_id':'node_workbuddy',
+            'event_type':'submission','task_refs':[{'task_id':'task_example','requirements_version':1}],
+            'body':'其他节点的有效结果'}
+        self.transport.events=[row(event,'other-receipt','event')]
+        checked=workflow.check()
+        self.assertEqual(checked['tasks'],[])
+        self.assertEqual(checked['quarantined_records'],[])
+        self.assertEqual(checked['state'],'no_work')
+        self.assertEqual(self.transport.append_count+self.transport.create_count,0)
+        with self.assertRaises(node.WorkflowError):workflow.prepare('task_example')
+        malformed=row(event,'bad-receipt','event')
+        malformed['fields']['自报节点']='冒名节点'
+        self.transport.events.append(malformed)
+        self.assertEqual(workflow.check()['quarantined_records'],[{'record_id':'bad-receipt','code':'record_conflict'}])
+
     def test_same_folder_does_not_merge_projects_or_reuse_other_task_completion(self):
         workflow=self.multi_workflow(multi_manifest(same_folder=True))
         workflow.submit('task_example','completed','第一项目完成','complete')

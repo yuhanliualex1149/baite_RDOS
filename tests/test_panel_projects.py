@@ -102,6 +102,26 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
+    def test_registered_legacy_folder_is_preserved_when_editing_members(self):
+        self.check('''
+second=create_project()
+legacy_url='https://shbebetter.feishu.cn/drive/folder/LegacyFinance123'
+stored=central.get('project',second['id'])
+stored.update(folder_url=legacy_url,folder_id='LegacyFinance123',folder_source='explicit')
+central.put('project',second['id'],stored)
+changed=projects.update_project(second['id'],{'name':second['name'],'description':'调整参与成员',
+    'node_ids':[node['node_id'],other['node_id']],'folder_url':legacy_url},admin,'legacy-members',1)
+assert changed['folder_url']==legacy_url and changed['folder_id']=='LegacyFinance123'
+assert changed['node_ids']==[node['node_id'],other['node_id']] and changed['revision']==2
+assert projects.update_project(second['id'],{'description':'只编辑说明'},admin,'legacy-description',2)['folder_url']==legacy_url
+denied('invalid_project',lambda:projects.update_project(second['id'],
+    {'folder_url':'https://shbebetter.feishu.cn/drive/folder/AnotherFolder'},admin,'different-legacy-folder',3))
+denied('invalid_project',lambda:create_project('new-legacy-folder',folder_url=legacy_url))
+denied('invalid_project',lambda:projects.update_project(second['id'],
+    {'folder_url':'https://shbebetter.feishu.cn.evil.invalid/drive/folder/LegacyFinance123'},admin,'foreign-folder',3))
+assert projects.get_project(second['id'])['folder_url']==legacy_url
+''')
+
     def test_deactivation_pauses_before_inactive_and_reenable_does_not_resume(self):
         self.check('''
 async def scenario():
