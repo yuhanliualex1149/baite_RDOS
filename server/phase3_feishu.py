@@ -984,6 +984,19 @@ class FeishuBackend:
                 value = wire
             else:
                 raise ValueError('旧协议记录只允许归档读取')
+            if _FORMAL and table == self.resources['events_table']:
+                # Account labels from the old system are private provenance,
+                # omitted from the wire contract. Restore that one label only
+                # from the authorized original operation when its *entire*
+                # public event matches. Never turn a remote claim into proof.
+                from server import central_store
+                operation_id = str(wire.get('operation_id', ''))
+                operation = central_store.get('operation', operation_id[:-6]) if operation_id.endswith(':event') else None
+                prepared = (operation or {}).get('prepared_event')
+                if (operation or {}).get('authorization') and isinstance(prepared, dict) and rdos_contract.encode(prepared, self.resources) == wire:
+                    mode = (prepared.get('verified_actor') or {}).get('identity_mode')
+                    if mode in ('actual', 'role_test') and isinstance(value.get('verified_actor'), dict):
+                        value['verified_actor']['identity_mode'] = mode
             self._check_scope(value)
             fields = row.get("fields", {})
             expected = {"操作ID": wire.get("operation_id", "")}
@@ -1101,8 +1114,11 @@ class FeishuBackend:
             matches = _visible(lambda: [r for r in self.executor.records(table) if self._cell(r.get("fields", {}).get("操作ID")) == opid])
             if not matches:
                 _fail("write_uncertain", "写入可能已提交，尚未独立读回；不会重复发送")
-            verified = [self._decode(self.executor.get_record(table, r["record_id"]), table) for r in matches]
-            if any(_payload(r) != desired for r in verified):
+            def read_complete():
+                result = [self._decode(self.executor.get_record(table, r["record_id"]), table) for r in matches]
+                return result if all(_payload(r) == desired for r in result) else []
+            verified = _visible(read_complete)
+            if not verified:
                 _fail("readback_mismatch", "记录完整正文独立读回不一致")
             self._save_operation(operations, opid, entry, state="verified", record_id=verified[0]["record_id"])
             return verified[0]

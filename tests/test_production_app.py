@@ -32,7 +32,7 @@ class FormalAppStartupTests(unittest.TestCase):
                 with sqlite3.connect(database) as conn:
                     conn.execute('CREATE TABLE central_users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, roles_json TEXT NOT NULL, password_hash TEXT NOT NULL, identity_mode TEXT NOT NULL, enabled INTEGER NOT NULL, created_at TEXT NOT NULL)')
                     conn.executemany('INSERT INTO central_users VALUES(?,?,?,?,?,?,?,?)', [
-                        ('mem_p6BbcYJrwAcv_M5Y', 'admin', 'Formal Admin', '["admin"]', db.hash_password('fixture-password-123'), 'actual', 1, '2026-01-01'),
+                        ('mem_p6BbcYJrwAcv_M5Y', 'admin', 'Formal Admin', '["admin"]', db.hash_password('fixture-password-123'), 'role_test', 1, '2026-01-01'),
                         ('mem_x_rLn9VBAe_z8xol', 'xiaofei', 'Xiaofei', '["researcher"]', 'placeholder', 'actual', 1, '2026-01-01'),
                         ('mem_g3nKLUxRovywCSTk', 'duoduo', 'Duoduo', '["researcher"]', 'placeholder', 'actual', 1, '2026-01-01'),
                     ])
@@ -181,6 +181,19 @@ class FormalAppStartupTests(unittest.TestCase):
                         assert repeated.status_code == 200, repeated.text[:500]
                         assert len(task_writes) == 1, task_writes
                         assert len(records[TASK_TABLE]) == 1 and len(records['tblFormalEvents123']) == 1
+                        from server import phase3_backend
+                        event = phase3_backend.get_backend().list_events()[0]
+                        assert event['verified_actor']['identity_mode'] == 'role_test'
+                        assert central_store.user('mem_p6BbcYJrwAcv_M5Y')['identity_mode'] == 'role_test'
+                        # A changed public body cannot inherit the original
+                        # operation's private provenance or trusted event hash.
+                        raw = next(iter(records['tblFormalEvents123'].values()))
+                        wire = json.loads(raw['fields']['记录数据'])
+                        wire['body'] += ' changed externally'
+                        raw['fields']['记录数据'] = json.dumps(wire,ensure_ascii=False)
+                        altered = phase3_backend.get_backend().list_events()[0]
+                        assert altered['verified_actor']['identity_mode'] == 'actual'
+                        assert altered['body'] != event['body']
                 with sqlite3.connect(database) as conn:
                     assert conn.execute('SELECT COUNT(*) FROM central_users').fetchone()[0] == 3
                     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='phase3_mock'").fetchone()[0] == 0
