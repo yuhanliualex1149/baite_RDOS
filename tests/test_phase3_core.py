@@ -275,6 +275,19 @@ async def scenario():
     assert result['record_revision']==1
     assert len(backend3.list_tasks())==1 and len(backend3.list_events())==1
     assert local.get('grant',result['id']+'@1')
+    assert local.get('draft',draft['id'])['status']=='published'
+    # Recover an already-succeeded operation whose display projection was
+    # lost by the former reconciliation path. Do not reissue any I/O.
+    draft['status']='draft';local.put('draft',draft['id'],draft)
+    def never_write(*args,**kwargs):raise AssertionError('verified task was resent')
+    backend3.write_task=never_write;backend3.append_event=never_write
+    again=await service.apply_task_action(draft['task_id'],'start',{'draft_id':draft['id'],'expected_hash':draft['draft_hash']},admin,'start-one',0,0)
+    assert again['record_revision']==1 and local.get('draft',draft['id'])['status']=='published'
+    assert len(backend3.list_tasks())==1 and len(backend3.list_events())==1
+    changed={**draft,'status':'draft','draft_hash':'a-newer-edit'}
+    local.put('draft',draft['id'],changed)
+    await service.apply_task_action(draft['task_id'],'start',{'draft_id':draft['id'],'expected_hash':draft['draft_hash']},admin,'start-one',0,0)
+    assert local.get('draft',draft['id'])==changed
 asyncio.run(scenario())
 ''')
 

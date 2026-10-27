@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import re
 from urllib.parse import urlparse
@@ -410,7 +411,42 @@ async def _reconcile_task(opid):
     return {'status':'verified', 'result':result}
 
 
+def _publish_verified_draft(task, opid, action):
+    """Restore only the draft projection bound to the original verified input.
+
+    Reconciliation already preserves the task grant in _commit_task. A lost
+    response must also retire its exact draft, including on a later replay of
+    an operation that has succeeded. This never sends business I/O.
+    """
+    if action not in ('start', 'update'):
+        return
+    operation = central.get('operation', opid) or {}
+    binding = operation.get('authorization') or {}
+    if (operation.get('status') != 'succeeded' or not binding
+            or backends.payload(operation.get('prepared_task') or {}) != backends.payload(task)):
+        return
+    base = binding.get('base') or {}
+    for draft in local.items('draft'):
+        if draft.get('task_id') != task['task_id'] or draft.get('status') != 'draft':
+            continue
+        request = {'task_id': task['task_id'], 'action': action,
+            'payload': {'draft_id': draft['id'], 'expected_hash': draft['draft_hash']},
+            'actor_id': binding.get('actor_id'), 'expected_revision': base.get('record_revision'),
+            'expected_requirements_version': base.get('requirements_version')}
+        if (central.digest(request) != binding.get('input_hash')
+                or central.digest({'action': operation['action'], 'payload': request}) != operation['payload_hash']):
+            continue
+        with db.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute("SELECT payload FROM phase3_local WHERE kind='draft' AND id=?", (draft['id'],)).fetchone()
+            if row and json.loads(row[0]) == draft:
+                draft['status'] = 'published'
+                conn.execute("UPDATE phase3_local SET payload=?,updated_at=? WHERE kind='draft' AND id=?",
+                    (json.dumps(draft, ensure_ascii=False), db.utc_now(), draft['id']))
+
+
 async def _presentation(task, opid, action):
+    _publish_verified_draft(task, opid, action)
     if action not in ('start','update','accept_close'):
         return task
     try:
