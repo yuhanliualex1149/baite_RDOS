@@ -4,41 +4,89 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>百特 RDOS</title>
+    <title>百特教育研发协同工作台 RDOS</title>
+    <base href="/" />
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="static/central.css?v=20261013-workbench" />
-    <script src="static/central.js?v=20261013-workbench-4" defer></script>
+    <link rel="stylesheet" href="static/central.css?v=panel-navigation-20261024" />
+    <script src="static/central.js?v=panel-navigation-20261024" defer></script>
   </head>
-  <body>
+  <body class="rdos-lab">
+    <aside class="lab-banner" role="status"><strong>RDOS 实验环境</strong><span id="lab-environment" class="developer-only"></span><p id="lab-capability" class="developer-only"></p></aside>
     <section id="login-view" class="login-shell">
       <form id="login-form" class="login-card">
-        <h1>登录百特 RDOS</h1>
+        <h1>登录 RDOS</h1><p>使用你的工作账号登录。</p>
 
         <label for="login-username">账号</label>
         <input id="login-username" autocomplete="username" required />
         <label for="login-password">密码</label>
         <input id="login-password" type="password" autocomplete="current-password" required />
-        <button id="login-submit" class="primary wide" type="submit">登录</button>
+        <button id="login-submit" disabled class="primary wide" type="submit">登录</button>
         <p id="login-error" class="form-error" role="alert"></p>
       </form>
     </section>
 
     <div id="app-view" class="app-shell hidden">
       <header class="topbar">
-        <div class="brand"><b>百特 RDOS</b></div>
-        <div class="top-actions"><span id="current-user"></span><button id="logout" class="quiet" type="button">退出登录</button></div>
+        <div class="brand"><b>百特教育研发协同工作台 RDOS</b></div>
+        <nav id="main-nav" class="main-nav" aria-label="工作区入口">
+          <button class="page-tab" data-page="projects" type="button">项目管理</button>
+          <button class="page-tab admin-only" data-page="agent" type="button">中央Agent</button>
+          <button class="page-tab" data-page="collaboration" type="button">协作与任务</button>
+          <button class="page-tab" data-page="knowledge" type="button">共享知识管理</button>
+          <button class="page-tab admin-only" data-page="global" type="button">设置</button>
+          <button class="page-tab" data-page="account" type="button">我的账号</button>
+          <button class="page-tab admin-only developer-only" data-page="work" type="button">测试工作</button>
+        </nav>
+        <div class="top-actions"><span id="current-user"></span></div>
       </header>
-      <nav id="main-nav" class="main-nav" aria-label="工作区入口">
-        <button class="page-tab active" data-page="onboard" type="button">Agent 接入</button>
-        <button class="page-tab" data-page="projects" type="button">项目</button>
-        <button class="page-tab admin-only" data-page="agent" type="button">中央 Agent</button>
-        <button class="page-tab admin-only" data-page="work" type="button">任务与反馈</button>
-        <button class="page-tab admin-only" data-page="global" type="button">全局设置</button>
-      </nav>
+      <div class="app-body">
+        <aside id="workspace-sidebar" class="workspace-sidebar" aria-label="页面功能">
+          <div class="sidebar-page" data-sidebar-page="projects">
+            <nav class="sidebar-nav" aria-label="项目管理">
+              <button class="subnav-item active" data-project-view-select="manage" type="button">管理项目</button>
+              <div id="project-navigation" class="sidebar-children"></div>
+            </nav>
+            <label class="check-label sidebar-option"><input id="show-inactive-projects" type="checkbox" />显示已停用项目</label>
+          </div>
+          <div class="sidebar-page hidden" data-sidebar-page="agent">
+            <div class="sidebar-section"><label for="chat-project">项目范围<select id="chat-project"><option value="">机构讨论</option></select></label></div>
+            <div class="sidebar-section"><label for="thread-select">当前对话<select id="thread-select"><option value="">尚无对话</option></select></label><p id="thread-status" class="small-note" role="status"></p></div>
+          </div>
+          <div class="sidebar-page hidden" data-sidebar-page="collaboration">
+            <div class="sidebar-section"><label for="phase3-project">当前项目<select id="phase3-project"></select></label></div>
+            <nav class="sidebar-nav" aria-label="协作与任务">
+              <button class="subnav-item active" data-collaboration-view-select="tasks" type="button">任务管理</button>
+              <button class="subnav-item" data-collaboration-view-select="events" type="button">协作管理</button>
+              <button class="subnav-item" data-collaboration-view-select="review" type="button">待审阅内容</button>
+            </nav>
+            <div id="phase3-summary" class="phase3-summary sidebar-summary"></div>
+            <p id="phase3-sync-last" class="small-note" role="status"></p>
+            <p id="phase3-sync-status" class="action-status" role="status"></p>
+          </div>
+          <div class="sidebar-page hidden" data-sidebar-page="knowledge">
+            <div id="knowledge-categories" class="knowledge-categories" role="tablist" aria-label="共享知识类别"></div>
+              <div id="knowledge-list" class="knowledge-list sidebar-children" aria-label="现行资料与 Skill"></div>
+          </div>
+          <div class="sidebar-page hidden" data-sidebar-page="global">
+            <nav class="sidebar-nav" aria-label="设置">
+              <button class="subnav-item active" data-settings-view-select="memory" type="button">记忆管理</button>
+              <button class="subnav-item" data-settings-view-select="accounts" type="button">账号管理</button>
+              <button class="subnav-item" data-settings-view-select="sync" type="button">同步管理</button>
+            </nav>
+          </div>
+          <div class="sidebar-page hidden" data-sidebar-page="account"><nav class="sidebar-nav" aria-label="我的账号"><span class="subnav-item active" aria-current="page">账号与安全</span></nav></div>
+          <div class="sidebar-page hidden" data-sidebar-page="work"><p class="sidebar-label">开发工作</p></div>
+        </aside>
       <main class="workspace">
         <div class="workspace-heading">
           <div><p id="page-eyebrow" class="sr-only" aria-hidden="true"></p><h1 id="page-title">Agent 接入</h1><p id="page-description" class="hidden"></p></div>
-          <div class="heading-actions"><button id="refresh-workspace" class="quiet" type="button">刷新</button></div>
+          <div class="heading-actions">
+            <button id="new-project" class="secondary admin-only hidden" type="button">创建项目</button>
+            <button id="new-thread" class="secondary admin-only hidden" type="button">新对话</button>
+            <button id="phase3-sync" class="secondary admin-only hidden" type="button" title="同步当前项目的任务和协作记录，并按完成规则核对结果">同步飞书内容</button>
+            <button id="phase3-new" class="primary admin-only hidden" type="button">起草任务</button>
+            <span id="knowledge-heading-controls" class="heading-context-actions hidden"></span>
+          </div>
         </div>
         <div id="workspace-error" class="notice error hidden" role="alert"></div>
 
@@ -82,7 +130,7 @@
         </section>
 
         <section id="page-projects" class="main-page hidden">
-          <div class="page-actions"><button id="new-project" class="primary admin-only" type="button">创建项目</button></div>
+          <h2 id="project-selection-heading" class="section-heading">现行项目</h2>
           <div id="project-list" class="project-cards"></div>
           <section id="project-instruction" class="panel instruction-box hidden">
             <div class="section-title"><h2 id="project-instruction-title">给 Agent 的说明</h2><button id="copy-project-instruction" class="primary" type="button">复制给我的 Agent</button></div>
@@ -94,7 +142,8 @@
         </section>
 
         <section id="page-agent" class="main-page hidden admin-only">
-          <p class="page-intro">讨论工作、查资料、安排任务。</p>
+
+
           <div id="connection-banner" class="notice hidden" role="status"></div>
           <article id="conversation-panel" class="panel conversation-panel">
             <div class="conversation-meta hidden" aria-hidden="true"><span id="agent-status"></span></div>
@@ -103,16 +152,16 @@
             <p id="chat-status" class="action-status" role="status"></p><p id="chat-error" class="form-error" role="alert"></p>
             <form id="chat-form" class="chat-form">
               <label for="chat-message" class="sr-only">给中央 Agent 的消息</label>
-              <textarea id="chat-message" rows="3" placeholder="想讨论什么？" required></textarea>
-              <div class="composer-footer"><small>Ctrl / ⌘ + Enter 发送</small><button id="chat-send" class="primary" type="submit">发送</button></div>
+              <div class="composer-row"><textarea id="chat-message" rows="1" placeholder="想讨论什么？" required></textarea><button id="chat-send" class="primary" type="submit">发送</button></div>
+              <small class="composer-hint">Enter 发送 · Shift + Enter 换行</small>
             </form>
           </article>
         </section>
 
-        <section id="page-work" class="main-page hidden admin-only">
+        <section id="page-work" class="main-page hidden admin-only developer-only"><p class="lab-page-note">这些任务、反馈和草稿来自本地测试后端。确认只写入本实验；不派发真实成员任务，也不代表客户端已接入。</p>
           <div class="work-scope"><span id="work-scope-label">全部项目</span><button id="work-show-all" class="quiet hidden" type="button">查看全部项目</button></div>
           <article class="panel work-panel">
-            <div class="work-toolbar"><div class="inline-actions"><button id="sync-feedback" class="secondary" type="button">更新反馈</button><button id="manual-run" class="quiet hidden" type="button">立即读取反馈</button></div><button id="new-task" class="primary" type="button">新建任务</button></div>
+            <div class="work-toolbar"><div class="inline-actions"><button id="sync-feedback" class="secondary" type="button">检查一次</button><button id="manual-run" class="quiet hidden" type="button">立即读取反馈</button></div><button id="new-task" class="primary" type="button">新建任务</button></div>
             <p id="sync-feedback-status" class="action-status" role="status"></p><p id="sync-feedback-error" class="form-error" role="alert"></p>
             <div class="tab-bar" role="tablist" aria-label="项目工作">
               <button id="tab-drafts" class="tab" role="tab" aria-selected="false" aria-controls="view-drafts" data-tab="drafts">任务草稿 <span id="draft-count"></span></button>
@@ -127,10 +176,47 @@
           </article>
         </section>
 
+        <section id="page-collaboration" class="main-page hidden">
+          <p id="phase3-error" class="form-error" role="alert"></p>
+          <div data-collaboration-view="tasks">
+            <section class="panel phase3-section"><div class="section-title"><h2>任务管理</h2><label class="check-label"><input id="phase3-show-closed" type="checkbox" />显示已关闭任务</label></div><div id="phase3-tasks" class="item-list"></div></section>
+          </div>
+          <div data-collaboration-view="events" class="hidden">
+            <div id="phase3-zones" class="phase3-zones"></div>
+            <section class="panel phase3-section"><div class="section-title"><h2>协作记录</h2></div><div id="phase3-events" class="item-list"></div></section>
+          </div>
+          <div data-collaboration-view="review" class="hidden">
+            <section class="panel phase3-section admin-only"><div class="section-title"><h2>待审阅草稿</h2></div><div id="phase3-drafts" class="item-list"></div></section>
+            <section class="panel phase3-section admin-only"><div class="section-title"><h2>需要处理</h2></div><div id="phase3-decisions" class="item-list"></div></section>
+            <section class="panel phase3-section"><div class="section-title"><h2>产出物</h2></div><div id="phase3-documents" class="item-list"></div></section>
+          </div>
+        </section>
+
+        <section id="page-knowledge" class="main-page hidden">
+          <p id="knowledge-error" class="form-error" role="alert"></p>
+          <div id="knowledge-source" class="panel knowledge-source"></div>
+          <div class="knowledge-layout">
+            <article class="panel knowledge-document"><div id="knowledge-content"></div></article>
+          </div>
+        </section>
+
         <section id="page-global" class="main-page hidden admin-only">
           <div class="settings-stack">
-            <section class="panel">
-              <div class="section-title"><h2>共享资料</h2><button id="show-source-form" class="secondary" type="button">添加资料</button></div>
+            <div data-settings-view="memory">
+            <section class="panel" id="rodos-memory-settings"><div class="section-title"><h2>Rodos 的职责与记忆</h2><button id="rodos-settings-refresh" class="quiet" type="button">重新读取</button></div>
+              <div class="inline-actions" role="tablist" aria-label="中央职责与记忆"><button id="rodos-agent-tab" type="button" role="tab" aria-selected="true" class="secondary">Agent.md</button><button id="rodos-memory-tab" type="button" role="tab" aria-selected="false" class="quiet">Memory.md</button></div>
+              <div id="rodos-agent-editor"><p id="rodos-policy-meta" class="small-note"></p><form id="rodos-policy-form" class="stack-form"><label>职责正文<textarea id="rodos-policy-content" rows="14" maxlength="40000" required></textarea></label><div class="form-actions"><button id="rodos-policy-save" class="primary" type="submit">保存职责</button></div></form><div id="rodos-policy-conflict"></div><p id="rodos-policy-status" role="status"></p><p id="rodos-policy-error" class="form-error" role="alert"></p></div>
+              <div id="rodos-memory-editor" class="hidden"><div class="section-title"><label class="check-label"><input type="checkbox" id="rodos-memory-inactive" />显示已失效记录</label><button id="rodos-memory-add" class="secondary" type="button">新增记忆</button></div><div id="rodos-memory-items" class="item-list"></div><form id="rodos-memory-form" class="stack-form hidden"><input type="hidden" id="rodos-memory-id" /><label>主题<input id="rodos-memory-topic" maxlength="160" required /></label><label>适用对象<select id="rodos-memory-scope"><option value="organization">机构约定</option><option value="project">项目约定</option><option value="account">个人偏好</option></select></label><label id="rodos-memory-project-label" class="hidden">项目<select id="rodos-memory-project"></select></label><label>记忆正文<textarea id="rodos-memory-content" rows="5" maxlength="2000" required></textarea></label><div class="form-actions"><button id="rodos-memory-save" class="primary" type="submit">保存记忆</button><button id="rodos-memory-cancel" class="quiet" type="button">取消编辑</button></div></form><p id="rodos-memory-status" role="status"></p><p id="rodos-memory-error" class="form-error" role="alert"></p><details><summary>查看生成的 Memory.md</summary><pre id="rodos-memory-preview" class="rodos-file-preview"></pre></details></div>
+              <p id="rodos-settings-error" class="form-error" role="alert"></p>
+            </section>
+            </div>
+            <div data-settings-view="sync" class="settings-stack hidden">
+          <section class="panel rodos-brief-panel"><div class="section-title"><h2>检查简报</h2><button id="rodos-inspect-now" class="secondary" type="button">系统自检</button></div><div id="rodos-latest-inspection"></div><details><summary>历史检查</summary><div id="rodos-inspection-history"></div></details><p id="rodos-agent-maintenance-error" class="form-error" role="alert"></p></section>
+            <section class="panel"><div class="section-title"><h2>定时同步飞书信息</h2><div class="inline-actions"><button id="rodos-refresh-feishu" class="secondary" type="button">全量同步飞书</button></div></div><div id="rodos-schedules" class="item-list"></div><div id="rodos-active-maintenance" role="status"></div><p id="rodos-maintenance-error" class="form-error" role="alert"></p></section>
+            </div>
+            <div data-settings-view="accounts" class="settings-stack hidden">
+            <section class="panel developer-only">
+              <div class="section-title lab-hidden"><h2>共享资料</h2><button id="show-source-form" class="secondary" type="button">添加资料</button></div>
               <form id="source-form" class="stack-form source-form hidden">
                 <label>飞书链接<input id="source-url" type="url" required placeholder="文档、文件或文件夹的飞书链接" /></label>
                 <label>资料名称（可选）<input id="source-name" /></label>
@@ -141,37 +227,66 @@
               <div id="source-list" class="source-list"></div>
             </section>
             <section class="panel">
-              <div class="section-title"><h2>成员与角色</h2><button id="add-user" class="secondary" type="button">新增成员</button></div>
-              <div id="people-list" class="item-list people-list"></div>
+              <div class="section-title"><h2>成员与账号</h2><button id="add-user" class="secondary" type="button">新增成员</button></div>
+              <p id="member-management-error" class="form-error" role="alert"></p><div id="people-list" class="item-list people-list"></div>
             </section>
             <section class="panel">
-              <div class="section-title"><h2>中央 Agent 运行</h2><button id="open-drawer" class="quiet" type="button">查看运行记录</button></div>
-              <div id="runtime-state"></div><p id="runtime-error" class="form-error" role="alert"></p>
+              <div class="section-title"><h2>连接与服务</h2><button id="open-drawer" class="quiet developer-only" type="button">查看运行记录</button></div>
+              <div id="runtime-state"></div><div id="project-health-list" class="item-list developer-only"></div><p id="runtime-error" class="form-error" role="alert"></p>
               <div class="inline-actions"><button id="toggle-runtime" class="secondary" type="button">暂停中央 Agent</button></div>
-              <details id="diagnostics-details" class="diagnostics-details"><summary>查看运行诊断</summary><p id="diagnostics-status" class="action-status" role="status"></p><div id="diagnostics-result"></div><p id="diagnostics-error" class="form-error" role="alert"></p><button id="refresh-diagnostics" class="quiet" type="button">重新检查</button></details>
-              <p class="small-note">暂停不影响成员的 Agent。</p>
+              <details id="diagnostics-details" class="diagnostics-details developer-only"><summary>查看运行诊断</summary><p id="diagnostics-status" class="action-status" role="status"></p><div id="diagnostics-result"></div><p id="diagnostics-error" class="form-error" role="alert"></p><button id="refresh-diagnostics" class="quiet" type="button">重新检查</button></details>
+              <p class="small-note developer-only">客户端访问边界和运行限制以开发诊断记录为准。</p>
             </section>
+            </div>
           </div>
         </section>
+        <section id="page-account" class="main-page hidden">
+          <article class="panel account-summary"><div class="section-title"><h2>账号与安全</h2></div><div id="account-profile"></div><div class="account-actions inline-actions"><button id="change-my-password" class="secondary" type="button">修改我的密码</button><button id="logout" class="quiet" type="button">退出登录</button></div></article>
+        </section>
       </main>
+      </div>
     </div>
+
+    <dialog id="thread-dialog" class="form-dialog">
+      <form id="thread-form" class="dialog-content stack-form">
+        <div class="dialog-heading"><h2>新对话</h2><button class="quiet" data-close="thread-dialog" aria-label="关闭新对话" type="button">✕</button></div>
+        <label>对话主题<input id="thread-title" maxlength="80" required placeholder="例如：Shared Skill 的审阅安排" /></label>
+        <p id="thread-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="secondary" data-close="thread-dialog" type="button">取消</button><button id="thread-create" class="primary" type="submit">创建对话</button></div>
+      </form>
+    </dialog>
 
     <dialog id="workspace-drawer" class="drawer">
       <div class="drawer-heading"><h2>运行记录</h2><button class="quiet" data-close="workspace-drawer" aria-label="关闭运行记录" type="button">✕</button></div>
       <section id="chosen-run-detail" class="run-detail hidden"></section>
       <div id="run-list" class="item-list"></div>
+      <p id="run-list-status" class="small-note" role="status"></p>
+      <button id="load-more-runs" class="quiet hidden" type="button">加载更早记录</button>
     </dialog>
     <dialog id="setup-dialog" class="proposal-dialog"><div class="dialog-content"><div class="dialog-heading"><h2>连接飞书帮助</h2><button class="quiet" data-close="setup-dialog" aria-label="关闭帮助" type="button">✕</button></div><div id="setup-content" class="markdown-content"></div></div></dialog>
     <dialog id="project-dialog" class="form-dialog">
       <form id="project-form" class="dialog-content stack-form">
         <div class="dialog-heading"><h2 id="project-dialog-title">创建项目</h2><button class="quiet" data-close="project-dialog" aria-label="关闭项目表单" type="button">✕</button></div>
-        <label>项目名称<input id="project-form-name" required maxlength="160" /></label>
-        <label>项目说明（可选）<textarea id="project-form-description" rows="3"></textarea></label>
-        <fieldset><legend>参与成员</legend><div id="project-members" class="member-options"></div></fieldset>
-        <label>项目资料所在的飞书文件夹<input id="project-folder-url" type="url" required placeholder="粘贴现有项目资料文件夹的链接" /></label>
-        <p class="small-note">可以沿用已有资料文件夹。RDOS 会在其中新增项目反馈文档，不移动现有资料。</p>
+        <label>项目名称<input id="project-form-name" required maxlength="120" /></label>
+        <label>项目说明（可选）<textarea id="project-form-description" rows="3" maxlength="6000"></textarea></label>
+        <fieldset><legend>参与节点</legend><div id="project-members" class="member-options"></div></fieldset>
+        <label>项目工作文件夹（可选）<input id="project-folder-url" type="url" placeholder="粘贴现有飞书文件夹链接；留空使用 Default 项目的文件夹" /></label>
+        <p id="project-folder-hint" class="small-note"></p>
         <p id="project-form-status" class="action-status" role="status"></p><p id="project-form-error" class="form-error" role="alert"></p>
         <div class="dialog-actions"><button class="secondary" data-close="project-dialog" type="button">取消</button><button id="save-project" class="primary" type="submit">创建项目</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="password-dialog" class="form-dialog">
+      <form id="password-form" class="dialog-content stack-form">
+        <div class="dialog-heading"><h2 id="password-dialog-title">修改我的密码</h2><button class="quiet" data-close="password-dialog" aria-label="关闭密码表单" type="button">✕</button></div>
+        <p id="password-target" class="small-note"></p>
+        <label id="password-current-label">当前密码<input id="password-current" type="password" autocomplete="current-password" required /></label>
+        <label>新密码<input id="password-new" type="password" autocomplete="new-password" minlength="10" required /></label>
+        <label>再次输入新密码<input id="password-confirm" type="password" autocomplete="new-password" minlength="10" required /></label>
+        <p id="password-session-note" class="small-note"></p>
+        <p id="password-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="secondary" data-close="password-dialog" type="button">取消</button><button id="password-submit" class="primary" type="submit">保存密码</button></div>
       </form>
     </dialog>
 
@@ -193,13 +308,47 @@
       </form>
     </dialog>
 
+    <dialog id="phase3-task-dialog" class="form-dialog">
+      <form id="phase3-task-form" class="dialog-content stack-form">
+        <div class="dialog-heading"><h2 id="phase3-task-heading">起草协作任务</h2><button class="quiet" data-close="phase3-task-dialog" aria-label="关闭协作任务" type="button">✕</button></div>
+        <p id="phase3-task-baseline" class="small-note"></p>
+        <label>任务名称<input id="phase3-task-title" required maxlength="160" /></label>
+        <label>目标与当前要求<textarea id="phase3-task-goal" rows="5" required maxlength="20000"></textarea></label>
+        <label>交付要求<textarea id="phase3-task-deliverable" rows="3" required maxlength="12000"></textarea></label>
+        <div class="form-grid"><label>执行节点<select id="phase3-task-node" required></select></label><label>产物位置<select id="phase3-task-zone"><option value="project">项目协作区</option><option value="agent">Agent 协作区</option></select></label></div>
+        <div class="form-grid"><label>下发对象<select id="phase3-task-dispatch"><option value="agent">Agent</option><option value="both">人＋Agent</option></select></label><label>回传对象<select id="phase3-task-return"><option value="both">人＋Agent</option><option value="agent">仅 Agent</option><option value="human">人（含最小执行回执）</option></select></label></div>
+        <div class="form-grid"><label>任务类别<select id="phase3-task-type"><option value="action">执行动作</option><option value="deliverable">制作成果</option><option value="review">审阅成果（Agent Review）</option></select></label><label>成果面向谁<select id="phase3-task-audience"><option value="admin,project_members">管理员及项目成员</option><option value="researcher">对应研发人员</option><option value="admin">管理员</option><option value="project_members">项目成员</option></select></label></div>
+        <label>输入依据（从已登记资料选取，可多选）<select id="phase3-task-input" multiple size="4"></select></label>
+        <label>允许局部修改的文档（可选，可多选）<select id="phase3-task-editable" multiple size="3"></select></label>
+        <label>完成方式<select id="phase3-task-completion"><option value="receipt_recorded">有效完成结果写回并核对后结束</option><option value="human">需要管理员审阅成果质量后验收</option><option value="artifact_present">程序核验指定产物及版本后结束</option><option value="source_versions_match">程序核验指定输入资料版本后结束</option></select></label><p class="small-note">执行完成与成果质量分别记录。Agent Review 属于任务类别，不等同于管理员批准。</p>
+        <label id="phase3-task-change-label" class="hidden">调整原因、旧成果处理与是否重做<textarea id="phase3-task-change" rows="3"></textarea></label>
+        <p class="small-note">新任务沿用项目负责人。确认草稿后任务生效；一般执行结果核对后自动收尾。</p>
+        <p id="phase3-task-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="secondary" data-close="phase3-task-dialog" type="button">取消</button><button id="phase3-task-save" class="primary" type="submit">保存草稿</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="phase3-action-dialog" class="form-dialog">
+      <form id="phase3-action-form" class="dialog-content stack-form">
+        <div class="dialog-heading"><h2 id="phase3-action-heading">核对任务动作</h2><button class="quiet" data-close="phase3-action-dialog" aria-label="关闭任务动作" type="button">✕</button></div>
+        <div id="phase3-action-preview"></div>
+        <label id="phase3-action-reason-label">说明<textarea id="phase3-action-reason" rows="3" maxlength="4000"></textarea></label>
+        <fieldset id="phase3-acceptance-fields" class="hidden stack-form"><legend>验收绑定的真实产物版本</legend><label>已登记产物<select id="phase3-acceptance-artifact"></select></label><p id="phase3-acceptance-version" class="small-note"></p><label class="check-label"><input id="phase3-acceptance-reviewed" type="checkbox" />我已打开原文并审阅上述具体版本，同意按本任务完成规则验收。</label></fieldset>
+        <p id="phase3-action-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="secondary" data-close="phase3-action-dialog" type="button">取消</button><button id="phase3-action-submit" class="primary" type="submit">确认</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="phase3-history-dialog" class="proposal-dialog"><div class="dialog-content"><div class="dialog-heading"><h2>任务版本与协作历史</h2><button class="quiet" data-close="phase3-history-dialog" aria-label="关闭任务历史" type="button">✕</button></div><div id="phase3-history"></div></div></dialog>
+
     <dialog id="user-dialog" class="form-dialog">
       <form id="user-form" class="dialog-content stack-form">
         <div class="dialog-heading"><h2 id="user-dialog-title">新增成员</h2><button class="quiet" data-close="user-dialog" aria-label="关闭成员表单" type="button">✕</button></div>
-        <div class="form-grid"><label>账号<input id="user-username" autocomplete="off" required /></label><label>姓名或称呼<input id="user-display" required /></label></div>
-        <fieldset><legend>角色</legend><div class="member-options"><label class="check-label"><input id="user-admin" type="checkbox" />管理员</label><label class="check-label"><input id="user-researcher" type="checkbox" />研究员</label></div><p class="small-note">可多选：管理员管理，研究员参与工作。</p></fieldset>
-        <label>身份标记<select id="user-identity"><option value="actual">实际工作身份</option><option value="role_test">角色测试</option></select></label>
-        <label id="user-password-label">初始密码（可选）<input id="user-password" type="password" autocomplete="new-password" placeholder="留空自动生成，仅本次显示" /></label>
+        <div class="form-grid"><label>账号<input id="user-username" autocomplete="off" required maxlength="80" /></label><label>姓名或称呼<input id="user-display" required maxlength="80" /></label></div>
+        <fieldset><legend>角色</legend><div class="member-options"><label class="check-label"><input id="user-admin" type="checkbox" />管理员</label><label class="check-label"><input id="user-researcher" type="checkbox" />研发成员</label></div><p class="small-note">可多选。研发成员只读查看参与项目。</p></fieldset>
+        <label class="developer-only">身份标记<select id="user-identity"><option value="actual">实际工作身份</option><option value="role_test">角色测试</option></select></label>
+        <label id="user-password-label">初始密码（可选）<input id="user-password" type="password" minlength="10" maxlength="500" autocomplete="new-password" placeholder="留空自动生成，仅本次显示" /></label>
+        <p id="user-node-note" class="small-note">新研发账号会登记一个节点，项目另行分配。</p>
         <p id="user-form-status" class="action-status" role="status"></p><p id="user-form-error" class="form-error" role="alert"></p>
         <div class="dialog-actions"><button class="secondary" data-close="user-dialog" type="button">取消</button><button class="primary" type="submit">保存成员</button></div>
       </form>

@@ -1,534 +1,525 @@
+"""Migrated runtime regressions, using the real phase-1 guarded application.
+
+The original scenarios remain here. Phase 1 intentionally changes scheduled
+writes to draft-only, permanent scheduling to explicit tick, and startup
+recovery to runtime.initialize. Only synthetic transports and fixture records
+are controlled; run_agent, CentralAgent, tools, policy and persistence execute.
+"""
 from __future__ import annotations
 
-import asyncio
-import json
-import os
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-from server import central_service as service, central_store as store, db
-from server.central_agent import AgentError, CentralAgent
-from server.feishu_tools import FeishuError, FeishuTools
-from tests.test_central_feishu import FakeCli
+from tests.phase1_support import run_guarded
+from tests.test_phase1_adversarial import SETUP
 
 
-class CentralRuntimeTest(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.environment = patch.dict(os.environ, {
-            "BAITE_DB_PATH": str(Path(self.temp.name) / "runtime.db"),
-            "BAITE_ADMIN_USERNAME": "runtime-admin",
-            "BAITE_ADMIN_PASSWORD": "RuntimeTestPassword123!",
-        })
-        self.environment.start()
-        db.init_db()
-        store.init()
-        self.user = store.users()[0]
-        self.previous_lock = service.RUN_LOCK
-        service.RUN_LOCK = asyncio.Lock()
+HELPERS = '''
+def watched(pid=project_id):
+    return next(s for s in store.items("source") if s.get("project_id") == pid and s.get("watch"))
 
-    async def asyncTearDown(self):
+def pending_feedback(pid=project_id):
+    return [f for f in store.items("feedback") if f.get("project_id") == pid and f.get("active")]
+
+def material_key(source):
+    return source["id"] if source["project_id"] == store.PROJECT_ID else source["project_id"] + ":" + source["id"]
+
+async def change_watched():
+    await service.collect_materials(project_id)
+    source = watched()
+    before = store.get("material", material_key(source))
+    remote = store.get("lab_remote_document", source["id"])
+    update_remote_document(remote, remote["content"] + "\\n合成资料新增核对要求。")
+    return source, before
+
+async def proposal(opid="proposal-origin"):
+    source = watched()
+    original = store.get("lab_remote_document", source["id"])
+    old = original["content"].splitlines()[2]
+    run = {"id": opid, "operation_id": opid, "project_id": project_id, "identity_mode": "role_test"}
+    return await service.create_proposal({"target_id": source["id"], "target_kind": "docx", "old_text": old,
+        "new_text": old + " 合成核对说明。", "summary": "合成资料补充", "evidence": "本地测试依据"}, run)
+'''
+
+
+class CentralRuntimeTest(unittest.TestCase):
+    def check(self, body, *, restart_body=None, timeout=30):
+        setup = SETUP + "\n" + HELPERS + "\n"
+        result = run_guarded(setup + body, timeout=timeout,
+                             restart_body=None if restart_body is None else setup + restart_body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_organization_chat_requires_project_for_project_tools(self):
+        self.check('''
+async def scenario():
+    thread = service.create_thread(admin, "", "机构范围")
+    run = service.new_run(admin, "明确项目后读取", "org-scope", project_id="", thread_id=thread["id"])
+    before = {pid: backend.stats(pid) for pid in backend.PROJECT_IDS}
+    for name, args in (("list_tasks", {}), ("read_feedback", {}),
+        ("prepare_task", {"instructions": "合成要求", "member_ids": ["mem_lab_codex_0001"]}),
+        ("propose_change", {"target_id": "lab_doc_intro", "target_kind": "docx", "summary": "建议", "old_text": "a", "new_text": "b", "evidence": "合成依据"})):
+        result = await service.execute_tool(name, args, run, admin)
+        assert not result["ok"] and "明确" in result["display_error"], result
+    denied = await service.execute_tool("save_task", {}, run, admin)
+    assert denied["code"] == "not_allowed"
+    assert before == {pid: backend.stats(pid) for pid in backend.PROJECT_IDS}
+    overview = await service.execute_tool("list_projects", {}, run, admin)
+    assert overview["ok"] and {p["id"] for p in overview["projects"]} == set(backend.PROJECT_IDS)
+    allowed = await service.execute_tool("read_feedback", {"project_id": other_project}, run, admin)
+    assert allowed["ok"] and all(f["project_id"] == other_project for f in allowed["feedback"])
+    await service.run_agent(run["id"])
+    bound_thread = service.create_thread(admin, project_id, "项目范围")
+    bound = service.new_run(admin, "只读本项目", "bound-scope", project_id=project_id, thread_id=bound_thread["id"])
+    before = backend.stats(other_project)
+    denied = await service.execute_tool("read_feedback", {"project_id": other_project}, bound, admin)
+    assert not denied["ok"] and "另一个项目" in denied["display_error"]
+    assert before == backend.stats(other_project)
+    await service.run_agent(bound["id"])
+asyncio.run(scenario())
+''')
+
+    def test_organization_chat_runs_with_team_context_and_no_default_project(self):
+        self.check('''
+async def scenario():
+    thread = service.create_thread(admin, "", "团队讨论")
+    result = await chat("", thread, "team-context", "哪些工作需要介入？")
+    assert result["status"] == "succeeded" and result["project_id"] == ""
+    context = material_context(captured[0])
+    assert context["project"] is None
+    assert {p["id"] for p in context["projects"]} == set(backend.PROJECT_IDS)
+    assert all(t["project_id"] in backend.PROJECT_IDS for t in context["tasks"])
+    tools = captured[0]["tools"]
+    assert "project_id" in next(t for t in tools if t["function"]["name"] == "read_feedback")["function"]["parameters"]["properties"]
+    assert captured[0]["messages"][-1]["content"] == "哪些工作需要介入？"
+    assert store.get("message", result["id"] + ":assistant")["project_id"] == ""
+asyncio.run(scenario())
+''')
+
+    def test_organization_chat_sees_saved_scheduled_check_without_tool_bodies(self):
+        self.check('''
+async def scenario():
+    due(project_id, 1)
+    ticked = await service.tick(project_id=project_id)
+    scheduled = store.get("run", ticked["run_id"])
+    assert scheduled["trigger"] == "scheduled" and scheduled["status"] == "succeeded"
+    scheduled["steps"].append({"type": "tool_result", "name": "read_feedback", "result": "RAW_SCHEDULED_TOOL_SENTINEL"})
+    store.put("run", scheduled["id"], scheduled)
+    thread = service.create_thread(admin, "", "检查运行状态")
+    result = await chat("", thread, "scheduled-health", "最近一次中央检查运行了吗？")
+    assert result["status"] == "succeeded"
+    context = material_context(captured[-1])
+    health = next(h for h in context["health"] if h["project_id"] == project_id)
+    assert health["last_run"]["id"] == scheduled["id"] and health["last_run"]["status"] == "succeeded"
+    assert "RAW_SCHEDULED_TOOL_SENTINEL" not in json.dumps(captured[-1])
+    assert not any(m.get("run_id") == scheduled["id"] for m in store.items("message"))
+    assert not runtime.overview()["scheduler_enabled"]
+asyncio.run(scenario())
+''')
+
+    def test_same_organization_request_keeps_project_task_drafts_distinct(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    fields = {"instructions": "整理本周合成进展", "member_ids": ["mem_lab_codex_0001"], "task_kind": "work"}
+    MODEL_SCRIPT = [backend.tool_message("prepare_task", {**fields, "project_id": project_id}, "draft-a"),
+                    backend.tool_message("prepare_task", {**fields, "project_id": other_project}, "draft-b"), "两份草稿待确认。"]
+    thread = service.create_thread(admin, "", "两个项目草稿")
+    result = await chat("", thread, "two-projects", "为两个项目起草合成要求")
+    assert result["status"] == "succeeded"
+    drafts = [d for d in store.items("task_draft") if d["run_id"] == result["id"]]
+    assert len(drafts) == 2 and len({d["id"] for d in drafts}) == 2 and len({d["task_id"] for d in drafts}) == 2
+    assert {d["project_id"] for d in drafts} == set(backend.PROJECT_IDS)
+    assert all(backend.stats(pid).get("task_writes", 0) == 0 for pid in backend.PROJECT_IDS)
+asyncio.run(scenario())
+''')
+
+    def test_source_changes_remain_pending_after_baseline_read_again(self):
+        self.check('''
+async def scenario():
+    source, before = await change_watched()
+    first = await service.collect_materials(project_id)
+    second = await service.collect_materials(project_id)
+    assert len(first["changes"]) == 1
+    assert first["changes"][0]["id"] == second["changes"][0]["id"]
+    assert not second["changes"][0]["processed"]
+    latest = store.get("material", material_key(source))
+    assert latest["content_hash"] != before["content_hash"]
+    assert len(store.items("material_change")) == 1
+    assert store.get("input_state", project_id)["observed_fingerprint"] != store.get("input_state", project_id).get("processed_fingerprint")
+asyncio.run(scenario())
+''')
+
+    def test_fresh_watched_read_records_change_before_replacing_baseline(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    source, before = await change_watched()
+    MODEL_SCRIPT = [backend.tool_message("read_material", {"object_id": source["id"], "kind": source["kind"], "watch": True}), "已读合成资料。"]
+    thread = service.create_thread(admin, project_id, "资料读取")
+    result = await chat(project_id, thread, "watched-read", "读取所选资料")
+    assert result["status"] == "succeeded"
+    latest = store.get("material", material_key(source))
+    changes = store.items("material_change")
+    assert len(changes) == 1 and not changes[0]["processed"]
+    assert changes[0]["old_hash"] == before["content_hash"] and changes[0]["new_hash"] == latest["content_hash"]
+asyncio.run(scenario())
+''')
+
+    def test_failed_analysis_preserves_pending_feedback_and_source_changes(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    await change_watched()
+    MODEL_SCRIPT = [{"http_status": 401}]
+    failed = await sync(project_id, "analysis-failed")
+    assert failed["status"] in ("failed", "needs_attention")
+    assert all(f["processed_hash"] != f["content_hash"] for f in pending_feedback())
+    assert all(not c["processed"] for c in store.items("material_change"))
+    MODEL_SCRIPT = ["合成依据分析完成。"]
+    result = await sync(project_id, "analysis-recovered")
+    assert result["status"] == "succeeded"
+    assert all(f["processed_hash"] == f["content_hash"] for f in pending_feedback())
+    assert all(c["processed"] for c in store.items("material_change"))
+asyncio.run(scenario())
+''')
+
+    def test_chat_read_feedback_is_processed_only_after_model_success(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    await change_watched()
+    MODEL_SCRIPT = [backend.tool_message("read_feedback", {}), "合成反馈分析完成。"]
+    checked = []
+    async def inspect_transport(self, request):
+        if self.index == 1:
+            checked.append(True)
+            assert all(f["processed_hash"] != f["content_hash"] for f in pending_feedback())
+            assert all(not c["processed"] for c in store.items("material_change"))
+        return await model_transport(self, request)
+    thread = service.create_thread(admin, project_id, "处理时点")
+    with patch.object(backend._LocalModelTransport, "handle_async_request", inspect_transport):
+        result = await chat(project_id, thread, "read-then-finish", "读取反馈并分析")
+    assert checked == [True] and result["status"] == "succeeded"
+    assert all(f["processed_hash"] == f["content_hash"] for f in pending_feedback())
+    assert all(c["processed"] for c in store.items("material_change"))
+asyncio.run(scenario())
+''')
+
+    def test_chat_failure_and_newer_feedback_do_not_mark_unanalyzed_hash(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    thread = service.create_thread(admin, project_id, "反馈版本")
+    MODEL_SCRIPT = [backend.tool_message("read_feedback", {}), {"http_status": 401}]
+    failed = await chat(project_id, thread, "read-then-fail", "读取合成反馈")
+    assert failed["status"] != "succeeded"
+    assert all(f["processed_hash"] != f["content_hash"] for f in pending_feedback())
+    MODEL_SCRIPT = [backend.tool_message("read_feedback", {}), "仅分析本次读到的旧正文。"]
+    newer = []
+    async def changed_transport(self, request):
+        if self.index == 1:
+            remote = remote_feedback(project_id)
+            update_remote_document(remote, remote["content"] + "\\n本期新增问题：另一次完整读取已看到的新正文。")
+            snapshot = await service.collect_materials(project_id)
+            newer.append(snapshot["fingerprint"])
+        return await model_transport(self, request)
+    with patch.object(backend._LocalModelTransport, "handle_async_request", changed_transport):
+        result = await chat(project_id, thread, "newer-feedback", "分析已读取的合成反馈")
+    assert result["status"] == "succeeded" and len(newer) == 1
+    state = store.get("input_state", project_id)
+    assert state["observed_fingerprint"] == newer[0] and state.get("processed_fingerprint") != newer[0]
+    assert all(f["processed_hash"] != f["content_hash"] for f in pending_feedback())
+asyncio.run(scenario())
+''')
+
+    def test_total_time_limit_includes_pre_model_feishu_reads(self):
+        self.check('''
+import time
+os.environ["BAITE_AGENT_MAX_SECONDS"] = "1"
+original_tools = backend._LocalToolsTransport.run
+def slow_read(self, args, object_id=""):
+    if tuple(args[:2]) == ("base", "+record-list"):
+        time.sleep(1.15)
+    return original_tools(self, args, object_id)
+async def scenario():
+    with patch.object(backend._LocalToolsTransport, "run", slow_read):
+        result = await sync(project_id, "read-deadline")
+    assert result["status"] == "failed" and result["error_code"] == "agent_timeout", result
+    assert not captured and not result.get("analysis_complete")
+    assert not store.get("input_state", project_id)
+asyncio.run(scenario())
+''')
+
+    def test_duplicate_launch_runs_one_model_analysis(self):
+        self.check('''
+async def scenario():
+    thread = service.create_thread(admin, project_id, "重复启动")
+    run = service.new_run(admin, "一次合成分析", "one-launch", project_id=project_id, thread_id=thread["id"])
+    service.launch(run)
+    first = service.ACTIVE_RUN_TASKS[run["id"]]
+    service.launch(run)
+    assert service.ACTIVE_RUN_TASKS[run["id"]] is first
+    await first
+    assert len(captured) == 1 and store.get("run", run["id"])["status"] == "succeeded"
+    assert len([m for m in store.items("message") if m["role"] == "assistant"]) == 1
+asyncio.run(scenario())
+''')
+
+    def test_pause_prevents_reads_and_shutdown_records_interruption(self):
+        self.check('''
+async def scenario():
+    state = store.get("state", "runtime"); state["paused"] = True; store.put("state", "runtime", state)
+    before = backend.stats(project_id)
+    result = await sync(project_id, "paused-read")
+    assert result["status"] == "paused" and backend.stats(project_id) == before and not captured
+    state["paused"] = False; store.put("state", "runtime", state)
+    started = asyncio.Event()
+    async def waiting_transport(self, request):
+        started.set()
+        await asyncio.Event().wait()
+    thread = service.create_thread(admin, project_id, "停止运行")
+    run = service.new_run(admin, "等待合成模型", "shutdown", project_id=project_id, thread_id=thread["id"])
+    with patch.object(backend._LocalModelTransport, "handle_async_request", waiting_transport):
+        service.launch(run)
+        await asyncio.wait_for(started.wait(), 2)
         await service.shutdown()
-        service.RUN_LOCK = self.previous_lock
-        self.environment.stop()
-        self.temp.cleanup()
-
-    def run_record(self, operation="runtime-test", kind="chat", trigger="manual"):
-        return service.new_run(self.user, "读取反馈并检查依据", operation, kind, trigger)
-
-    async def test_organization_chat_requires_project_for_project_tools(self):
-        run = service.new_run(self.user, "团队有什么进展？", "org-runtime", project_id="")
-        self.assertEqual(run["project_id"], "")
-        for name, arguments in (
-            ("list_tasks", {}), ("read_feedback", {}),
-            ("prepare_task", {"instructions": "安排工作", "member_ids": [self.user["id"]]}),
-            ("save_task", {"task_id": "FOLLOW-UP", "related_task": "ORIGINAL", "instructions": "补充", "member_ids": [self.user["id"]]}),
-            ("propose_change", {"target_id": "doc", "target_kind": "docx", "summary": "建议", "old_text": "a", "new_text": "b", "evidence": "反馈"}),
-        ):
-            with self.subTest(tool=name), patch.object(service, "feishu") as remote:
-                result = await service.execute_tool(name, arguments, run, self.user)
-                self.assertFalse(result["ok"])
-                self.assertIn("明确", result["display_error"])
-                remote.assert_not_called()
-        project = {"id": "another-project", "name": "另一个项目", "member_ids": [self.user["id"]],
-                   "feedback_id": "another-feedback", "status": "active"}
-        store.put("project", project["id"], project)
-        bound = {"project_id": store.PROJECT_ID, "operation_id": "bound", "identity_mode": "role_test"}
-        denied = await service.execute_tool("read_feedback", {"project_id": project["id"]}, bound, self.user)
-        self.assertFalse(denied["ok"])
-        self.assertIn("另一个项目", denied["display_error"])
-        overview = await service.execute_tool("list_projects", {}, run, self.user)
-        self.assertTrue(overview["ok"])
-        self.assertIn(project["id"], [item["id"] for item in overview["projects"]])
-        materials = {"feedback": [], "changes": [], "feedback_source": "https://example.test/docx/another-feedback"}
-        with patch.object(service, "collect_materials", AsyncMock(return_value=materials)) as read:
-            allowed = await service.execute_tool("read_feedback", {"project_id": project["id"]}, run, self.user)
-            self.assertTrue(allowed["ok"])
-            read.assert_awaited_once_with(project["id"])
-
-    async def test_organization_chat_runs_with_team_context_and_no_default_project(self):
-        store.put("project", "team-project", {"id": "team-project", "name": "团队工作",
-            "member_ids": [self.user["id"]], "feedback_id": "team-feedback", "status": "active"})
-        run = service.new_run(self.user, "哪些工作需要介入？", "team-context", project_id="")
-
-        async def answer(agent, messages, tools, execute_tool, **kwargs):
-            context = json.loads(messages[0]["content"].split("\n", 1)[1])
-            self.assertIsNone(context["project"])
-            self.assertIn("team-project", [item["id"] for item in context["projects"]])
-            self.assertEqual(context["tasks"], [])
-            self.assertIn("哪些工作需要介入", messages[-1]["content"])
-            self.assertIn("project_id", next(item for item in tools if item["function"]["name"] == "read_feedback")["function"]["parameters"]["properties"])
-            return {"content": "目前已登记团队工作；尚未读取具体反馈。请指定项目后继续。", "model": "test", "usage": {"model_calls": 1}}
-
-        with patch.object(CentralAgent, "run", answer):
-            await service.run_agent(run["id"])
-        stored = store.get("run", run["id"])
-        self.assertEqual(stored["status"], "succeeded")
-        self.assertEqual(stored["project_id"], "")
-        self.assertEqual(store.get("message", run["id"] + ":assistant")["project_id"], "")
-
-    async def test_organization_chat_sees_saved_scheduled_check_without_tool_bodies(self):
-        state = store.get("state", "runtime")
-        state.update(schedule_verified=True, last_scheduled={
-            "id": "scheduled-latest", "at": "2026-10-12T00:40:00+00:00", "status": "succeeded"})
-        store.put("state", "runtime", state)
-        store.put("run", "scheduled-older", {"id": "scheduled-older", "operation_id": "scheduled-older", "trigger": "scheduled",
-            "project_id": store.PROJECT_ID, "status": "failed", "created_at": "2026-10-11T00:00:00+00:00",
-            "completed_at": "2026-10-11T00:02:00+00:00", "error": "读取反馈失败"})
-        store.put("run", "scheduled-latest", {"id": "scheduled-latest", "operation_id": "scheduled-latest", "trigger": "scheduled",
-            "project_id": store.PROJECT_ID, "status": "succeeded", "created_at": "2026-10-12T00:37:00+00:00",
-            "completed_at": "2026-10-12T00:40:00+00:00", "result": "已读回反馈，暂无新内容。",
-            "steps": [{"type": "tool_result", "name": "read_feedback", "ok": True,
-                       "arguments": {"secret": "do-not-share"}, "result": "do-not-share…（完整材料通过来源读取）"},
-                      {"type": "tool_result", "name": "list_tasks", "result": {"ok": False, "error": "not-shared"}}]})
-        store.put("run", "manual-other", {"id": "manual-other", "operation_id": "manual-other", "trigger": "manual",
-            "status": "succeeded", "created_at": "2026-10-12T00:45:00+00:00"})
-        run = service.new_run(self.user, "最近一次中央定时检查运行了吗？", "scheduled-history", project_id="")
-
-        async def answer(agent, messages, tools, execute_tool, **kwargs):
-            context = json.loads(messages[0]["content"].split("\n", 1)[1])
-            checks = context["central_scheduled_checks"]
-            self.assertTrue(checks["schedule_verified"])
-            self.assertEqual(checks["last_scheduled"], state["last_scheduled"])
-            self.assertEqual([item["id"] for item in checks["recent_runs"]], ["scheduled-latest", "scheduled-older"])
-            self.assertEqual(checks["recent_runs"][0]["tools"],
-                             [{"name": "read_feedback", "ok": True}, {"name": "list_tasks", "ok": False}])
-            self.assertEqual(checks["recent_runs"][0]["summary"], "已读回反馈，暂无新内容。")
-            self.assertNotIn("do-not-share", messages[0]["content"])
-            return {"content": "最近一次中央定时检查已成功，反馈已读回。", "model": "test", "usage": {}}
-
-        with patch.object(CentralAgent, "run", answer):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "succeeded")
-
-    async def test_same_organization_request_keeps_project_task_drafts_distinct(self):
-        for project_id in ("team-one", "team-two"):
-            store.put("project", project_id, {"id": project_id, "name": project_id,
-                "member_ids": [self.user["id"]], "feedback_id": project_id + "-feedback", "status": "active"})
-        run = service.new_run(self.user, "给两个项目准备工作", "two-projects", project_id="")
-        fields = {"instructions": "整理本周进展", "member_ids": [self.user["id"]], "task_kind": "work"}
-        first = service.prepare_task(fields, {**run, "project_id": "team-one"}, self.user)
-        second = service.prepare_task(fields, {**run, "project_id": "team-two"}, self.user)
-        self.assertNotEqual(first["id"], second["id"])
-        self.assertNotEqual(first["task_id"], second["task_id"])
-        self.assertEqual((first["project_id"], second["project_id"]), ("team-one", "team-two"))
-
-    def materials(self):
-        feedback = {"id": "feedback-one", "content_hash": "feedback-hash", "processed_hash": "", "content": "实际反馈"}
-        change = {"id": "change-one", "object_id": "watched", "old_hash": "before", "new_hash": "after", "diff": "-旧内容\n+新内容", "processed": False}
-        store.put("feedback", feedback["id"], feedback)
-        store.put("material_change", change["id"], change)
-        return {"pending_feedback": [feedback], "feedback": [feedback], "changes": [change]}
-
-    async def test_source_changes_remain_pending_after_baseline_read_again(self):
-        source_id = store.ONBOARDING_IDS[0]
-        source = store.get("source", source_id)
-        source["watch"] = True
-        store.put("source", source_id, source)
-        before = {"content": "旧内容", "content_hash": "before", "source_url": source["source_url"]}
-        after = {"content": "新内容", "content_hash": "after", "source_url": source["source_url"]}
-        store.put("material", source_id, before)
-
-        class ReadOnlyFeishu:
-            def list_tasks(self):
-                return {"items": []}
-
-            def read_document(self, document_id):
-                return {"content": "", "source_url": "https://feishu.test/feedback"}
-
-        with patch.object(service, "feishu", return_value=ReadOnlyFeishu()), patch.object(service, "source_read", return_value=after):
-            first = await service.collect_materials()
-            second = await service.collect_materials()
-        self.assertEqual(len(first["changes"]), 1)
-        self.assertEqual(first["changes"][0]["id"], second["changes"][0]["id"])
-        self.assertFalse(second["changes"][0]["processed"])
-        self.assertEqual(store.get("material", source_id)["content_hash"], "after")
-        self.assertEqual(len(store.items("material_change")), 1)
-
-    async def test_fresh_watched_read_records_change_before_replacing_baseline(self):
-        source_id = store.ONBOARDING_IDS[0]
-        source = store.get("source", source_id)
-        source["watch"] = True
-        store.put("source", source_id, source)
-        store.put("material", source_id, {"content": "old body", "content_hash": "old", "source_url": source["source_url"]})
-        latest = {"ok": True, "object_id": source_id, "content": "new body", "content_hash": "new", "source_url": source["source_url"]}
-        with patch.object(service, "source_read", return_value=latest):
-            result = await service.execute_tool("read_material", {"object_id": source_id, "kind": "docx"}, {"operation_id": "watched-read"}, self.user)
-        self.assertTrue(result["ok"])
-        self.assertEqual(store.get("material", source_id)["content_hash"], "new")
-        changes = store.items("material_change")
-        self.assertEqual(len(changes), 1)
-        self.assertFalse(changes[0]["processed"])
-        self.assertEqual(changes[0]["old_hash"], "old")
-        self.assertEqual(changes[0]["new_hash"], "new")
-
-    async def test_failed_analysis_preserves_pending_feedback_and_source_changes(self):
-        materials = self.materials()
-
-        async def fail(*args, **kwargs):
-            raise AgentError("model_http", "真实模型请求失败（HTTP 503）")
-
-        run = self.run_record(kind="sync")
-        with patch.object(service, "collect_materials", AsyncMock(return_value=materials)), patch.object(CentralAgent, "run", fail):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "failed")
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "")
-        self.assertFalse(store.get("material_change", "change-one")["processed"])
-
-        async def success(*args, **kwargs):
-            return {"content": "已根据实际反馈分析", "model": "test", "usage": {"model_calls": 1}}
-
-        retry = self.run_record("retry-success", "sync")
-        with patch.object(service, "collect_materials", AsyncMock(return_value=materials)), patch.object(CentralAgent, "run", success):
-            await service.run_agent(retry["id"])
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "feedback-hash")
-        self.assertTrue(store.get("material_change", "change-one")["processed"])
-
-    async def test_chat_read_feedback_is_processed_only_after_model_success(self):
-        materials = self.materials()
-
-        async def read_then_finish(agent, messages, tools, execute_tool, **kwargs):
-            result = await execute_tool("read_feedback", {})
-            self.assertTrue(result["ok"])
-            self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "")
-            self.assertFalse(store.get("material_change", "change-one")["processed"])
-            return {"content": "根据实际读取给出分析", "model": "test", "usage": {"model_calls": 2}}
-
-        run = self.run_record()
-        with patch.object(service, "execute_tool", AsyncMock(return_value={"ok": True, **materials})), patch.object(CentralAgent, "run", read_then_finish):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "succeeded")
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "feedback-hash")
-        self.assertTrue(store.get("material_change", "change-one")["processed"])
-
-    async def test_chat_failure_and_newer_feedback_do_not_mark_unanalyzed_hash(self):
-        materials = self.materials()
-
-        async def read_then_fail(agent, messages, tools, execute_tool, **kwargs):
-            await execute_tool("read_feedback", {})
-            raise AgentError("model_network", "模型连接失败")
-
-        run = self.run_record()
-        with patch.object(service, "execute_tool", AsyncMock(return_value={"ok": True, **materials})), patch.object(CentralAgent, "run", read_then_fail):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "")
-        self.assertFalse(store.get("material_change", "change-one")["processed"])
-
-        async def read_then_changed(agent, messages, tools, execute_tool, **kwargs):
-            await execute_tool("read_feedback", {})
-            updated = store.get("feedback", "feedback-one")
-            updated["content_hash"] = "newer-feedback-hash"
-            store.put("feedback", updated["id"], updated)
-            return {"content": "已分析旧正文", "model": "test", "usage": {}}
-
-        run = self.run_record("newer-feedback")
-        with patch.object(service, "execute_tool", AsyncMock(return_value={"ok": True, **materials})), patch.object(CentralAgent, "run", read_then_changed):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "")
-
-    async def test_total_time_limit_includes_pre_model_feishu_reads(self):
-        async def slow_collect(*args):
-            await asyncio.sleep(0.1)
-            return {"pending_feedback": [], "changes": []}
-
-        model = AsyncMock()
-        run = self.run_record(kind="sync")
-        with patch.object(service, "collect_materials", slow_collect), patch.object(CentralAgent, "max_seconds", 0.01), patch.object(CentralAgent, "run", model):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "failed")
-        self.assertIn("上限", store.get("run", run["id"])["error"])
-        model.assert_not_awaited()
-
-    async def test_duplicate_launch_runs_one_model_analysis(self):
-        calls = []
-
-        async def model(*args, **kwargs):
-            calls.append(True)
-            await asyncio.sleep(0.01)
-            return {"content": "一次分析", "model": "test", "usage": {}}
-
-        run = self.run_record()
-        with patch.object(CentralAgent, "run", model):
-            service.launch(run)
-            service.launch(run)
-            await asyncio.gather(*list(service.ACTIVE_TASKS))
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(store.get("run", run["id"])["status"], "succeeded")
-        self.assertEqual(sum(item["role"] == "assistant" for item in store.items("message")), 1)
-
-    async def test_pause_prevents_reads_and_shutdown_records_interruption(self):
-        state = store.get("state", "runtime")
-        state["paused"] = True
-        store.put("state", "runtime", state)
-        run = self.run_record(kind="sync")
-        collect = AsyncMock()
-        with patch.object(service, "collect_materials", collect):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "paused")
-        collect.assert_not_awaited()
-        state["paused"] = False
-        store.put("state", "runtime", state)
-        started = asyncio.Event()
-
-        async def slow_model(*args, **kwargs):
-            started.set()
-            await asyncio.sleep(10)
-
-        run = self.run_record("shutdown")
-        with patch.object(CentralAgent, "run", slow_model):
-            service.launch(run)
-            await started.wait()
-            await service.shutdown()
-        self.assertEqual(store.get("run", run["id"])["status"], "interrupted")
-
-    async def test_actual_scheduler_trigger_is_separate_from_manual(self):
-        state = store.get("state", "runtime")
-        state["next_due"] = "2000-01-01T00:00:00+00:00"
-        store.put("state", "runtime", state)
-        stop = asyncio.Event()
-
-        async def read_no_changes(*args):
-            stop.set()
-            return {"pending_feedback": [], "changes": []}
-
-        with patch.object(service, "collect_materials", read_no_changes):
-            await service.scheduler(stop)
-            await asyncio.gather(*list(service.ACTIVE_TASKS))
-        runtime = store.get("state", "runtime")
-        self.assertTrue(runtime["schedule_verified"])
-        self.assertEqual(runtime["last_scheduled"]["status"], "succeeded")
-        self.assertNotIn("last_manual", runtime)
-        self.assertTrue(store.items("run")[0]["no_analysis"])
-
-    async def test_restart_interrupts_queued_run_but_preserves_pending_evidence(self):
-        self.materials()
-        run = self.run_record()
-        store.init()
-        self.assertEqual(store.get("run", run["id"])["status"], "interrupted")
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "")
-        self.assertFalse(store.get("material_change", "change-one")["processed"])
-
-    async def test_agent_task_requires_id_and_replay_does_not_create_new_version(self):
-        class TaskRemote:
-            def __init__(self):
-                self.tasks = []
-                self.writes = 0
-
-            def ensure_task_fields(self):
-                return {"ok": True}
-
-            def list_tasks(self):
-                return {"items": self.tasks}
-
-            def save_task(self, fields, operation_id, record_id=None):
-                self.writes += 1
-                item = {**fields, "record_id": record_id or "remote-one", "source_url": "https://feishu.test/tasks"}
-                self.tasks = [task for task in self.tasks if task["task_id"] != item["task_id"]] + [item]
-                return item
-
-        remote = TaskRemote()
-        run = self.run_record()
-        remote.tasks = [{"task_id": "ORIGINAL", "project_id": store.PROJECT_ID, "member_ids": [self.user["id"]], "status": "已发布", "version": "1", "task_kind": "work", "record_id": "rec-original"}]
-        fields = {"instructions": "读取实际材料后反馈", "member_ids": [self.user["id"]], "related_task": "ORIGINAL"}
-        spec = next(item for item in service.tool_specs() if item["function"]["name"] == "save_task")
-        self.assertIn("task_id", spec["function"]["parameters"]["required"])
-        with patch.object(service, "feishu", return_value=remote):
-            missing = await service.execute_tool("save_task", fields, run, self.user)
-            self.assertEqual(missing["code"], "task_id_required")
-            self.assertEqual(remote.writes, 0)
-            fields["task_id"] = "RDOS-LOGICAL-ONE"
-            first = await service.execute_tool("save_task", fields, run, self.user)
-            replay = await service.execute_tool("save_task", fields, run, self.user)
-            changed = await service.execute_tool("save_task", {**fields, "instructions": "改写同一任务的措辞"}, run, self.user)
-            self.assertEqual(first["item"], replay["item"])
-            self.assertEqual(changed["code"], "validation")
-            self.assertFalse(changed["ok"])
-            self.assertEqual(remote.writes, 1)
-            self.assertEqual(remote.tasks[0]["version"], "1")
-            separate = await service.execute_tool("save_task", {**fields, "instructions": "管理员新操作调整要求"}, {**run, "operation_id": "separate-approved-adjustment"}, self.user)
-        self.assertFalse(separate["ok"])  # A new message cannot bypass the task-draft approval.
-        self.assertEqual(remote.writes, 1)
-
-    async def test_scheduled_iso_operation_writes_once_with_safe_stable_marker(self):
-        class TaskRemote:
-            def __init__(self):
-                self.tasks = []
-                self.writes = 0
-
-            def ensure_task_fields(self):
-                return {"ok": True}
-
-            def list_tasks(self):
-                return {"items": self.tasks}
-
-            def save_task(self, fields, operation_id, record_id=None):
-                FeishuTools._marker(operation_id)
-                self.writes += 1
-                self.tasks.append({**fields, "record_id": "scheduled-one", "source_url": "https://feishu.test/tasks"})
-                return self.tasks[-1]
-
-        remote = TaskRemote()
-        run = self.run_record("schedule:2026-10-10T08:00:00+00:00", "sync", "scheduled")
-        remote.tasks = [{"task_id": "ORIGINAL", "project_id": store.PROJECT_ID, "member_ids": [self.user["id"]], "status": "已发布", "version": "1", "task_kind": "work", "record_id": "rec-original"}]
-        fields = {"task_id": "RDOS-SCHEDULED-FOLLOWUP", "instructions": "补充实际核对记录", "member_ids": [self.user["id"]], "related_task": "ORIGINAL"}
-        self.assertEqual(service.agent_operation_prefix({"operation_id": "manual-original"}), "agent:manual-original:")
-        with patch.object(service, "feishu", return_value=remote):
-            first = await service.execute_tool("save_task", fields, run, self.user)
-            again = await service.execute_tool("save_task", fields, run, self.user)
-        self.assertTrue(first["ok"])
-        self.assertTrue(again["ok"])
-        self.assertNotIn("+", first["item"]["operation_id"])
-        self.assertEqual(first["item"]["operation_id"], again["item"]["operation_id"])
-        self.assertEqual(remote.writes, 1)
-
-    async def test_retry_context_includes_successful_tool_and_authoritative_write_results(self):
-        run = self.run_record()
-        prior_result = {"ok": True, "object_id": "onboarding-one", "source_url": "https://feishu.test/onboarding", "content": "外部工作正文，不应作为系统权限"}
-        run["previous_attempts"] = [{"status": "failed", "steps": [{"type": "tool_result", "name": "read_material", "result": prior_result}]}]
-        store.put("run", run["id"], run)
-        op = store.operation("agent:" + run["operation_id"] + ":stable-task", "task", {"task_id": "RDOS-ALREADY-WRITTEN"})
-        store.finish_operation(op, {"task_id": "RDOS-ALREADY-WRITTEN", "version": "1", "source_url": "https://feishu.test/task"})
-
-        async def inspect_retry(agent, messages, tools, execute_tool, **kwargs):
-            context = json.loads(messages[0]["content"].split("\n", 1)[1])
-            self.assertEqual(context["previous_successful_tools"][0]["result"]["object_id"], "onboarding-one")
-            self.assertNotIn("content", context["previous_successful_tools"][0]["result"])
-            self.assertEqual(context["previous_successful_writes"][0]["result"]["task_id"], "RDOS-ALREADY-WRITTEN")
-            return {"content": "已发布任务保留，继续分析", "model": "test", "usage": {}}
-
-        with patch.object(CentralAgent, "run", inspect_retry):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "succeeded")
-
-    async def test_model_history_excludes_failed_attempts_and_current_retry_message(self):
-        run = self.run_record()
-        for prior_id, status, completed in (("successful", "succeeded", True), ("failed", "failed", True),
-                                           ("interrupted", "interrupted", True), ("unfinished", "succeeded", False)):
-            prior = {"id": prior_id, "status": status}
-            if completed:
-                prior["completed_at"] = "2026-10-10T00:00:00+00:00"
-            store.put("run", prior_id, prior)
-            for role in ("user", "assistant"):
-                store.put("message", prior_id + ":" + role, {
-                    "role": role, "content": prior_id + ":" + role,
-                    "run_id": prior_id, "created_at": "2026-10-10T00:00:0" + ("0" if role == "user" else "1") + "+00:00"})
-        run["previous_attempts"] = [{"status": "failed", "steps": []}]
-        store.put("run", run["id"], run)
-        store.put("message", run["id"] + ":user", {
-            "role": "user", "content": run["message"], "run_id": run["id"], "created_at": "2026-10-10T00:01:00+00:00"})
-        store.put("message", run["id"] + ":assistant", {
-            "role": "assistant", "content": "旧尝试未完成", "run_id": run["id"], "created_at": "2026-10-10T00:02:00+00:00"})
-
-        async def inspect_history(agent, messages, tools, execute_tool, **kwargs):
-            conversation = messages[1:]
-            self.assertEqual([item["content"] for item in conversation],
-                             ["successful:user", "successful:assistant", run["message"]])
-            self.assertEqual(sum(item["content"] == run["message"] for item in conversation), 1)
-            self.assertEqual(store.get("message", "failed:user")["content"], "failed:user")
-            self.assertEqual(store.get("message", "failed:assistant")["content"], "failed:assistant")
-            return {"content": "只执行当前补充要求", "model": "test", "usage": {}}
-
-        with patch.object(CentralAgent, "run", inspect_history):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "succeeded")
-        self.assertEqual(store.get("message", "failed:assistant")["content"], "failed:assistant")
-
-    async def test_unresolved_real_tool_failure_keeps_reply_but_is_not_success(self):
-        self.materials()
-
-        async def explain_failure(agent, messages, tools, execute_tool, **kwargs):
-            result = await execute_tool("read_feedback", {})
-            self.assertFalse(result["ok"])
-            return {"content": "飞书授权失效，未读取反馈；请恢复授权。", "model": "test", "usage": {}}
-
-        run = self.run_record()
-        with patch.object(service, "execute_tool", AsyncMock(return_value={"ok": False, "code": "authorization_failed", "error": "飞书授权失效"})), patch.object(CentralAgent, "run", explain_failure):
-            await service.run_agent(run["id"])
-        latest = store.get("run", run["id"])
-        self.assertEqual(latest["status"], "failed")
-        self.assertFalse(latest["analysis_complete"])
-        self.assertIn("读取反馈", latest["error"])
-        self.assertNotIn("read_feedback", latest["error"])
-        self.assertIn("授权失效", latest["tool_failures"][0]["error"])
-        self.assertIn("未读取", latest["result"])
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "")
-        self.assertFalse(store.get("material_change", "change-one")["processed"])
-
-    async def test_recovered_read_clears_failure_and_allows_success(self):
-        materials = self.materials()
-
-        async def recover(agent, messages, tools, execute_tool, **kwargs):
-            self.assertFalse((await execute_tool("read_feedback", {}))["ok"])
-            self.assertTrue((await execute_tool("read_feedback", {}))["ok"])
-            return {"content": "授权恢复后已真实读取并分析。", "model": "test", "usage": {}}
-
-        outcomes = [{"ok": False, "code": "authorization_failed", "error": "授权暂时失效"}, {"ok": True, **materials}]
-        run = self.run_record()
-        with patch.object(service, "execute_tool", AsyncMock(side_effect=outcomes)), patch.object(CentralAgent, "run", recover):
-            await service.run_agent(run["id"])
-        self.assertEqual(store.get("run", run["id"])["status"], "succeeded")
-        self.assertEqual(store.get("feedback", "feedback-one")["processed_hash"], "feedback-hash")
-
-    async def test_uncertain_publication_reuses_marker_after_reopen_and_restart(self):
-        fake = FakeCli()
-        with patch("server.feishu_tools.shutil.which", return_value="/test-only/lark-cli"):
-            tool = FeishuTools(executable="test-only-cli")
-        with patch("server.feishu_tools.subprocess.run", side_effect=fake), patch.object(service, "feishu", return_value=tool):
-            proposal = await service.create_proposal({"target_id": store.ONBOARDING_IDS[0], "target_kind": "docx", "old_text": "", "new_text": "补充任务版本核对说明", "summary": "明确版本", "evidence": "实际反馈存在版本缺口"}, {"id": "proposal-run", "operation_id": "proposal-create", "identity_mode": "role_test"})
-            fake.read_failure_after_write = True
-            with self.assertRaises(FeishuError) as raised:
-                await service.publish_proposal(proposal["id"], proposal["draft_hash"], "publication-original", self.user)
-            self.assertEqual(raised.exception.code, "write_uncertain")
-            approved = store.get("proposal", proposal["id"])
-            self.assertEqual(approved["publication_operation_id"], "publication-original")
-            original_time = approved["confirmed_at"]
-            self.assertEqual(len(fake.writes(["docs", "+update"])), 1)
-            store.init()
-            fake.read_failure_after_write = False
-            another_admin = store.create_user("reconcile-admin", "另一管理员", ["admin"], "ReconcileAdmin123!", "role_test")["user"]
-            result = await service.publish_proposal(proposal["id"], proposal["draft_hash"], "new-dialog-id", another_admin)
-        self.assertEqual(result["status"], "published")
-        self.assertEqual(result["publication_operation_id"], "publication-original")
-        self.assertEqual(result["confirmed_by"], self.user["id"])
-        self.assertEqual(result["confirmed_at"], original_time)
-        self.assertEqual(len(fake.writes(["docs", "+update"])), 1)
-        self.assertIsNone(store.get("operation", "new-dialog-id"))
-
-    async def test_precommit_source_change_keeps_publication_blocked(self):
-        fake = FakeCli()
-        with patch("server.feishu_tools.shutil.which", return_value="/test-only/lark-cli"):
-            tool = FeishuTools(executable="test-only-cli")
-        with patch("server.feishu_tools.subprocess.run", side_effect=fake), patch.object(service, "feishu", return_value=tool):
-            proposal = await service.create_proposal({"target_id": store.ONBOARDING_IDS[0], "target_kind": "docx", "old_text": "", "new_text": "补充说明", "summary": "说明", "evidence": "实际依据"}, {"id": "proposal-run", "operation_id": "proposal-create", "identity_mode": "role_test"})
-            fake.docs[store.ONBOARDING_IDS[0]] += "<p>人工改稿</p>"
-            for operation in ("source-changed-original", "source-changed-reopened"):
-                with self.assertRaises(FeishuError) as raised:
-                    await service.publish_proposal(proposal["id"], proposal["draft_hash"], operation, self.user)
-                self.assertEqual(raised.exception.code, "source_changed")
-        self.assertEqual(fake.writes(["docs", "+update"]), [])
-        self.assertEqual(store.get("proposal", proposal["id"])["status"], "draft")
+    assert store.get("run", run["id"])["status"] == "interrupted"
+    assert not service.ACTIVE_TASKS
+asyncio.run(scenario())
+''')
+
+    def test_actual_scheduler_trigger_is_separate_from_manual(self):
+        self.check('''
+async def scenario():
+    due(project_id, 1)
+    first = await service.tick(project_id=project_id)
+    run = store.get("run", first["run_id"])
+    assert run["trigger"] == "scheduled" and run["user_id"] == runtime.SYSTEM_ID and run["thread_id"] is None
+    assert run["status"] == "succeeded" and not store.items("message")
+    count = len(captured)
+    due(project_id, 2)
+    second = await service.tick(project_id=project_id)
+    latest = store.get("run", second["run_id"])
+    assert latest["status"] == "succeeded" and latest["no_analysis"] and len(captured) == count
+    assert runtime.health(project_id)["next_due"] > runtime.now()
+    assert not runtime.overview()["scheduler_enabled"]
+    try:
+        await service.scheduler(asyncio.Event())
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("permanent scheduler was enabled")
+asyncio.run(scenario())
+''')
+
+    def test_restart_interrupts_queued_run_but_preserves_pending_evidence(self):
+        self.check('''
+async def scenario():
+    await change_watched()
+    await service.collect_materials(project_id)
+    thread = service.create_thread(admin, project_id, "重启恢复")
+    run = service.new_run(admin, "未启动的合成分析", "queued-restart", project_id=project_id, thread_id=thread["id"])
+    store.put("state", "restart_test", {"run_id": run["id"], "input": store.get("input_state", project_id),
+        "feedback": pending_feedback(), "changes": store.items("material_change")})
+asyncio.run(scenario())
+''', restart_body='''
+saved = store.get("state", "restart_test")
+assert store.get("run", saved["run_id"])["status"] == "interrupted"
+assert store.get("input_state", project_id) == saved["input"]
+assert pending_feedback() == saved["feedback"] and store.items("material_change") == saved["changes"]
+assert not captured and not service.ACTIVE_TASKS
+''')
+
+    def test_agent_task_requires_confirmation_and_replay_does_not_create_new_version(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    fields = {"task_id": "LAB-APPROVED-ONE", "instructions": "读取合成材料后反馈", "member_ids": ["mem_lab_codex_0001"], "task_kind": "work"}
+    assert "save_task" not in {t["function"]["name"] for t in service.tool_specs()}
+    MODEL_SCRIPT = [backend.tool_message("prepare_task", fields), "草稿待人工确认。"]
+    thread = service.create_thread(admin, project_id, "任务审批")
+    run = await chat(project_id, thread, "prepare-approved", "起草合成任务")
+    draft = next(d for d in store.items("task_draft") if d["run_id"] == run["id"])
+    assert run["status"] == "succeeded" and backend.stats(project_id).get("task_writes", 0) == 0
+    full_fields = {key: draft[key] for key in ("project_id", "task_id", "instructions", "member_ids", "task_kind", "stage", "nature", "related_task", "version")}
+    full_fields["status"] = "已发布"
+    try:
+        await service.save_task(full_fields, "unconfirmed", admin)
+    except ValueError as exc:
+        assert getattr(exc, "code", "") == "authorization_failed"
+    else:
+        raise AssertionError("save_task bypassed approval")
+    first = await service.publish_task_draft(draft["id"], draft["draft_hash"], "task-approved", admin)
+    again = await service.publish_task_draft(draft["id"], draft["draft_hash"], "another-dialog", admin)
+    assert first == again and first["publication"]["version"] == "1"
+    assert backend.stats(project_id)["task_writes"] == 1
+    try:
+        await service.save_task({**full_fields, "instructions": "同一确认后改稿"}, "task-approved", admin)
+    except (ValueError, PermissionError):
+        pass
+    else:
+        raise AssertionError("same confirmation accepted changed content")
+    assert backend.stats(project_id)["task_writes"] == 1
+asyncio.run(scenario())
+''')
+
+    def test_scheduled_iso_operation_is_stable_but_cannot_write(self):
+        self.check('''
+from server.feishu_tools import FeishuTools
+async def scenario():
+    global MODEL_SCRIPT
+    operation_id = "schedule:2026-10-10T08:00:00+00:00"
+    prefix = service.agent_operation_prefix({"operation_id": operation_id})
+    assert "+" not in prefix and prefix == service.agent_operation_prefix({"operation_id": operation_id})
+    assert service.agent_operation_prefix({"operation_id": "manual-original"}) == "agent:manual-original:"
+    FeishuTools._marker(prefix + "stable")
+    MODEL_SCRIPT = [backend.tool_message("save_task", {"task_id": "LAB-SCHEDULED", "instructions": "不得直接发布", "member_ids": ["mem_lab_codex_0001"]}), "已尝试处理。"]
+    run = service.new_run(runtime.system_actor(), "检查合成材料", operation_id, "sync", "scheduled", project_id)
+    blocked = await service.execute_tool("save_task", {}, run, runtime.system_actor())
+    assert blocked["code"] == "not_allowed_unattended"
+    await service.run_agent(run["id"])
+    final = store.get("run", run["id"])
+    assert final["status"] == "denied" and final["tool_failures"][0]["code"] == "not_allowed"
+    assert backend.stats(project_id).get("task_writes", 0) == 0 and not store.items("operation")
+asyncio.run(scenario())
+''')
+
+    def test_retry_context_includes_successful_tool_and_authoritative_write_results(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    source = watched()
+    thread = service.create_thread(admin, project_id, "续试依据")
+    MODEL_SCRIPT = [backend.tool_message("read_material", {"object_id": source["id"], "kind": source["kind"]}), {"http_status": 401}]
+    failed = await chat(project_id, thread, "retry-evidence", "读取合成资料后分析")
+    assert failed["status"] != "succeeded"
+    draft = service.prepare_task({"task_id": "LAB-RETRY-EVIDENCE", "instructions": "人工审阅的合成任务", "member_ids": ["mem_lab_codex_0001"]}, failed, admin)
+    published = await service.publish_task_draft(draft["id"], draft["draft_hash"], "approved-between-retries", admin)
+    MODEL_SCRIPT = ["保留已确认任务，继续分析。"]
+    before = len(captured)
+    retry = await service.retry_run(failed["id"], admin)
+    await service.ACTIVE_RUN_TASKS[retry["id"]]
+    assert store.get("run", retry["id"])["status"] == "succeeded"
+    context = material_context(captured[before])
+    assert len(context["previous_attempts"]) == 1
+    assert any(s.get("name") == "read_material" and s.get("type") == "tool_result" for s in context["previous_attempts"][0]["steps"])
+    op = next(o for o in context["prior_operations"] if o["id"] == "approved-between-retries")
+    assert op["status"] == "succeeded" and op["result"]["task_id"] == published["task_id"]
+    system = next(m["content"] for m in captured[before]["messages"] if m["role"] == "system")
+    assert "人工审阅的合成任务" not in system and "prior_operations" not in system
+asyncio.run(scenario())
+''')
+
+    def test_model_history_excludes_failed_attempts_and_current_retry_message(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    thread = service.create_thread(admin, project_id, "历史隔离")
+    MODEL_SCRIPT = ["SUCCESSFUL_RESPONSE"]
+    success = await chat(project_id, thread, "history-success", "SUCCESSFUL_REQUEST")
+    for key, status, completed in (("failed", "failed", True), ("interrupted", "interrupted", True), ("unfinished", "succeeded", False), ("old-generation", "succeeded", True)):
+        prior = {**success, "id": key, "operation_id": key, "status": status}
+        if not completed: prior.pop("completed_at", None)
+        if key == "old-generation": prior["generation"] = "old-generation"
+        store.put("run", key, prior)
+        for role in ("user", "assistant"):
+            store.put("message", key + ":" + role, {"run_id": key, "thread_id": thread["id"], "project_id": project_id,
+                "role": role, "content": key.upper() + "_SENTINEL", "created_at": runtime.now()})
+    MODEL_SCRIPT = [backend.tool_message("read_feedback", {}), {"http_status": 401}]
+    current = await chat(project_id, thread, "history-retry", "CURRENT_RETRY_REQUEST")
+    # A stored failed response remains reviewable, but cannot enter conversation history.
+    store.put("message", current["id"] + ":assistant", {"run_id": current["id"], "thread_id": thread["id"],
+        "role": "assistant", "content": "CURRENT_FAILED_RESPONSE_SENTINEL", "created_at": runtime.now()})
+    MODEL_SCRIPT = ["续试完成。"]
+    before = len(captured)
+    retry = await service.retry_run(current["id"], admin)
+    await service.ACTIVE_RUN_TASKS[retry["id"]]
+    conversation = [m["content"] for m in captured[before]["messages"] if "<materials>" not in m.get("content", "") and m["role"] != "system"]
+    assert conversation == ["SUCCESSFUL_REQUEST", "SUCCESSFUL_RESPONSE", "CURRENT_RETRY_REQUEST"], conversation
+    assert store.get("message", "failed:assistant")["content"] == "FAILED_SENTINEL"
+asyncio.run(scenario())
+''')
+
+    def test_unresolved_real_tool_failure_keeps_reply_but_is_not_success(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    await change_watched()
+    await service.collect_materials(project_id)
+    backend.set_fault(project_id, "read_tasks", code="authorization_failed")
+    MODEL_SCRIPT = [backend.tool_message("read_feedback", {}), "读取失败，未完成本轮反馈分析。"]
+    thread = service.create_thread(admin, project_id, "读取失败")
+    result = await chat(project_id, thread, "unresolved-read", "读取合成反馈")
+    assert result["status"] == "denied" and not result["analysis_complete"]
+    assert result["tool_failures"][0]["code"] == "authorization_failed" and "读取失败" in result["result"]
+    assert all(f["processed_hash"] != f["content_hash"] for f in pending_feedback())
+    assert all(not c["processed"] for c in store.items("material_change"))
+    assert runtime.health(project_id)["issues"]["read:tasks"]["active"]
+asyncio.run(scenario())
+''')
+
+    def test_recovered_read_clears_failure_and_allows_success(self):
+        self.check('''
+async def scenario():
+    global MODEL_SCRIPT
+    backend.set_fault(project_id, "read_tasks", code="authorization_failed")
+    MODEL_SCRIPT = [backend.tool_message("read_feedback", {}, "read-failed"), backend.tool_message("read_feedback", {}, "read-recovered"), "恢复后完成合成反馈分析。"]
+    thread = service.create_thread(admin, project_id, "读取恢复")
+    result = await chat(project_id, thread, "recovered-read", "读取合成反馈")
+    assert result["status"] == "succeeded" and result["analysis_complete"]
+    assert all(f["processed_hash"] == f["content_hash"] for f in pending_feedback())
+    assert not runtime.health(project_id)["issues"]["read:tasks"]["active"]
+    assert result["usage"]["tool_calls"] == 2
+asyncio.run(scenario())
+''')
+
+    def test_uncertain_publication_reuses_marker_after_reopen_and_restart(self):
+        self.check('''
+async def scenario():
+    item = await proposal()
+    backend.set_fault(project_id, "write_document_after_commit", code="timeout")
+    backend.set_fault(project_id, "read_document_after_write", code="timeout")
+    try:
+        await service.publish_proposal(item["id"], item["draft_hash"], "publication-original", admin)
+    except Exception:
+        assert store.get("operation", "publication-original")["status"] == "uncertain"
+    else:
+        raise AssertionError("lost response not exercised")
+    saved = store.get("proposal", item["id"])
+    assert backend.stats(project_id)["document_writes"] == 1
+    store.put("state", "publication_restart_test", {"id": item["id"], "hash": item["draft_hash"], "confirmed_at": saved["confirmed_at"],
+        "confirmed_by": saved["confirmed_by"], "writes": backend.stats(project_id)["document_writes"]})
+asyncio.run(scenario())
+''', restart_body='''
+async def scenario():
+    saved = store.get("state", "publication_restart_test")
+    another = store.create_user("reconcile-admin", "另一测试管理员", ["admin"], "Reconcile-Test-123!", "role_test")["user"]
+    result = await service.publish_proposal(saved["id"], saved["hash"], "new-dialog-id", another)
+    assert result["status"] == "published" and result["publication_operation_id"] == "publication-original"
+    assert result["confirmed_at"] == saved["confirmed_at"] and result["confirmed_by"] == saved["confirmed_by"]
+    assert backend.stats(project_id)["document_writes"] == saved["writes"]
+    assert store.get("operation", "publication-original")["status"] == "succeeded"
+    assert not store.get("operation", "new-dialog-id")
+asyncio.run(scenario())
+''')
+
+    def test_precommit_source_change_keeps_publication_blocked(self):
+        self.check('''
+async def scenario():
+    item = await proposal()
+    remote = store.get("lab_remote_document", item["target_id"])
+    update_remote_document(remote, remote["content"] + "\\n人工合成改稿。")
+    for operation in ("source-changed-original", "source-changed-reopened"):
+        try:
+            await service.publish_proposal(item["id"], item["draft_hash"], operation, admin)
+        except ValueError as exc:
+            assert "来源已变化" in str(exc)
+        else:
+            raise AssertionError("stale source was published")
+    assert backend.stats(project_id).get("document_writes", 0) == 0
+    assert store.get("proposal", item["id"])["status"] == "draft"
+    assert store.get("lab_remote_document", item["target_id"])["content"] == remote["content"]
+asyncio.run(scenario())
+''')
 
 
 if __name__ == "__main__":

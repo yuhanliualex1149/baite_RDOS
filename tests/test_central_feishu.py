@@ -128,17 +128,21 @@ class CentralFeishuTests(unittest.TestCase):
             "BAITE_CENTRAL_SKILL_FOLDER_TOKEN": SKILL_FOLDER,
         })
         self.env.start()
+        self.addCleanup(self.env.stop)
         self.fake = FakeCli()
         self.cli = patch("server.feishu_tools.subprocess.run", side_effect=self.fake)
         self.cli.start()
+        # FeishuTools may reject construction in a guarded runtime. If setUp
+        # exits early, unittest does not call tearDown; registered cleanups
+        # still run and keep the subprocess mock out of unrelated tests.
+        self.addCleanup(self.cli.stop)
         self.which = patch("server.feishu_tools.shutil.which", return_value="/test-only/lark-cli")
         self.which.start()
+        self.addCleanup(self.which.stop)
         self.tools = FeishuTools(executable="test-only-cli", timeout=999)
 
     def tearDown(self):
-        self.cli.stop()
-        self.which.stop()
-        self.env.stop()
+        pass
 
     def test_actual_tabular_shape_and_pagination_are_normalized(self):
         self.fake.fields.extend(ADDED_TASK_FIELDS)

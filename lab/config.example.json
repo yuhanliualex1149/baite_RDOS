@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "environment": "rdos_local_lab",
+  "env_id": "rdos2_lab_000000000000",
+  "root": "/ABSOLUTE/PATH/TO/RDOS2_Local_Lab",
+  "port": 18760,
+  "backends": {"documents": "local_mock", "model": "local_mock"},
+  "phase3": {"enabled": false},
+  "external_resources": {
+    "enabled": false,
+    "folder": "",
+    "documents": [],
+    "task_table": "",
+    "feedback": "",
+    "recipient": ""
+  }
+}

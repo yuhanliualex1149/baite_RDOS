@@ -14,16 +14,21 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError, field_validator
 
+from lab.guard import require_active
+
+# This clone has no production start mode. The launcher must install the guard
+# before importing any application module.
+require_active()
+
+from server import lab_panel
 from server import db, central_store, central_service
 from server.central_api import router as central_router
-from server.central_onboarding import router as onboarding_router
 from server.onboarding import instructions, validate_client_workspace
 from server.project_sync import (
     export_pending_progress,
-    scheduler as project_scheduler,
     sync_project,
 )
-from server.rag_sync import external_sync_disabled, scheduler, sync_selected_rag
+from server.rag_sync import external_sync_disabled, sync_selected_rag
 from server.workflow_reference import (
     DELIVERY_SCALES,
     DEVELOPMENT_MODES,
@@ -35,33 +40,42 @@ from server.workflow_reference import (
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-SESSION_COOKIE = "baite_admin_session"
+SESSION_COOKIE = lab_panel.cookie_name("admin")
 SESSION_HOURS = int(os.environ.get("BAITE_SESSION_HOURS", "12"))
 ONLINE_WINDOW_SECONDS = float(os.environ.get("BAITE_ONLINE_WINDOW_SECONDS", "60"))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    require_active()
     db.init_db()
     central_store.init()
-    for item in central_store.items("onboarding_session"):
-        if item.get("checking"):
-            item.update(checking=False, error="服务重启中断了上次核对；已有成果保留，可继续核对。")
-            central_store.put("onboarding_session", item["id"], item)
-    stop = asyncio.Event()
-    tasks = [asyncio.create_task(central_service.scheduler(stop))]
-    if os.environ.get("BAITE_ENABLE_LEGACY_SYNC", "").lower() in ("1", "true", "yes"):
-        tasks.extend((asyncio.create_task(scheduler(stop)), asyncio.create_task(project_scheduler(stop))))
+    from server import lab_central_backend, phase1_runtime
+    # Fixtures are seeded only by isolated tests; startup must not recreate cleared tasks.
+    phase1_runtime.initialize()
+    from server import phase3_service
+    phase3_service.initialize()
+    from server import peer_tasks
+    peer_tasks.initialize()
+    from server.central_api import _sync_registered_projects
+    _sync_registered_projects()
+    from server import central_memory
+    # SQLite owns memory; startup only versions its schema and regenerates the
+    # institution view. It never imports chat history or starts a memory job.
+    central_memory.initialize()
+    from server import central_settings, central_maintenance
+    central_settings.initialize()
+    await central_maintenance.start(enabled=True)
+    # Recovery records interruptions; it never replays tools or starts a scheduler.
     try:
         yield
     finally:
-        stop.set()
-        await asyncio.gather(*tasks)
+        await central_maintenance.stop()
         await central_service.shutdown()
 
 
 app = FastAPI(
-    title="Baite AI R&D OS",
+    title="RDOS 本地实验环境",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -69,7 +83,22 @@ app = FastAPI(
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(central_router)
-app.include_router(onboarding_router)
+from server.lab_routes import router as lab_router
+app.include_router(lab_panel.router)
+app.include_router(lab_router)
+from server.phase3_api import router as phase3_router, onboard_router as phase3_onboard_router
+app.include_router(phase3_router)
+app.include_router(phase3_onboard_router)
+from server.central_accounts import router as central_accounts_router
+app.include_router(central_accounts_router)
+from server.shared_knowledge import router as shared_knowledge_router
+app.include_router(shared_knowledge_router)
+from server.central_settings import router as central_settings_router
+from server.central_maintenance import router as central_maintenance_router
+from server.peer_tasks import router as peer_tasks_router
+app.include_router(central_settings_router)
+app.include_router(central_maintenance_router)
+app.include_router(peer_tasks_router)
 
 
 @app.middleware("http")
@@ -87,6 +116,10 @@ async def admin_origin_guard(request: Request, call_next):
     if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# Register last so this boundary runs before all application middleware.
+app.middleware("http")(lab_panel.boundary)
 
 
 def require_external_sync() -> None:
@@ -412,7 +445,7 @@ def legacy_index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok", "app_release": os.environ.get("BAITE_APP_RELEASE", "development")}
+    return {"status": "ok", "app_release": os.environ.get("BAITE_APP_RELEASE", "development"), **lab_panel.environment(), "mode": "local_lab"}
 
 
 @app.get("/api/bootstrap/manifest")

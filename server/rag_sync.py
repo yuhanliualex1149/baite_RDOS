@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Protocol, Tuple
 
 from server import db
+from lab.guard import deny
 
 
 def external_sync_disabled() -> bool:
-    return os.environ.get("BAITE_DISABLE_EXTERNAL_SYNC", "false").lower() in ("1", "true", "yes")
+    return True
 
 
 class _LarkMarkdownParser(HTMLParser):
@@ -98,12 +99,14 @@ class FeishuRagSource:
     """Read the configured Feishu folder without modifying it."""
 
     def __init__(self, executable: str = "lark-cli") -> None:
+        deny("real_rag_cli_constructor")
         resolved = shutil.which(executable)
         if not resolved:
             raise RuntimeError("找不到 lark-cli，无法读取飞书文件夹")
         self.executable = resolved
 
     def _run(self, args: List[str], cwd: Path | None = None) -> Any:
+        deny("real_rag_cli_subprocess")
         completed = subprocess.run(
             [self.executable, *args],
             check=False,

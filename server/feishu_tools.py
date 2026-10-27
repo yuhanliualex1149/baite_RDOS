@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from lab.guard import deny
+
 BASE_TOKEN = "E34dbYDEXaCRnDsMQDBcMvyMnjb"
 TABLE_ID = "tblvJU3CwPt6eAaw"
 FEEDBACK_DOC = "RoxidRoZXocXSnxR0tlc4aCMnof"
@@ -70,7 +72,20 @@ def _plain(content: str) -> str:
 
 class FeishuTools:
     def __init__(self, executable: str | None = None, timeout: int = 45,
-                 sources: list[dict] | None = None, feedback_doc: str | None = None) -> None:
+                 sources: list[dict] | None = None, feedback_doc: str | None = None,
+                 *, _local_backend: Any = None) -> None:
+        if _local_backend is None:
+            deny("real_feishu_cli_constructor")
+        from server.lab_central_backend import trusted_tools
+        if trusted_tools(_local_backend):
+            self._local_backend = _local_backend
+            self.timeout = min(max(int(timeout), 1), 45)
+            self.base_token, self.table_id = _local_backend.base_token, _local_backend.table_id
+            self.feedback_doc = _local_backend.feedback_doc
+            self._sources = {source["id"]: dict(source) for source in _local_backend.sources}
+            self._roots = [token for token, source in self._sources.items() if source["kind"] == "folder"]
+            return
+        deny("real_feishu_cli_constructor")
         candidate = executable or os.environ.get("BAITE_LARK_CLI") or DEFAULT_CLI
         self.executable = candidate if Path(candidate).is_file() else shutil.which(candidate)
         if not self.executable and not executable and not os.environ.get("BAITE_LARK_CLI"):
@@ -100,9 +115,18 @@ class FeishuTools:
 
     @property
     def task_url(self) -> str:
-        return f"{FEISHU_ORIGIN}/base/{self.base_token}?table={self.table_id}"
+        backend = getattr(self, "_local_backend", None)
+        origin = backend.base_url if backend else FEISHU_ORIGIN
+        return f"{origin}/base/{self.base_token}?table={self.table_id}"
 
     def _run(self, args: list[str], object_id: str = "", cwd: str | None = None, recover_auth: bool = True) -> dict:
+        backend = getattr(self, "_local_backend", None)
+        if backend is None:
+            deny("real_feishu_cli_subprocess")
+        from server.lab_central_backend import trusted_tools
+        if trusted_tools(backend):
+            return backend.run(args, object_id)
+        deny("real_feishu_cli_subprocess")
         try:
             result = subprocess.run([self.executable, *args], capture_output=True,
                                     text=True, timeout=self.timeout, check=False, cwd=cwd)
@@ -255,7 +279,7 @@ class FeishuTools:
         content = data.get("content")
         if not isinstance(content, str):
             raise FeishuError("invalid_response", "Markdown 文件没有可读正文", token)
-        return {"ok": True, "object_id": token, "kind": "markdown", "source_url": f"{FEISHU_ORIGIN}/file/{token}",
+        return {"ok": True, "object_id": token, "kind": "markdown", "source_url": source.get("source_url") or f"{FEISHU_ORIGIN}/file/{token}",
                 "title": data.get("file_name") or source.get("name", ""), "content": content,
                 "content_hash": hashlib.sha256(content.encode()).hexdigest()}
 
@@ -436,6 +460,13 @@ class FeishuTools:
                 "source_url": task["source_url"], "operation_id": operation_id, "status": status, "task": task}
 
     def _write_content(self, args: list[str], flag: str, content: str, object_id: str) -> None:
+        backend = getattr(self, "_local_backend", None)
+        if backend is None:
+            deny("real_feishu_cli_subprocess")
+        from server.lab_central_backend import trusted_tools
+        if trusted_tools(backend):
+            backend.write_content(args, content, object_id)
+            return
         # Avoid passing private work content in process arguments or error logs.
         with tempfile.TemporaryDirectory(prefix="baite-central-feishu-") as temporary:
             source = Path(temporary) / "content.md"

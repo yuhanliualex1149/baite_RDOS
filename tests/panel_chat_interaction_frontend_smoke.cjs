@@ -1,0 +1,132 @@
+/* Real Chrome, original UI source, isolated in-memory API responses only. */
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {chromium}=require('/Users/alexliu/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const root=path.resolve(__dirname,'..'),dir=path.resolve(root,'../evidence/panel_shared_chat_ui');
+const report={mode:'Chrome isolated API fixtures; original unmodified UI source',checks:[],errors:[],external_requests:[],started_at:new Date().toISOString()};
+const pass=name=>{report.checks.push({name,passed:true});console.log('PASS '+name);};
+let browser;
+(async()=>{
+  browser=await chromium.launch({channel:'chrome',headless:true,args:['--disable-background-networking','--no-first-run']});
+  const page=await browser.newPage({viewport:{width:1360,height:960}});page.setDefaultTimeout(10000);
+  page.on('pageerror',e=>report.errors.push(e.message));
+  const user={id:'admin',username:'admin',display_name:'管理员',roles:['admin'],enabled:true};
+  const projects=[{id:'P',name:'项目一',is_default:true,status:'active',node_ids:[]},{id:'Q',name:'项目二',status:'active',node_ids:[]}];
+  const threads=[{id:'T',project_id:'P',title:'第一段对话',created_at:'2026-10-23T00:00:00Z'},{id:'U',project_id:'P',title:'另一段对话',created_at:'2026-10-23T01:00:00Z'},{id:'V',project_id:'Q',title:'项目二对话',created_at:'2026-10-23T02:00:00Z'}];
+  const messages=[],runs=[],posts=[],releases=new Map();let mode='delay',failPoll=false;
+  const wait=async test=>{for(let i=0;i<80;i++){if(test())return;await new Promise(r=>setTimeout(r,25));}throw Error('Fixture condition timed out');};
+  const finish=id=>{const run=runs.find(r=>r.id===id);run.status='succeeded';messages.push({id:id+'-a',run_id:id,thread_id:run.thread_id,project_id:run.project_id,role:'assistant',content:'已核对，资料齐全。',created_at:new Date().toISOString()});};
+  await page.route('**/*',async route=>{
+    const request=route.request(),url=new URL(request.url()),p=url.pathname,method=request.method();
+    const send=(value,status=200,type='application/json')=>route.fulfill({status,contentType:type,body:typeof value==='string'?value:JSON.stringify(value)});
+    if(url.hostname!=='rdos.test'){report.external_requests.push(request.url());return route.abort();}
+    if(p==='/')return send(fs.readFileSync(path.join(root,'server/static/central.html'),'utf8'),200,'text/html');
+    if(/central\.(js|css)$/.test(p))return send(fs.readFileSync(path.join(root,'server/static',path.basename(p)),'utf8'),200,p.endsWith('.js')?'text/javascript':'text/css');
+    if(p==='/api/lab/info')return send({env_id:'fixture',generation:'fixture_generation',project_id:'lab_project_phase0',runtime:{model_mode:'fixture'}});
+    if(p==='/api/central/auth/me'||p==='/api/central/auth/login')return send({user});
+    if(p==='/api/central/projects')return send({items:projects,nodes:[]});
+    if(p==='/api/central/users')return send({items:[user]});
+    if(p==='/api/central/threads')return send({items:threads.filter(t=>t.project_id===(url.searchParams.get('project_id')||''))});
+    if(p==='/api/central/workspace'||p==='/api/central/overview')return send({user,users:[user],project:projects.find(x=>x.id===url.searchParams.get('project_id')),messages:messages.slice(),runs:runs.slice(),tasks:[]});
+    if(p==='/api/central/chat'){
+      const body=request.postDataJSON();posts.push(body);
+      if(mode==='expired')return send({detail:{message:'登录已过期。'}},401);
+      const existing=runs.find(r=>r.operation_id===body.operation_id);
+      if(existing)return send({run_id:existing.id});
+      if(mode==='fail')return send({detail:{message:'暂时无法连接，请继续原消息。'}},503);
+      const run={id:'R'+(runs.length+1),operation_id:body.operation_id,thread_id:body.thread_id,project_id:body.project_id,status:'running',kind:'chat',trigger:'manual',steps:[],created_at:new Date().toISOString()};runs.push(run);
+      messages.push({id:run.id+'-u',operation_id:body.operation_id,run_id:run.id,thread_id:body.thread_id,project_id:body.project_id,role:'user',user_id:user.id,content:body.message,created_at:run.created_at});
+      if(mode==='delay')await new Promise(resolve=>releases.set(run.id,resolve));
+      if(mode==='lost-response')return route.abort('failed');
+      return send({run_id:run.id});
+    }
+    if(p.startsWith('/api/central/runs/')&&p.endsWith('/retry')){const run=runs.find(r=>r.id===p.split('/').at(-2));run.status='running';run.error='';return send({run_id:run.id});}
+    if(p.startsWith('/api/central/runs/')){
+      if(failPoll)return send({detail:{message:'暂时无法读取运行状态。'}},503);
+      return send({run:runs.find(r=>r.id===p.split('/').pop())});
+    }
+    return send({items:[]});
+  });
+  await page.goto('http://rdos.test/');await page.waitForSelector('#app-view:not(.hidden)');
+  await page.click('[data-page="agent"]');await page.selectOption('#thread-select','T');
+  await page.fill('#chat-message','请核对资料是否齐全');await page.press('#chat-message','Enter');await wait(()=>posts.length===1);
+  assert.equal(await page.locator('#messages .message.user').count(),1);
+  assert.match(await page.locator('#messages .message.user').innerText(),/请核对资料是否齐全/);
+  assert.match(await page.locator('#messages .thinking').innerText(),/思考中/);
+  assert.equal(await page.locator('#chat-message').inputValue(),'');
+  assert.equal(await page.locator('#chat-send').isDisabled(),true);
+  await page.press('#chat-message','Enter');assert.equal(posts.length,1);
+  assert.doesNotMatch(await page.locator('#page-agent').innerText(),/消息已提交|正在处理本线程消息|Ctrl \/ ⌘/);
+  pass('Enter immediately shows the user turn and thinking bubble before POST response; duplicate submission blocked');
+  await page.selectOption('#thread-select','U');assert.doesNotMatch(await page.locator('#messages').innerText(),/请核对资料是否齐全/);assert.equal(await page.locator('.thinking').count(),0);
+  await page.fill('#chat-message','另一段草稿');releases.get('R1')();await page.waitForTimeout(250);
+  assert.equal(await page.locator('#chat-message').inputValue(),'另一段草稿');
+  assert.doesNotMatch(await page.locator('#messages').innerText(),/请核对资料是否齐全/);
+  await page.selectOption('#thread-select','T');await page.waitForSelector('#messages .thinking');
+  assert.equal(await page.locator('#messages .message.user').count(),1);
+  pass('Switching threads isolates pending messages and preserves the other draft; persisted user turn deduplicates');
+  runs[0].steps=[{type:'tool_call',name:'read_document',arguments:{secret:'NEVER_SHOW_ARGUMENTS'},result:{reasoning:'NEVER_SHOW_REASONING'}}];
+  await page.waitForFunction(()=>document.querySelector('#messages').textContent.includes('正在读取相关资料'));
+  assert.doesNotMatch(await page.locator('#page-agent').innerText(),/NEVER_SHOW|read_document/);
+  pass('Actual tool category projects to a short stage without arguments, reasoning or logs');
+  fs.mkdirSync(dir,{recursive:true,mode:0o700});await page.screenshot({path:path.join(dir,'thinking.png'),fullPage:true});
+  finish('R1');await page.waitForFunction(()=>document.querySelector('#messages').textContent.includes('已核对，资料齐全。'));
+  assert.equal(await page.locator('#messages .thinking').count(),0);assert.equal(await page.locator('#chat-send').isDisabled(),false);
+  assert.equal(await page.locator('#messages .message.user').count(),1);
+  pass('Successful completion replaces thinking with the actual reply and unlocks sending');
+  await page.fill('#chat-message','第一行');await page.press('#chat-message','Shift+Enter');await page.type('#chat-message','第二行');
+  assert.equal(await page.locator('#chat-message').inputValue(),'第一行\n第二行');assert.equal(posts.length,1);
+  await page.locator('#chat-message').dispatchEvent('compositionstart');await page.press('#chat-message','Enter');assert.equal(posts.length,1);
+  await page.locator('#chat-message').dispatchEvent('compositionend');
+  await page.locator('#chat-message').dispatchEvent('keydown',{key:'Enter',code:'Enter',isComposing:true,keyCode:229});assert.equal(posts.length,1);
+  pass('Shift+Enter adds a newline; composing Chinese text does not send');
+  mode='fail';await page.fill('#chat-message','失败时保留这段原文');await page.press('#chat-message','Enter');await wait(()=>posts.length===2);
+  await page.waitForSelector('[data-chat-retry]');assert.equal(await page.locator('#chat-message').inputValue(),'失败时保留这段原文');
+  assert.equal(await page.locator('#messages .thinking').count(),0);assert.match(await page.locator('#messages').innerText(),/失败时保留这段原文/);
+  const originalOperation=posts.at(-1).operation_id;mode='normal';await page.click('[data-chat-retry]');await wait(()=>posts.length===3);
+  assert.equal(posts.at(-1).operation_id,originalOperation);assert.equal(posts.at(-1).message,'失败时保留这段原文');
+  finish('R2');await page.waitForFunction(()=>document.querySelectorAll('#messages .message.agent:not(.thinking)').length===2);
+  pass('Failed sending preserves original input and turn; explicit recovery reuses the same operation ID');
+  mode='delay';await page.fill('#chat-message','项目一未结束问题');await page.press('#chat-message','Enter');await wait(()=>posts.length===4);
+  await page.selectOption('#chat-project','Q');await page.waitForSelector('#thread-select option[value="V"]',{state:'attached'});
+  assert.doesNotMatch(await page.locator('#messages').innerText(),/项目一未结束问题/);assert.equal(await page.locator('#messages .thinking').count(),0);
+  await page.fill('#chat-message','项目二尚未发送');releases.get('R3')();await page.waitForTimeout(150);
+  assert.equal(await page.locator('#chat-message').inputValue(),'项目二尚未发送');
+  finish('R3');await page.waitForTimeout(2150);assert.doesNotMatch(await page.locator('#messages').innerText(),/项目一未结束问题/);
+  pass('Project switching also isolates in-flight messages, replies and composer drafts');
+  await page.selectOption('#chat-project','P');await page.selectOption('#thread-select','T');mode='normal';
+  await page.fill('#chat-message','读取失败检查');await page.press('#chat-message','Enter');await wait(()=>posts.length===5);
+  failPoll=true;await page.waitForSelector('[data-chat-retry]');assert.equal(await page.locator('.thinking').count(),0);
+  failPoll=false;const prior=posts.at(-1).operation_id;await page.click('[data-chat-retry]');await wait(()=>posts.length===6);assert.equal(posts.at(-1).operation_id,prior);
+  finish('R4');await page.waitForFunction(()=>document.querySelector('#chat-send').disabled===false);
+  pass('Polling failure stops the spinner and resumes the accepted operation without redispatch');
+  await page.fill('#chat-message','服务中断后继续');await page.press('#chat-message','Enter');await wait(()=>posts.length===7);
+  runs.at(-1).status='failed';runs.at(-1).error='本次操作暂未完成，请稍后重试，已有记录保留。';runs.at(-1).error_code='agent_timeout';runs.at(-1).steps=[{type:'model_request',stage:'request_interpretation'},{type:'retry',stage:'request_interpretation',code:'model_timeout'}];
+  await page.waitForSelector('[data-retry-run]');assert.equal(await page.locator('.thinking').count(),0);
+  assert.match(await page.locator('#messages .chat-failure').innerText(),/等待中央模型理解请求超时；本次尚未办理任务/);
+  await page.reload();await page.waitForSelector('#app-view:not(.hidden)');await page.click('[data-page="agent"]');await page.selectOption('#thread-select','T');
+  await page.waitForSelector('[data-retry-run]');assert.match(await page.locator('#messages .chat-failure').innerText(),/等待中央模型理解请求超时；本次尚未办理任务/);
+  const beforeRetry=posts.length;await page.click('[data-retry-run]');await page.waitForSelector('.thinking');assert.equal(posts.length,beforeRetry);
+  finish('R5');await page.waitForFunction(()=>document.querySelector('#chat-send').disabled===false);
+  pass('Terminal failure removes thinking and original-run recovery retains thread identity');
+  mode='lost-response';await page.fill('#chat-message','接受成功但丢失响应');await page.press('#chat-message','Enter');await wait(()=>posts.length===8);
+  await page.waitForSelector('[data-chat-retry]');const lostID=posts.at(-1).operation_id;
+  await page.reload();await page.waitForSelector('#app-view:not(.hidden)');await page.click('[data-page="agent"]');await page.selectOption('#thread-select','T');
+  assert.equal(await page.locator('#messages .message.user').filter({hasText:'接受成功但丢失响应'}).count(),1);
+  // Reload can itself discover and resume the accepted run without another POST.
+  if(await page.locator('[data-chat-retry]').count()){mode='normal';await page.click('[data-chat-retry]');await wait(()=>posts.length===9);assert.equal(posts.at(-1).operation_id,lostID);}
+  assert.equal(runs.filter(r=>r.operation_id===lostID).length,1);finish('R6');await page.waitForFunction(()=>document.querySelector('#chat-send').disabled===false);
+  pass('Lost POST response keeps a single persisted turn and resumes the existing run');
+  mode='expired';const preExpired=posts.length;await page.fill('#chat-message','登录过期时的原文');await page.press('#chat-message','Enter');await wait(()=>posts.length===preExpired+1);
+  const expiredID=posts.at(-1).operation_id;await page.waitForSelector('#login-view:not(.hidden)');
+  mode='normal';await page.fill('#login-username','admin');await page.fill('#login-password','FixturePasswordOnly');await page.click('#login-submit');
+  await page.waitForSelector('#app-view:not(.hidden)');await page.click('[data-page="agent"]');await page.selectOption('#thread-select','T');
+  await page.waitForSelector('[data-chat-retry]');assert.equal(await page.locator('#chat-message').inputValue(),'登录过期时的原文');
+  await page.click('[data-chat-retry]');await wait(()=>posts.length===preExpired+2);assert.equal(posts.at(-1).operation_id,expiredID);
+  finish('R7');await page.waitForFunction(()=>document.querySelector('#chat-send').disabled===false);
+  pass('Expired authentication preserves original input and operation ID for the same account and thread');
+  assert.deepEqual(report.errors,[]);assert.deepEqual(report.external_requests,[]);
+  pass('No browser errors or external connections; fixture never calls a live model or work table');
+  await page.screenshot({path:path.join(dir,'completed.png'),fullPage:true});
+})().catch(e=>{report.failure=e.stack;console.error(e);process.exitCode=1;}).finally(async()=>{
+  fs.mkdirSync(dir,{recursive:true,mode:0o700});report.finished_at=new Date().toISOString();fs.writeFileSync(path.join(dir,'report.json'),JSON.stringify(report,null,2),{mode:0o600});if(browser)await browser.close();
+});
