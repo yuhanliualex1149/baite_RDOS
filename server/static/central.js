@@ -1457,7 +1457,7 @@
     if(b.dataset.phase3Action)showPhase3Action(phase3Tasks().find(t=>phase3TaskId(t)===b.dataset.phase3Id),b.dataset.phase3Action);
     if(b.dataset.phase3Draft){const d=phase3Drafts().find(d=>d.id===b.dataset.phase3Draft);if(d)showPhase3Action(phase3Tasks().find(t=>phase3TaskId(t)===d.task_id)||{...d.payload,task_id:d.task_id},d.base_requirements_version?'update':'start',d);}
     if(b.dataset.phase3History)showPhase3History(b.dataset.phase3History,b);
-    if(b.dataset.phase3Copy)busy(b,async()=>{const id=b.dataset.phase3Copy,url=new URL('nodes/'+encodeURIComponent(id)+'/start',document.baseURI||location.href).href;await navigator.clipboard.writeText('请读取 RDOS 接入说明，按本客户端的 Skill 机制持久安装并启用 RDOS 执行 Skill，再检查当前任务：'+url+'\n本节点：'+id+'。使用已有飞书连接；无任务时如实报告，不自行创建定时安排。');toast('已复制接入短指令。');},'member-management-error');
+    if(b.dataset.phase3Copy)busy(b,async()=>{const d=await api('/phase3/nodes/'+encodeURIComponent(b.dataset.phase3Copy)+'/onboarding',{method:'POST',body:{},timeout_ms:120000});await navigator.clipboard.writeText(d.instruction);toast(d.task?'已复制接入指令，安装与定时配置任务已就绪。':'已复制接入短指令。');},'member-management-error');
     if(b.dataset.tab){state.tab=b.dataset.tab;document.querySelectorAll('.tab').forEach(t=>{t.classList.toggle('active',t.dataset.tab===state.tab);t.setAttribute('aria-selected',String(t.dataset.tab===state.tab));});document.querySelectorAll('.tab-view').forEach(v=>v.classList.toggle('hidden',v.id!=='view-'+state.tab));}
     if(b.dataset.chatRetry){const pending=pendingChat();if(pending?.id===b.dataset.chatRetry)sendChat(pending);}
     if(b.dataset.chatExample){$('chat-message').value=b.dataset.chatExample;$('chat-message').focus();}

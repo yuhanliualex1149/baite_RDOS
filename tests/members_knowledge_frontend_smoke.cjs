@@ -61,6 +61,7 @@ let browser;
     }
     if(pathname==='/api/central/phase3/workspace')return send({project:projects.find(p=>p.id===url.searchParams.get('project_id')),tasks:[{task_id:'t1',title:'当前工作',business_status:'active',requirements_version:1,completion_rule:{kind:'receipt_recorded'},executor_node_ids:['node_member']}],nodes,scope:{zones:{}},drafts:[],events:[],documents:[],read_only:activeUser!==admin});
     if(pathname==='/api/central/knowledge')return send(catalog());
+    if(pathname==='/api/central/phase3/nodes/node_member/onboarding'&&method==='POST')return send({instruction:'请读取 http://rdos.test/nodes/node_member/start ，本节点：node_member。',task:{task_id:'setup-member'}});
     if(pathname.startsWith('/api/central/knowledge/items/')){
       const item=[...items,...skillFiles].find(value=>value.id===pathname.split('/').pop());
       if(item.id==='skill1')return send({item,version:item.version,content:'# 执行说明\n按当前要求开展工作。',files:skillFiles,entrypoint_id:'skill-main'});
@@ -80,11 +81,12 @@ let browser;
   assert.equal(await page.locator('#phase3-nodes').count(),0);
   pass('Project management title, redundant copy removed, standalone node section absent');
 
-  await page.click('[data-page="global"]');
+  await page.click('[data-page="global"]');await page.click('[data-settings-view-select="accounts"]');
   assert(await page.locator('#add-user').isVisible());
   assert.equal(await page.locator('[data-key="user:admin"] [data-phase3-copy]').count(),0);
   assert.equal(await page.locator('[data-key="user:member"] [data-phase3-copy]').count(),1);
   await page.click('[data-phase3-copy="node_member"]');
+  await page.waitForFunction(()=>globalThis.copiedText.includes('nodes/node_member/start'));
   assert.match(await page.evaluate(()=>globalThis.copiedText),/nodes\/node_member\/start/);
   assert.match(await page.evaluate(()=>globalThis.copiedText),/本节点：node_member/);
   pass('Onboarding prompt belongs to associated member card');
@@ -114,7 +116,7 @@ let browser;
   assert.equal(await page.locator('[data-knowledge-category="context"]').count(),0);
   assert.equal(await page.locator('[data-knowledge-category]').count(),2);
   assert.match(await page.locator('#knowledge-source').innerText(),/Selected RAG/);
-  await page.click('[data-knowledge-category="selected_rag"]');await page.click('[data-knowledge-open="rag1"]');
+  if(await page.locator('[data-knowledge-category="selected_rag"]').getAttribute('aria-expanded')!=='true')await page.click('[data-knowledge-category="selected_rag"]');await page.click('[data-knowledge-open="rag1"]');
   await page.waitForFunction(()=>!!h.knowledge.detail);
   assert.match(await page.locator('#knowledge-content').innerText(),/原文事实/);
   assert.equal(await page.evaluate(()=>globalThis.knowledgeInjected),undefined);
@@ -122,7 +124,7 @@ let browser;
   assert.equal(await page.locator('#knowledge-content a').getAttribute('href'),items[0].source_url);
   await page.click('[data-knowledge-open="pdf1"]');await page.waitForFunction(()=>h.knowledge.detail?.item.id==='pdf1');
   assert.match(await page.locator('#knowledge-content').innerText(),/正文尚未解析/);
-  const before=syncs;await page.click('#refresh-workspace');await page.waitForTimeout(100);assert.equal(syncs,before);
+  const before=syncs;await page.evaluate(()=>h.refresh());await page.waitForTimeout(100);assert.equal(syncs,before);
   await page.click('[data-knowledge-sync="selected_rag"]');await page.waitForFunction(()=>!h.knowledge.syncing);assert.equal(syncs,1);
   failSync=true;await page.click('[data-knowledge-sync="selected_rag"]');await page.waitForFunction(()=>!h.knowledge.syncing);
   assert.match(await page.locator('#knowledge-source').innerText(),/飞书读取暂时失败/);
@@ -156,7 +158,7 @@ let browser;
 
   activeUser=admin;
   await page.evaluate(async user=>{h.beginSession(user);await h.refresh();},admin);
-  await page.click('[data-page="global"]');await page.click('[data-edit-user="admin"]');await page.fill('#user-username','renamed-admin');
+  await page.click('[data-page="global"]');await page.click('[data-settings-view-select="accounts"]');await page.click('[data-edit-user="admin"]');await page.fill('#user-username','renamed-admin');
   await page.click('#user-form button[type="submit"]');await page.waitForSelector('#login-view',{state:'visible'});
   assert.match(await page.locator('#login-error').innerText(),/重新登录/);
   pass('Editing own login identity returns to login');

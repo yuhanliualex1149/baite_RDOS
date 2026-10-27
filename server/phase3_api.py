@@ -255,6 +255,15 @@ def skill_package(node_id: str):
         'Content-Disposition':'attachment; filename="rdos-workflow.zip"', 'Cache-Control':'no-store'})
 
 
+@router.post('/nodes/{node_id}/onboarding')
+async def prepare_node_onboarding(node_id: str, user: dict = Depends(central_api.admin)):
+    try:
+        from server import node_onboarding
+        return _display(await node_onboarding.prepare(node_id, user))
+    except Exception as exc:
+        raise _failure(exc) from exc
+
+
 @onboard_router.get('/nodes/{node_id}/manifest')
 def node_manifest(node_id: str, request: Request):
     node = _node_info(node_id)
@@ -332,5 +341,5 @@ def node_start(node_id: str, request: Request):
 <h2>开始工作</h2><ol><li>使用 Skill 检查分配给本节点的当前有效任务。无任务就报告无任务。</li><li>按任务指定的目标、资料、交付对象和完成方式执行；在关键操作前重新核对要求版本与状态。</li><li>暂停或取消后停止新增工作；要求变化时保留旧成果，按变更说明处理。</li><li>进展、问题、Review 和回执写入同一张协作记录表；长篇成果引用确切版本。有效完成回执经中央核对后按任务规则收尾。</li></ol>
 <h2>飞书入口</h2><ul>{links}</ul>
 <h2>无法读取飞书时</h2><p>先复用已有飞书工具或 CLI，核对登录及指定对象读取能力。已有 lark-cli 可执行 <code>lark-cli auth status --verify</code>；需要重新授权时通过官方登录页由使用者核对账号和权限。不要索取密码、验证码或 Token。</p><p>若工具缺失，报告具体缺项及<a href="https://github.com/larksuite/cli">飞书官方 CLI 说明</a>，由使用者决定接入。成功标准是完整读到登记资料和任务；写回另以有效结果及独立读回核对。</p>
-<p>接入本身不自动生成业务任务或定时安排。首次定时配置由管理员通过任务登记明确下发；已有计划仅在有效任务要求时原位更新，避免重复创建。任务检查由客户端原生定时任务或使用者提示触发。通过飞书交换业务，不读取 Panel 文件或其他节点目录。</p></main></html>'''
+<p>新节点首次接入包含 Skill 安装、每日检查、每周反馈和接入回执。管理员复制接入指令时系统自动准备配置任务，不需另行起草；按该任务配置客户端原生安排，已有安排只原位更新。接入配置完成不代表首次到点运行已验证。通过飞书交换业务，不读取 Panel 文件或其他节点目录。</p></main></html>'''
     return HTMLResponse(text,headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})

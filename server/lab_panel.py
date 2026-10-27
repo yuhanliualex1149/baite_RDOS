@@ -99,7 +99,7 @@ PEER_APPROVE = re.compile(r"/api/central/peer/nodes/" + OBJECT_ID + r"/approve-e
 PHASE3_READ = re.compile(r"(?:/api/central/phase3/(?:workspace|developer|tasks/" + OBJECT_ID +
     r"/history)|/lab/onboard/(?:node_lab_phase3_codex|node_lab_phase3_workbuddy)|/nodes/"+OBJECT_ID+r"/(?:start|manifest|skill\.zip))")
 PHASE3_POST = re.compile(r"/api/central/phase3/(?:drafts|sync|migrate-workflow|drafts/" + OBJECT_ID +
-    r"/edit|tasks/" + OBJECT_ID + r"/actions/(?:start|update|pause|resume|submit|accept_close|cancel))")
+    r"/edit|nodes/" + OBJECT_ID + r"/onboarding|tasks/" + OBJECT_ID + r"/actions/(?:start|update|pause|resume|submit|accept_close|cancel))")
 
 
 async def boundary(request: Request, call_next):

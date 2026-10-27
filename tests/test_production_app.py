@@ -165,6 +165,10 @@ class FormalAppStartupTests(unittest.TestCase):
                         assert package.status_code == 200
                         assert hashlib.sha256(package.content).hexdigest() == manifest.json()['skill']['sha256']
                         assert manifest.json()['peer']['available'] is True, manifest.json()['peer']
+                        legacy_entry=client.post('/baite-rdos/api/central/phase3/nodes/node_yuhan/onboarding',
+                            headers={'Origin':'https://yjmt.cn'},json={})
+                        assert legacy_entry.status_code==200,legacy_entry.text
+                        assert legacy_entry.json()['task'] is None and not task_writes
                         proof = peer_tasks.signed({'body':'正式模式签名核对'})
                         assert peer_tasks.verified(proof, peer_tasks.public_config()['central_public_key']) == {'body':'正式模式签名核对'}
                         try: production_runtime.run_peer_crypto({'action':'execute','command':'outside'})

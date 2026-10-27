@@ -1,0 +1,79 @@
+"""Prepare initial client setup as part of the authenticated onboarding action.
+
+The node still receives and completes an ordinary Feishu task. No client files,
+timers or task rows are modified outside their existing business services.
+"""
+from __future__ import annotations
+
+import os
+from server import central_store as central, phase3_store as local
+from server import rdos_projects as projects, phase3_service as service
+
+_ACTIVE = set()
+
+
+def _instruction(node, task=None):
+    public = node.get('public_id') or node['node_id']
+    url = os.environ['BAITE_PUBLIC_URL'].rstrip('/') + '/nodes/' + public + '/start'
+    text = f'请按 RDOS 接入说明持久安装并启用执行 Skill，再检查当前飞书任务：{url}\n本节点：{public}。'
+    if task:
+        text += f'接入配置任务：{task["task_id"]}，包含每日检查、每周反馈及接入回执；已有定时安排原位更新，不重复创建。'
+    return text
+
+
+async def prepare(node_id, actor):
+    """One deterministic setup task per new node; copy/retry never redispatches."""
+    user = projects._admin(actor)
+    node = next((n for n in local.node_registry() if node_id in (n['node_id'], n.get('public_id'))), None)
+    member = central.user(node.get('member_id', '')) if node else None
+    if not node or not member or not member.get('enabled'):
+        raise projects.ProjectError('invalid_node', '节点关联账号未启用', 409)
+    # Existing migrated nodes keep their current upgrade decisions and timers.
+    # Copying an entry must not publish a held legacy upgrade implicitly.
+    if node.get('registration_source') != 'member_account':
+        return {'instruction': _instruction(node), 'task': None}
+    if 'researcher' not in member.get('roles', []):
+        raise projects.ProjectError('invalid_node', '节点关联账号没有研发成员身份', 409)
+    key = node['node_id']
+    if key in _ACTIVE:
+        raise projects.ProjectError('write_busy', '接入配置正在准备，请稍后继续原操作', 409)
+    _ACTIVE.add(key)
+    try:
+        plan = local.get('node_onboarding', key)
+        if not plan:
+            candidates = [p for p in projects.list_projects(user) if p['status'] == 'active'
+                          and key in p['node_ids']]
+            if not candidates:
+                raise projects.ProjectError('node_has_no_project', '请先在项目管理中为节点分配项目，再复制接入指令', 409)
+            project = next((p for p in candidates if p.get('is_default')), candidates[0])
+            operation = 'node-onboard:' + central.digest([service.environment(), key])[:32]
+            task_id = 'RDOS-ONBOARD-' + central.digest(operation)[:16].upper()
+            payload = {'task_id': task_id, 'title': '完成 RDOS 工作接入',
+                'goal': '按本节点当前接入说明校验并持久安装 RDOS 执行 Skill，确认后续会话可调用。'
+                    '使用客户端原生定时能力配置每日 09:00 检查任务、周五 16:30 汇总真实工作反馈，时区 Asia/Shanghai。'
+                    '两条安排都调用已安装的当前 Skill，并绑定当前会话和获准工区；已有对应 RDOS 安排只原位更新，保留 ID、时间、时区、启停状态及绑定，不新建平行安排。'
+                    '未具备原生定时能力或需要本人授权时如实报告受阻，不用外部后台服务替代。'
+                    '完成后核对持久安装和两条安排，将简短配置结果写入统一协作记录表并独立读回。'
+                    '无实际工作时不发布空周报，不扩大资料、项目或读者范围。',
+                'executor_node_ids': [key], 'task_type': 'action',
+                'deliverable': 'Skill 持久启用，两条定时安排已保存并核对，接入配置回执已独立读回。',
+                'output_zone': 'agent', 'dispatch_to': ['agent'], 'return_to': ['agent'],
+                'deliverable_audience': ['researcher'], 'completion_rule': {'kind': 'receipt_recorded'}}
+            draft = await service.prepare_task(payload, user, operation + ':draft', project['id'])
+            plan = local.immutable('node_onboarding', key, {'node_id': key, 'task_id': task_id,
+                'project_id': project['id'], 'actor_id': user['id'], 'operation_id': operation,
+                'draft_id': draft['id'], 'draft_hash': draft['draft_hash'], 'source': 'panel_node_onboarding'})
+        op = central.get('operation', plan['operation_id']) or {}
+        if op.get('status') != 'succeeded':
+            # Resume the original, still-valid administrator action. A later
+            # copy cannot replace its actor, content, project or operation ID.
+            original = central.user(plan['actor_id'])
+            await service.apply_task_action(plan['task_id'], 'start',
+                {'draft_id': plan['draft_id'], 'expected_hash': plan['draft_hash']}, original,
+                plan['operation_id'], 0, 0, project_id=plan['project_id'])
+        task = await service._read_task(plan['task_id'])
+        if task['project_id'] != plan['project_id'] or task['executor_node_ids'] != [key]:
+            raise projects.ProjectError('operation_conflict', '接入任务归属发生变化，请核对原任务', 409)
+        return {'instruction': _instruction(node, task), 'task': task}
+    finally:
+        _ACTIVE.discard(key)
