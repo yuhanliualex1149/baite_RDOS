@@ -58,7 +58,8 @@ def _replace_unpublished_plan(node_id, old, replacement):
             (old['operation_id'],)).fetchone()
         if operation:
             original = json.loads(operation['payload'])
-            if original.get('dispatched_at') or original.get('status') in ('uncertain', 'succeeded'):
+            if (original.get('dispatched_at') or original.get('active_attempt')
+                or original.get('status') in ('running', 'in_progress', 'uncertain', 'succeeded')):
                 raise projects.ProjectError('write_uncertain', '原接入发布结果尚不能确认，未另建任务', 409)
             original.update(status='conflict', error_code='onboarding_superseded',
                 superseded_by=replacement['operation_id'], updated_at=db.utc_now())

@@ -195,3 +195,58 @@ async def scenario():
     assert retired['superseded_by']==local.get('node_onboarding',n['node_id'])['operation_id']
 asyncio.run(scenario())
 ''')
+
+    def test_retirement_between_write_admission_and_begin_cannot_revive_old_operation(self):
+        self.check('''
+from unittest.mock import patch
+from server import phase1_operations as operations
+from server.central_service import WRITE_LOCK
+async def scenario():
+    n=new_node();assign(n)
+    with patch.object(node_onboarding.service.ops,'run_write',side_effect=RuntimeError('before dispatch')):
+        try:await node_onboarding.prepare(n['node_id'],admin)
+        except RuntimeError:pass
+    old=local.get('node_onboarding',n['node_id'])
+    replacement=await node_onboarding._new_plan(n['node_id'],admin,
+        old['operation_id'],old['task_id'],1)
+    original_check=operations._check_saved_confirmation
+    changed=[]; sent=[]
+    def interleaved(operation_id):
+        value=original_check(operation_id)
+        if operation_id==old['operation_id'] and not changed:
+            changed.append(True)
+            node_onboarding._replace_unpublished_plan(n['node_id'],old,replacement)
+        return value
+    async def send():
+        sent.append(True)
+        return {'verified':True}
+    with patch.object(operations,'_check_saved_confirmation',side_effect=interleaved):
+        await failure('operation_conflict',operations.run_write(
+            old['operation_id'],WRITE_LOCK,send))
+    assert changed and not sent and not backend3.list_tasks()
+    assert central.get('operation',old['operation_id'])['status']=='conflict'
+    assert local.get('node_onboarding',n['node_id'])==replacement
+asyncio.run(scenario())
+''')
+
+    def test_running_old_operation_cannot_be_retired_by_another_process(self):
+        self.check('''
+from unittest.mock import patch
+async def scenario():
+    n=new_node();assign(n)
+    with patch.object(node_onboarding.service.ops,'run_write',side_effect=RuntimeError('before dispatch')):
+        try:await node_onboarding.prepare(n['node_id'],admin)
+        except RuntimeError:pass
+    old=local.get('node_onboarding',n['node_id'])
+    replacement=await node_onboarding._new_plan(n['node_id'],admin,
+        old['operation_id'],old['task_id'],1)
+    pending=central.get('operation',old['operation_id'])
+    pending.update(status='running',active_attempt=1)
+    central.put('operation',old['operation_id'],pending)
+    await failure('write_uncertain',asyncio.to_thread(
+        node_onboarding._replace_unpublished_plan,n['node_id'],old,replacement))
+    assert local.get('node_onboarding',n['node_id'])==old
+    assert central.get('operation',old['operation_id'])['status']=='running'
+    assert not backend3.list_tasks()
+asyncio.run(scenario())
+''')
