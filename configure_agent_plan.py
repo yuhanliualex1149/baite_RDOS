@@ -28,8 +28,7 @@ def main() -> None:
     for name, default in (("BAITE_LLM_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3"),
                           ("BAITE_LLM_MODEL", "deepseek-v4-pro"),
                           ("BAITE_LLM_THINKING", "enabled"),
-                          ("BAITE_LLM_REASONING_EFFORT", "high"),
-                          ("BAITE_LLM_MAX_COMPLETION_TOKENS", "4096")):
+                          ("BAITE_LLM_REASONING_EFFORT", "high")):
         if not existing.get(name):
             values[name] = default
     output = []

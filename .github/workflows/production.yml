@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
       - name: Configure dedicated SSH identity
         env:
           DEPLOY_KEY: ${{ secrets.RDOS_DEPLOY_SSH_KEY }}
@@ -35,20 +36,27 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/rdos_deploy
           printf '%s\n' '39.96.86.168 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDG2NeWbEQdv+k4BOVl5AYA/rgI6KjgALF5rjIUXAi34' > ~/.ssh/known_hosts
-      - name: Verify connection or deploy exact commit
+      - name: Verify installed RDOS 2.0 protocol and deploy exact commit
         env:
           OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'deploy' }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          case "$OPERATION" in
-            check) command=check ;;
-            deploy) command="deploy $COMMIT_SHA" ;;
-            *) exit 64 ;;
-          esac
-          ssh -T -i ~/.ssh/rdos_deploy -o BatchMode=yes -o IdentitiesOnly=yes \
+          case "$OPERATION" in check|deploy) ;; *) exit 64 ;; esac
+          preflight=$(ssh -T -i ~/.ssh/rdos_deploy -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
-            baite-rdos-deploy@39.96.86.168 "$command"
+            baite-rdos-deploy@39.96.86.168 check)
+          printf '%s\n' "$preflight"
+          [[ "$preflight" == *"RDOS2_DEPLOY_PROTOCOL=2"* ]] ||
+            { echo 'Installed RDOS 2.0 gateway is not attested; no deployment requested.' >&2; exit 1; }
+          expected=$(sha256sum deploy/production-deploy.sh | cut -d ' ' -f 1)
+          [[ "$preflight" == *"RDOS2_DEPLOY_SHA256=$expected"* ]] ||
+            { echo 'Installed root release script differs from this commit; no deployment requested.' >&2; exit 1; }
+          if [[ "$OPERATION" == deploy ]]; then
+            ssh -T -i ~/.ssh/rdos_deploy -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+              baite-rdos-deploy@39.96.86.168 "deploy $COMMIT_SHA"
+          fi
       - name: Remove temporary SSH identity
         if: always()
         run: rm -f ~/.ssh/rdos_deploy

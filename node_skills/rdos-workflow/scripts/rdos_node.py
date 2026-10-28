@@ -425,11 +425,42 @@ class Workflow(PeerMixin):
             try:unique[task_id] = rules.select_verified_task_versions([unique[task_id],task]) if task_id in unique else task
             except rules.RuleViolation as exc:fail(exc.code,str(exc))
         results = []
+        work_available = False
+        attention_required = bool(invalid or event_invalid)
+        task_invalid = []
+        def stop_ack_verified(task, kind):
+            reference = {"task_id": task["task_id"], "requirements_version": task["requirements_version"]}
+            for event, rid in events:
+                if (event.get("event_type") != kind or event.get("project_id") != task["project_id"]
+                    or event.get("claimed_node_id") != self.manifest["node_id"]
+                    or reference not in event.get("task_refs", [])):
+                    continue
+                actual, actual_rid = self.decode(self.transport.get(self.manifest["events_table"], rid), "event")
+                if actual == event and actual_rid == rid:
+                    return True
+            return False
         for task_id, task in unique.items():
-            if self.manifest["node_id"] in task.get("executor_node_ids", []): results.append(self.prepare(task_id, False))
+            if self.manifest["node_id"] not in task.get("executor_node_ids", []):
+                continue
+            current = self.prepare(task_id, False)
+            results.append(current)  # Keep ended work visible for history and corrections.
+            for issue in current["quarantined_records"]:
+                if issue not in invalid + event_invalid + task_invalid:
+                    task_invalid.append(issue)
+            if current["quarantined_records"] or current["plan"]["uncertain_operations"]:
+                attention_required = True
+                continue
+            reason = current["plan"]["reason"]
+            if reason in ("already_submitted", "awaiting_quality_decision"):
+                continue
+            if reason in ("closed", "paused"):
+                kind = "closed_ack" if reason == "closed" else "paused_ack"
+                if stop_ack_verified(task, kind):
+                    continue
+            work_available = True
         return {"node_id": self.manifest["node_id"], "tasks": results,"peer_enrollment":enrollment,
-                "quarantined_records": invalid + event_invalid, "complete_read": True,
-                "state": "attention_required" if invalid + event_invalid else "work_available" if results else "no_work"}
+                "quarantined_records": invalid + event_invalid + task_invalid, "complete_read": True,
+                "state": "attention_required" if attention_required else "work_available" if work_available else "no_work"}
 
     def document(self, ref, task, output=False):
         project = self.scope(task)

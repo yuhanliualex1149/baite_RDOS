@@ -32,6 +32,18 @@ class Phase3CoreTest(unittest.TestCase):
         result=run_guarded(SETUP+'\n'+body,restart_body=None if restart is None else SETUP+'\n'+restart)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
+    def test_repeat_initialization_keeps_existing_project_record_timestamp(self):
+        self.check('''
+with db.connection() as conn:
+    before=conn.execute("SELECT updated_at FROM central_records WHERE kind='project' AND id=?",
+        (service.PROJECT_ID,)).fetchone()[0]
+service.initialize()
+with db.connection() as conn:
+    after=conn.execute("SELECT updated_at FROM central_records WHERE kind='project' AND id=?",
+        (service.PROJECT_ID,)).fetchone()[0]
+assert before==after
+''')
+
     def test_real_lifecycle_submission_derives_review_and_exact_human_close(self):
         self.check('''
 async def scenario():
@@ -309,6 +321,76 @@ async def scenario():
     assert local.get('task_head',task['id'])['record_revision']==2
     await failure('task_rollback',artifact(task,'restart-rollback'))
     assert not backend3.registry()['documents']
+asyncio.run(scenario())
+''')
+
+    def test_refresh_retries_if_task_advances_while_documents_are_read(self):
+        self.check('''
+import threading
+from unittest.mock import patch
+async def scenario():
+    source=backend3.create_document('project','输入资料','可读正文','refresh-race-source')
+    task=await start('refresh-race',input_refs=[docref(source)])
+    entered=threading.Event(); release=threading.Event()
+    original=backend3.read_document
+    def delayed(identifier):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+        return original(identifier)
+    with patch.object(backend3,'read_document',side_effect=delayed):
+        reading=asyncio.create_task(service.refresh(admin,'race-read'))
+        assert await asyncio.to_thread(entered.wait,10)
+        paused=await service.apply_task_action(task['id'],'pause',{},admin,'race-pause',1,1)
+        release.set()
+        view=await reading
+    current=next(item for item in view['tasks'] if item['task_id']==task['id'])
+    assert current['record_revision']==2 and current['business_status']=='paused'
+    assert not current.get('integrity_error')
+    assert local.get('task_head',task['id'])['record_revision']==2
+    assert local.get('task_cache',task['id'])['record_revision']==2
+    assert not any(q['source']=='task' and q['raw'].get('task_id')==task['id'] for q in local.items('quarantine'))
+asyncio.run(scenario())
+''')
+
+    def test_refresh_retries_instead_of_quarantining_a_concurrent_advance(self):
+        self.check('''
+import threading
+from unittest.mock import patch
+async def scenario():
+    task=await start('early-race')
+    entered=threading.Event(); release=threading.Event()
+    original=backend3.list_events
+    def delayed():
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+        return original()
+    with patch.object(backend3,'list_events',side_effect=delayed):
+        reading=asyncio.create_task(service.refresh(admin,'race-before-validate'))
+        assert await asyncio.to_thread(entered.wait,10)
+        await service.apply_task_action(task['id'],'pause',{},admin,'early-race-pause',1,1)
+        release.set()
+        view=await reading
+    current=next(item for item in view['tasks'] if item['task_id']==task['id'])
+    assert current['record_revision']==2 and current['business_status']=='paused'
+    assert not current.get('integrity_error')
+    assert not any(q['source']=='task' for q in local.items('quarantine'))
+asyncio.run(scenario())
+''')
+
+    def test_failed_refresh_does_not_index_events_from_an_uncommitted_snapshot(self):
+        self.check('''
+from unittest.mock import patch
+async def scenario():
+    task=await start('stale-event-snapshot')
+    event=service._event(task,'stale-event-progress','progress','新的进展回执',service._principal(node))
+    backend3.append_event(event,'stale-event-progress')
+    before=len(local.events())
+    with patch.object(local,'replace_cache',side_effect=local.RefreshRace('interleaved write')):
+        await failure('refresh_race',service.refresh(admin,'stale-event-refresh'))
+    assert len(local.events())==before
+    assert local.get('state','refresh:'+service.PROJECT_ID)['complete'] is False
 asyncio.run(scenario())
 ''')
 

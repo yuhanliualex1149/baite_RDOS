@@ -151,6 +151,17 @@ def confirm_task_head(task: dict, content_hash: str) -> None:
                      (task['task_id'], json.dumps(value, ensure_ascii=False), db.utc_now()))
 
 
+class RefreshRace(ValueError):
+    code = 'refresh_race'
+
+
+def task_heads() -> dict:
+    """Snapshot confirmed heads before a remote refresh starts reading."""
+    with db.connection() as conn:
+        rows = conn.execute("SELECT id,payload FROM phase3_local WHERE kind='task_head'").fetchall()
+    return {row['id']: json.loads(row['payload']) for row in rows}
+
+
 def remember_version(task_id: str, version: int, requirements: dict) -> None:
     digest = central.digest(requirements)
     with db.connection() as conn:
@@ -200,10 +211,16 @@ def event_fingerprint(event_id: str):
     return row[0] if row else None
 
 
-def replace_cache(tasks: list, documents: list, refresh: dict, project_id: str | None = None) -> None:
+def replace_cache(tasks: list, documents: list, refresh: dict, project_id: str | None = None,
+                  *, expected_heads: dict | None = None) -> None:
     """Call only after a complete backend read; failure keeps the previous projection."""
     with db.connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
+        if expected_heads is not None:
+            rows = conn.execute("SELECT id,payload FROM phase3_local WHERE kind='task_head'").fetchall()
+            current = {row['id']: json.loads(row['payload']) for row in rows}
+            if current != expected_heads:
+                raise RefreshRace('任务在同步读取期间已更新；保留原投影并重新读取')
         if project_id is None:
             conn.execute("DELETE FROM phase3_local WHERE kind='task_cache'")
         else:
