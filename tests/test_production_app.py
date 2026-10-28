@@ -313,6 +313,25 @@ class FormalAppStartupTests(unittest.TestCase):
                     assert policy.read_text() == 'direct policy edit before failed startup\n'
                     assert memory_view.read_text() == 'direct memory edit before failed startup\n'
                     assert registry_file.read_bytes() == registry_bytes
+                    # A missing summary can be recreated from the current DB;
+                    # an existing file is never replaced by that retry path.
+                    memory_view.unlink()
+                    with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn') as client:
+                        assert client.get('/baite-rdos/api/health').status_code == 200
+                    assert '显式更新有效' in memory_view.read_text()
+                    assert policy.read_text() == 'direct policy edit before failed startup\n'
+                    assert registry_file.read_bytes() == registry_bytes
+                    memory_view.unlink()
+                    from server import central_memory
+                    original_link = os.link
+                    def concurrent_memory_edit(source, destination, *args, **kwargs):
+                        if Path(destination) == memory_view:
+                            memory_view.write_text('concurrent direct memory edit\n', encoding='utf-8')
+                        return original_link(source, destination, *args, **kwargs)
+                    with patch.object(central_memory.os, 'link', side_effect=concurrent_memory_edit):
+                        with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn') as client:
+                            assert client.get('/baite-rdos/api/health').status_code == 200
+                    assert memory_view.read_text() == 'concurrent direct memory edit\n'
                 with sqlite3.connect(database) as conn:
                     assert conn.execute('SELECT COUNT(*) FROM central_users').fetchone()[0] == 3
                     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='phase3_mock'").fetchone()[0] == 0

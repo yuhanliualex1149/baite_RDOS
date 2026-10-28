@@ -142,15 +142,17 @@ def initialize():
     with db.connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
         current = memory._get(conn, 'state', _POLICY_ID)
+        existing_policy = current is not None
         if not current:
             current = {**_baseline(), 'updated_at': db.utc_now()}
             memory._put(conn, 'state', _POLICY_ID, current)
             memory._put(conn, 'central_agent_policy_history', str(current['version']), current)
     # An existing formal file may contain an administrator's direct edits.
-    # Startup is not an authorized settings change: preserve those bytes even
-    # when they differ from the database projection. Explicit Panel saves still
-    # call _write_policy and update the file after their DB transaction.
-    if os.environ.get('RDOS_RUNTIME_MODE') != 'production' or not _policy_path().exists():
+    # Startup is not an authorized settings change. For an existing formal DB
+    # policy, never write this path, including if a file disappears/reappears
+    # during startup. The initial policy bootstrap keeps its old behavior.
+    # Explicit Panel saves still update the file after their DB transaction.
+    if os.environ.get('RDOS_RUNTIME_MODE') != 'production' or not existing_policy:
         try:
             _write_policy()
         except Exception:
