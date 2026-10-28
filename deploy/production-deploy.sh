@@ -47,6 +47,24 @@ wait_local_health() {
   done
   return 1
 }
+release_sealed() {
+  # The marker is meaningful only while the complete tested tree stays under
+  # root ownership and cannot be changed by the service/deployment accounts.
+  local tree=$1 owner bad link target trusted_python
+  owner=$(id -u)
+  [[ -d $tree && ! -L $tree ]] || return 1
+  bad=$(find "$tree" \( ! -type d ! -type f ! -type l \) -print -quit) || return 1
+  [[ -z $bad ]] || return 1
+  bad=$(find "$tree" ! -type l \( ! -uid "$owner" -o -perm /022 \) -print -quit) || return 1
+  [[ -z $bad ]] || return 1
+  bad=$(find "$tree" -type l ! -uid "$owner" -print -quit) || return 1
+  [[ -z $bad ]] || return 1
+  trusted_python=$(readlink -e "$python") || return 1
+  while IFS= read -r -d '' link; do
+    target=$(readlink -e "$link") || return 1
+    [[ $target == "$tree/"* || $target == "$trusted_python" ]] || return 1
+  done < <(find "$tree" -type l -print0)
+}
 maintenance_gate() {
   printf '%s\n' 'location = /baite-rdos { default_type text/plain; return 503 "RDOS maintenance\n"; }' \
     'location ^~ /baite-rdos/ { default_type text/plain; return 503 "RDOS maintenance\n"; }' > "$proxy/baite-rdos.conf.next"
@@ -109,11 +127,14 @@ trap 'recover 143' TERM
 
 # Build in a fresh private directory. A failed test never leaves .verified.
 if [[ -e $release ]]; then
-  [[ -f $release/.verified && $(cat "$release/.verified") == "$sha" &&
+  if ! { [[ -f $release/.verified && $(cat "$release/.verified") == "$sha" &&
      $(cat "$release/release.env") == "BAITE_APP_RELEASE=$sha" &&
      $(stat -c %u "$release/.verified") == 0 &&
-     -x $release/.venv/bin/python && -x $release/.venv/bin/uvicorn ]] ||
-    { echo 'Existing target lacks a verified build' >&2; exit 1; }
+     -x $release/.venv/bin/python && -x $release/.venv/bin/uvicorn ]] &&
+     release_sealed "$release"; }; then
+    echo 'Existing target lacks a sealed verified build' >&2
+    exit 1
+  fi
 else
   stage=$(mktemp -d "$base/.rdos2-stage-$sha.XXXXXX")
   git -C "$repo" archive "$sha" | tar -x -C "$stage"
@@ -146,9 +167,11 @@ else
   printf '%s\n' "$sha" > "$stage/.verified.tmp"
   chmod 0644 "$stage/release.env" "$stage/.verified.tmp"
   mv -Tf "$stage/.verified.tmp" "$stage/.verified"
+  release_sealed "$stage"
   mv -T "$stage" "$release"
   stage=
 fi
+release_sealed "$release"
 unreadable=$(runuser -u baite-rdos -- find "$release" -type f ! -readable -print -quit)
 [[ -z $unreadable ]]
 runuser -u baite-rdos -- test -x "$release/.venv/bin/uvicorn"

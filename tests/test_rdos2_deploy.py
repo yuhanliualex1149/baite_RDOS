@@ -189,6 +189,24 @@ chmod 755 "$stage/.venv/bin/uvicorn"
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
         self.assertEqual((root / 'service-state').read_text().strip(), 'active')
 
+    def test_preverified_release_with_writable_or_external_source_is_rejected(self):
+        root, script, env = self.fixture()
+        candidate = root / 'opt/baite-rdos/releases' / NEW
+        source = candidate / 'server/production_app.py'
+        source.parent.mkdir()
+        source.write_text('changed after verification\n')
+        source.chmod(0o666)
+        denied = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(denied.returncode, 0, denied.stdout + denied.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        source.chmod(0o644)
+        source.unlink()
+        source.symlink_to(root / 'archive.tar')
+        denied_link = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(denied_link.returncode, 0, denied_link.stdout + denied_link.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+
     def test_failed_health_rolls_back_code_and_retains_new_business_data(self):
         root, script, env = self.fixture()
         env['FIXTURE_BAD_NEW_HEALTH'] = '1'
