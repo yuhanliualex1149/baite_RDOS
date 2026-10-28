@@ -242,23 +242,55 @@ case "$1" in
 esac
 ''')
         command('curl', '''
-case " $* " in
-  *" %{http_code} "*)
-    if grep -q 'RDOS maintenance' "$FIXTURE_PROXY/baite-rdos.conf"; then
-      attempts=$(cat "$FIXTURE_GATE_ATTEMPTS")
+format= output= url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -w) format=$2; shift ;;
+    -o) output=$2; shift ;;
+    http://*|https://*) url=$1 ;;
+  esac
+  shift
+done
+target=$(basename "$(readlink -f "$FIXTURE_CURRENT")")
+if [ "$format" = '%{http_code}' ]; then
+  if grep -q 'RDOS maintenance' "$FIXTURE_PROXY/baite-rdos.conf"; then
+    attempts=$(cat "$FIXTURE_GATE_ATTEMPTS")
+    attempts=$((attempts+1))
+    echo "$attempts" > "$FIXTURE_GATE_ATTEMPTS"
+    if [ "$attempts" -le "${FIXTURE_GATE_DELAY_COUNT:-0}" ]; then echo 200; else echo 503; fi
+  else echo 200; fi
+  exit 0
+fi
+if [ "$format" = '%{http_code} %{content_type}' ]; then
+  code=200
+  if grep -q 'RDOS maintenance' "$FIXTURE_PROXY/baite-rdos.conf"; then code=503; fi
+  if [ "$(cat "$FIXTURE_SERVICE")" != active ]; then code=503; fi
+  case "$url" in
+    */api/health)
+      type=application/json
+      if [ "$target" = "$FIXTURE_NEW" ] && [ "$FIXTURE_BAD_NEW_HEALTH" = 1 ]; then code=503; fi
+      if [ "$code" = 200 ] && [ -n "$output" ] && [ "$output" != /dev/null ]; then
+        printf '{"status":"ok","mode":"production","app_release":"%s"}\n' "$target" > "$output"
+      fi ;;
+    */static/central.js) type=application/javascript ;;
+    */baite-rdos/)
+      type=text/html
+      attempts=$(cat "$FIXTURE_ROUTE_ATTEMPTS")
       attempts=$((attempts+1))
-      echo "$attempts" > "$FIXTURE_GATE_ATTEMPTS"
-      if [ "$attempts" -le "${FIXTURE_GATE_DELAY_COUNT:-0}" ]; then echo 200; else echo 503; fi
-    else echo 200; fi
+      echo "$attempts" > "$FIXTURE_ROUTE_ATTEMPTS"
+      if [ "$attempts" -le "${FIXTURE_ROUTE_DELAY_COUNT:-0}" ]; then code=503; fi ;;
+    *) type=text/plain ;;
+  esac
+  printf '%s %s\n' "$code" "$type"
+  exit 0
+fi
+case "$url" in
+  */api/runtime/info) echo '{"mode":"production"}'; exit 0 ;;
+  */api/health)
+    if [ "$(cat "$FIXTURE_SERVICE")" != active ]; then exit 22; fi
+    if [ "$target" = "$FIXTURE_NEW" ] && [ "$FIXTURE_BAD_NEW_HEALTH" = 1 ]; then exit 22; fi
+    printf '{"status":"ok","mode":"production","app_release":"%s"}\n' "$target"
     exit 0 ;;
-  *"/api/runtime/info"*) echo '{"mode":"production"}'; exit 0 ;;
-esac
-case " $* " in *"/api/health"*)
-  if [ "$(cat "$FIXTURE_SERVICE")" != active ]; then exit 22; fi
-  target=$(basename "$(readlink -f "$FIXTURE_CURRENT")")
-  if [ "$target" = "$FIXTURE_NEW" ] && [ "$FIXTURE_BAD_NEW_HEALTH" = 1 ]; then exit 22; fi
-  printf '{"status":"ok","mode":"production","app_release":"%s"}\n' "$target"
-  ;;
 esac
 exit 0
 ''')
@@ -297,7 +329,7 @@ done
 [ "$FIXTURE_STAGE_OK" = 1 ] || exit 12
 mkdir -p "$stage/.venv/bin"
 ln -s "$FIXTURE_PYTHON" "$stage/.venv/bin/python"
-printf '#!/bin/sh\nexit 0\n' > "$stage/.venv/bin/uvicorn"
+printf '#!%s/.venv/bin/python\nprint("Running uvicorn fixture")\n' "$stage" > "$stage/.venv/bin/uvicorn"
 chmod 755 "$stage/.venv/bin/uvicorn"
 ''')
         command('chown', 'exit 0\n')
@@ -372,6 +404,8 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         env['FIXTURE_SLEEP_COUNT'] = str(root / 'sleep-count')
         env['FIXTURE_GATE_ATTEMPTS'] = str(root / 'gate-attempts')
         (root / 'gate-attempts').write_text('0\n')
+        env['FIXTURE_ROUTE_ATTEMPTS'] = str(root / 'route-attempts')
+        (root / 'route-attempts').write_text('0\n')
         return root, isolated, env
 
     def first_upgrade_fixture(self):
@@ -649,6 +683,29 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         self.assertEqual((root / 'gate-attempts').read_text().strip(), '3')
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, NEW)
 
+    def test_public_page_503_after_local_health_waits_for_propagation(self):
+        root, script, env = self.fixture()
+        env['FIXTURE_ROUTE_DELAY_COUNT'] = '2'
+        result = subprocess.run(['bash', str(script), NEW], env=env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / 'route-attempts').read_text().strip(), '3')
+        self.assertIn('public /baite-rdos/ status=503 type=text/html', result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, NEW)
+
+    def test_persistent_public_page_503_restores_old_code_and_new_data(self):
+        root, script, env = self.fixture()
+        env['FIXTURE_ROUTE_DELAY_COUNT'] = '100'
+        result = subprocess.run(['bash', str(script), NEW], env=env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('public /baite-rdos/ status=503 type=text/html', result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:
+            self.assertIn(('before',), conn.execute('SELECT payload FROM business').fetchall())
+            self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
+
     def test_public_maintenance_gate_timeout_restores_old_site(self):
         root, script, env = self.first_upgrade_fixture()
         env['FIXTURE_GATE_DELAY_COUNT'] = '100'
@@ -735,6 +792,8 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         candidate = root / 'opt/baite-rdos/releases' / NEW
         self.assertEqual((candidate / '.verified').read_text().strip(), NEW)
         self.assertEqual((candidate / 'release.env').read_text().strip(), 'BAITE_APP_RELEASE=' + NEW)
+        self.assertEqual((candidate / '.venv/bin/uvicorn').read_bytes().splitlines()[0],
+                         ('#!' + str(candidate / '.venv/bin/python')).encode())
         self.assertEqual((root / 'opt/baite-rdos/current').resolve(), candidate)
 
     def test_service_readability_check_uses_accessible_working_directory(self):

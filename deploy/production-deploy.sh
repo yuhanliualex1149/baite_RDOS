@@ -43,12 +43,43 @@ local_health() {
     "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("mode")=="production" and x.get("app_release")==sys.argv[1]' "$1"
 }
 public_health() {
-  curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/api/health |
-    "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("mode")=="production" and x.get("app_release")==sys.argv[1]' "$1"
+  local body response status content_type
+  body=$(mktemp)
+  response=$(curl -sS --max-time 10 -o "$body" -w '%{http_code} %{content_type}' \
+    https://yjmt.cn/baite-rdos/api/health) || response='000 unavailable'
+  read -r status content_type <<< "$response"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) public /baite-rdos/api/health status=$status type=$content_type" >&2
+  if [[ $status == 200 && -s $body ]]; then
+    "$python" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x.get("status")=="ok" and x.get("mode")=="production" and x.get("app_release")==sys.argv[2]' "$body" "$1"
+    local result=$?
+    rm -f -- "$body"
+    return "$result"
+  fi
+  rm -f -- "$body"
+  return 1
+}
+public_route() {
+  local path=$1 response status content_type
+  response=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code} %{content_type}' \
+    "https://yjmt.cn$path") || response='000 unavailable'
+  read -r status content_type <<< "$response"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) public $path status=$status type=$content_type" >&2
+  [[ $status == 200 ]]
 }
 wait_public_health() {
   for attempt in {1..15}; do
     if public_health "$1"; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+wait_public_routes() {
+  local attempt
+  for attempt in {1..15}; do
+    if public_health "$1" && public_route /baite-rdos/ &&
+       public_route /baite-rdos/static/central.js && public_health "$1"; then
+      return 0
+    fi
     sleep 2
   done
   return 1
@@ -271,7 +302,7 @@ recover() {
     fi
     if (( restored )) && { ! timeout --signal=TERM --kill-after=5s 10s "$nginx" -t ||
        ! timeout --signal=TERM --kill-after=5s 10s "$nginx" -s reload ||
-       ! wait_public_health "$recovery_sha"; }; then
+       ! wait_public_routes "$recovery_sha"; }; then
       restored=0
     fi
   fi
@@ -336,12 +367,24 @@ build_release() {
     [[ -z $unreadable ]] || return 1
     runuser -u baite-rdos -- test -x "$stage/.venv/bin/uvicorn" || return 1
     printf 'BAITE_APP_RELEASE=%s\n' "$build_sha" > "$stage/release.env"
-    printf '%s\n' "$build_sha" > "$stage/.verified.tmp"
-    chmod 0644 "$stage/release.env" "$stage/.verified.tmp"
-    mv -Tf "$stage/.verified.tmp" "$stage/.verified"
+    "$python" - "$stage/.venv/bin/uvicorn" "$stage/.venv/bin/python" \
+      "$build_release/.venv/bin/python" <<'PYENTRY'
+from pathlib import Path
+import sys
+entry = Path(sys.argv[1])
+line, sep, rest = entry.read_bytes().partition(b'\n')
+if line != b'#!' + sys.argv[2].encode() or not sep:
+    raise SystemExit('Unexpected RDOS venv entry point; release refused')
+entry.write_bytes(b'#!' + sys.argv[3].encode() + sep + rest)
+PYENTRY
+    chmod 0644 "$stage/release.env"
     release_sealed "$stage" || return 1
     mv -T "$stage" "$build_release"
     stage=
+    (cd / && runuser -u baite-rdos -- "$build_release/.venv/bin/uvicorn" --version) || return 1
+    printf '%s\n' "$build_sha" > "$build_release/.verified.tmp"
+    chmod 0644 "$build_release/.verified.tmp"
+    mv -Tf "$build_release/.verified.tmp" "$build_release/.verified"
   fi
   release_sealed "$build_release" || return 1
   [[ -f "$build_release/deploy/STARTUP_FILE_PRESERVATION" &&
@@ -349,6 +392,7 @@ build_release() {
   unreadable=$(cd / && runuser -u baite-rdos -- find "$build_release" -type f ! -readable -print -quit)
   [[ -z $unreadable ]] || return 1
   runuser -u baite-rdos -- test -x "$build_release/.venv/bin/uvicorn"
+  (cd / && runuser -u baite-rdos -- "$build_release/.venv/bin/uvicorn" --version)
 }
 if [[ $rollback_sha == "$safe_old_sha" ]]; then
   fetch_ref_with_retry "$safe_old_ref" "$safe_old_sha"
@@ -591,10 +635,8 @@ cp -p "$backup/baite-rdos.conf" "$proxy/baite-rdos.conf"
 cp -p "$backup/baite-rdos-downloads.conf" "$proxy/baite-rdos-downloads.conf"
 timeout --signal=TERM --kill-after=5s 10s "$nginx" -t
 timeout --signal=TERM --kill-after=5s 10s "$nginx" -s reload
-wait_public_health "$sha"
+wait_public_routes "$sha"
 within_window
-curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/ >/dev/null
-curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/static/central.js >/dev/null
 maintenance=0
 service_stopped=0
 trap - ERR INT TERM
