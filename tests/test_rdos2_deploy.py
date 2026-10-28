@@ -85,7 +85,7 @@ class RoutineReleaseTests(unittest.TestCase):
             path.chmod(0o755)
         command('git', '''
 case " $* " in
-  *" fetch "*) exit 0 ;;
+  *" fetch "*) [ "$FIXTURE_FETCH_OK" = 1 ]; exit $? ;;
   *" rev-parse FETCH_HEAD "*) echo "$FIXTURE_NEW"; exit 0 ;;
   *" archive "*) cat "$FIXTURE_ARCHIVE"; exit 0 ;;
 esac
@@ -172,7 +172,7 @@ chmod 755 "$stage/.venv/bin/uvicorn"
         isolated = root / 'release-under-test.sh'
         isolated.write_text(body)
         isolated.chmod(0o755)
-        env = {**os.environ, 'FIXTURE_BASE': str(base),
+        env = {**os.environ, 'FIXTURE_BASE': str(base), 'FIXTURE_FETCH_OK': '1',
             'FIXTURE_STAGE_OK': '0', 'FIXTURE_UNREADABLE': '0',
             'FIXTURE_NEW': NEW, 'FIXTURE_CURRENT': str(base / 'current'),
             'FIXTURE_SERVICE': str(root / 'service-state'), 'FIXTURE_PROXY': str(proxy),
@@ -188,6 +188,17 @@ chmod 755 "$stage/.venv/bin/uvicorn"
         self.assertFalse(list((root / 'opt/baite-rdos').glob('.rdos2-stage-*')))
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
         self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+
+    def test_failed_main_fetch_never_enters_maintenance_or_switches_code(self):
+        root, script, env = self.fixture()
+        env['FIXTURE_FETCH_OK'] = '0'
+        result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
+                         'original RDOS proxy\n')
+        self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
 
     def test_preverified_release_with_writable_or_external_source_is_rejected(self):
         root, script, env = self.fixture()
