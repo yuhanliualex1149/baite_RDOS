@@ -73,18 +73,52 @@ class RoutineReleaseTests(unittest.TestCase):
                 ('phase1_schema', {'version': 2}),
                 ('central_memory_schema', {'version': 2}),
                 ('central_agent_policy', {'version': 7, 'content': 'current administrator policy'}),
+                ('runtime', {'paused': True, 'phase': 3, 'scheduler_enabled': False,
+                             'model_mode': 'agent_plan', 'backend': 'feishu_production'}),
             ):
                 conn.execute('INSERT INTO central_records VALUES (?,?,?,?)',
                     ('state', name, json.dumps(payload), 'fixture'))
             conn.execute('INSERT INTO central_records VALUES (?,?,?,?)',
                 ('central_memory', 'user-memory', json.dumps({'content': 'current user memory'}), 'fixture'))
-        memory = dbdir / 'runtime/central/memory.md'
+            for name, payload in (
+                ('project_rdos', {'rdos_project_schema': 1, 'nodes_explicit': True,
+                    'owner_id': 'fixture-admin', 'folder_id': 'fixture-human',
+                    'folder_url': 'https://scn33386s7ui.feishu.cn/drive/folder/fixture-human',
+                    'source_environment': 'feishu_production'}),
+                ('rdos-self', {'rdos_project_schema': 1, 'owner_id': 'fixture-admin',
+                    'folder_id': 'fixture-finance'}),
+            ):
+                conn.execute('INSERT INTO central_records VALUES (?,?,?,?)',
+                    ('project', name, json.dumps(payload), 'fixture'))
+            for name in ('hourly_refresh', 'weekly_inspection'):
+                conn.execute('INSERT INTO central_records VALUES (?,?,?,?)',
+                    ('maintenance_schedule', name, json.dumps({'enabled': False}), 'fixture'))
+            conn.execute('CREATE TABLE phase3_local (kind TEXT,id TEXT,payload TEXT,updated_at TEXT,PRIMARY KEY(kind,id))')
+            for kind, name, payload in (
+                ('state', 'phase3_schema', {'version': 1}),
+                ('state', 'business_workflow', {'version': 1}),
+                ('node', 'fixture-node', {'member_id': 'fixture-member'}),
+            ):
+                conn.execute('INSERT INTO phase3_local VALUES (?,?,?,?)',
+                    (kind, name, json.dumps(payload), 'fixture'))
+        memory = dbdir / 'central/memory.md'
         memory.parent.mkdir(parents=True)
         memory.write_text('current user memory view\n')
+        agent = dbdir / 'central/agent.md'
+        agent.write_text('current administrator policy\n')
+        peer_keys = dbdir / 'runtime/peer_identity.json'
+        peer_keys.parent.mkdir(parents=True)
+        peer_keys.write_text('fixture identity stays here\n')
+        (dbdir / 'runtime/phase3_resources.json').write_text('fixture current registry\n')
         config = root / 'etc/baite-rdos'
         config.mkdir(parents=True)
         for name in ('rdos.env', 'rdos2.env', 'rdos2-resources.json'):
             (config / name).write_text('fixture-only\n')
+        (config / 'rdos2-resources.json').write_text(json.dumps({
+            'agent_md': str(agent), 'memory_md': str(memory),
+            'node_members': {'fixture-node': 'fixture-member'},
+            'default_project_id': 'project_rdos', 'finance_project_id': 'rdos-self',
+            'human_folder': 'fixture-human', 'finance_folder': 'fixture-finance'}))
         override = root / 'etc/systemd/system/baite-rdos.service.d/rdos2.conf'
         override.parent.mkdir(parents=True)
         override.write_text('fixture-only\n')
@@ -124,6 +158,7 @@ case "$1" in
     echo active > "$FIXTURE_SERVICE"
     if [ "$(basename "$(readlink -f "$FIXTURE_CURRENT")")" = "$FIXTURE_NEW" ]; then
       "$FIXTURE_PYTHON" -c 'import os,sqlite3; c=sqlite3.connect(os.environ["FIXTURE_DB"]); c.execute("INSERT INTO business VALUES (?)",("new-business-record",)); c.commit(); c.close()'
+      if [ "$FIXTURE_PROXY_EDIT" = 1 ]; then echo 'external user edit' > "$FIXTURE_PROXY/baite-rdos.conf"; fi
     fi
     ;;
   *) exit 1 ;;
@@ -205,6 +240,7 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         isolated.chmod(0o755)
         env = {**os.environ, 'FIXTURE_BASE': str(base), 'FIXTURE_FETCH_OK': '1',
             'FIXTURE_STAGE_OK': '0', 'FIXTURE_UNREADABLE': '0',
+            'FIXTURE_PROXY_EDIT': '0',
             'FIXTURE_NEW': NEW, 'FIXTURE_CURRENT': str(base / 'current'),
             'FIXTURE_SERVICE': str(root / 'service-state'), 'FIXTURE_PROXY': str(proxy),
             'FIXTURE_BAD_NEW_HEALTH': '0', 'FIXTURE_DB': str(database),
@@ -244,9 +280,36 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
         self.assertEqual((root / 'service-state').read_text().strip(), 'active')
-        self.assertEqual((root / 'var/lib/baite-rdos/runtime/central/memory.md').read_text(),
+        self.assertEqual((root / 'var/lib/baite-rdos/central/memory.md').read_text(),
                          'current user memory view\n')
         self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
+
+    def test_unfinished_project_upgrade_refuses_before_maintenance(self):
+        root, script, env = self.fixture()
+        database = root / 'var/lib/baite-rdos/baite.db'
+        with sqlite3.connect(database) as conn:
+            row = conn.execute("SELECT payload FROM central_records WHERE kind='project' AND id='project_rdos'").fetchone()
+            project = json.loads(row[0])
+            project['nodes_explicit'] = False
+            conn.execute("UPDATE central_records SET payload=? WHERE kind='project' AND id='project_rdos'",
+                         (json.dumps(project),))
+        result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
+
+    def test_external_proxy_edit_during_maintenance_is_not_overwritten(self):
+        root, script, env = self.fixture()
+        env['FIXTURE_PROXY_EDIT'] = '1'
+        result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
+                         'external user edit\n')
+        with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:
+            self.assertIn(('before',), conn.execute('SELECT payload FROM business').fetchall())
+            self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
 
     def test_preverified_release_with_writable_or_external_source_is_rejected(self):
         root, script, env = self.fixture()
@@ -278,7 +341,7 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
             self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
             self.assertEqual(json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='central_memory' AND id='user-memory'").fetchone()[0])['content'],
                              'current user memory')
-        self.assertEqual((root / 'var/lib/baite-rdos/runtime/central/memory.md').read_text(),
+        self.assertEqual((root / 'var/lib/baite-rdos/central/memory.md').read_text(),
                          'current user memory view\n')
         self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
@@ -299,7 +362,7 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
             self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
             self.assertEqual(json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='central_memory' AND id='user-memory'").fetchone()[0])['content'],
                              'current user memory')
-        self.assertEqual((root / 'var/lib/baite-rdos/runtime/central/memory.md').read_text(),
+        self.assertEqual((root / 'var/lib/baite-rdos/central/memory.md').read_text(),
                          'current user memory view\n')
         self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))

@@ -32,6 +32,18 @@ class Phase3CoreTest(unittest.TestCase):
         result=run_guarded(SETUP+'\n'+body,restart_body=None if restart is None else SETUP+'\n'+restart)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
+    def test_repeat_initialization_keeps_existing_project_record_timestamp(self):
+        self.check('''
+with db.connection() as conn:
+    before=conn.execute("SELECT updated_at FROM central_records WHERE kind='project' AND id=?",
+        (service.PROJECT_ID,)).fetchone()[0]
+service.initialize()
+with db.connection() as conn:
+    after=conn.execute("SELECT updated_at FROM central_records WHERE kind='project' AND id=?",
+        (service.PROJECT_ID,)).fetchone()[0]
+assert before==after
+''')
+
     def test_real_lifecycle_submission_derives_review_and_exact_human_close(self):
         self.check('''
 async def scenario():

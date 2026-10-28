@@ -44,8 +44,10 @@ def initialize():
     local.init()
     projects.initialize(backends.get_backend().registry())
     project=central.get('project',PROJECT_ID)
-    project['source_environment']=backends.get_backend().registry().get('mode','unknown')
-    central.put('project',PROJECT_ID,project)
+    mode=backends.get_backend().registry().get('mode','unknown')
+    if project.get('source_environment')!=mode:
+        project['source_environment']=mode
+        central.put('project',PROJECT_ID,project)
 
 
 def node_registry():
