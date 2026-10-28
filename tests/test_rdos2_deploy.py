@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -39,6 +40,7 @@ class RoutineReleaseTests(unittest.TestCase):
         self.assertLess(workflow.index('RDOS2_DEPLOY_SHA256=$expected'), workflow.index('"deploy $COMMIT_SHA"'))
         self.assertIn('/usr/local/sbin/rdos-production-deploy --protocol', GATEWAY.read_text())
         self.assertIn('RDOS2_DEPLOY_SHA256=', GATEWAY.read_text())
+        self.assertIn('PIP_NO_INDEX=1 PIP_FIND_LINKS="$wheelhouse"', body)
 
     def test_rollback_probe_quiesces_existing_due_maintenance(self):
         source = r'''
@@ -69,21 +71,44 @@ asyncio.run(exercise())
 
     def fixture(self, *, verified=True):
         root = Path(tempfile.mkdtemp(prefix='rdos2-release-fixture-'))
-        self.addCleanup(lambda: __import__('shutil').rmtree(root))
+        def cleanup():
+            cache = root / 'opt/baite-rdos/wheelhouse/requirements-8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf'
+            if cache.exists():
+                cache.chmod(0o755)
+            __import__('shutil').rmtree(root)
+        self.addCleanup(cleanup)
         base = root / 'opt/baite-rdos'
         releases = base / 'releases'
         releases.mkdir(parents=True)
         (base / 'repository').mkdir()
+        fixture_lock = b'fixture pinned requirements\n'
+        lock_sha = hashlib.sha256(fixture_lock).hexdigest()
+        wheelhouse = base / 'wheelhouse/requirements-8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf'
+        wheelhouse.mkdir(parents=True)
+        (wheelhouse / 'requirements.lock').write_bytes(fixture_lock)
+        manifest = []
+        for i in range(17):
+            name = f'fixture_{i}-1.0-py3-none-any.whl'
+            content = f'fixture wheel {i}\n'.encode()
+            (wheelhouse / name).write_bytes(content)
+            manifest.append(f'{hashlib.sha256(content).hexdigest()}  {name}\n')
+        (wheelhouse / 'SHA256SUMS').write_text(''.join(manifest))
+        manifest_sha = hashlib.sha256((wheelhouse / 'SHA256SUMS').read_bytes()).hexdigest()
+        for path in wheelhouse.iterdir():
+            path.chmod(0o444)
+        wheelhouse.chmod(0o555)
         tool = base / 'tools/bin'
         tool.mkdir(parents=True)
         (tool / 'python3.12').symlink_to(sys.executable)
         old = releases / OLD
         old.mkdir()
+        (old / 'requirements.lock').write_bytes(fixture_lock)
         (old / 'deploy').mkdir()
         (old / 'deploy/STARTUP_FILE_PRESERVATION').write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n')
         candidate = releases / NEW
         if verified:
             candidate.mkdir()
+            (candidate / 'requirements.lock').write_bytes(fixture_lock)
             (candidate / 'deploy').mkdir()
             (candidate / 'deploy/STARTUP_FILE_PRESERVATION').write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n')
             (candidate / '.venv/bin').mkdir(parents=True)
@@ -278,15 +303,22 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         (root / 'sleep-count').write_text('0\n')
         archive = root / 'archive.tar'
         with tarfile.open(archive, 'w') as tar:
-            for name in ('cutover/check_release.py', 'server/production_app.py', 'deploy/STARTUP_FILE_PRESERVATION'):
+            for name in ('cutover/check_release.py', 'server/production_app.py', 'deploy/STARTUP_FILE_PRESERVATION', 'requirements.lock'):
                 item = root / name
                 item.parent.mkdir(parents=True, exist_ok=True)
-                item.write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n' if name.endswith('STARTUP_FILE_PRESERVATION') else 'fixture\n')
+                item.write_bytes(fixture_lock if name == 'requirements.lock' else
+                    (b'RDOS2_STARTUP_FILES_PRESERVED=1\n' if name.endswith('STARTUP_FILE_PRESERVATION') else b'fixture\n'))
                 tar.add(item, arcname=name)
         # Rewrite only an isolated copy. No fixture command uses real paths,
         # credentials, network, service managers or repository state.
         body = SCRIPT.read_text()
         substitutions = {
+            "lock_sha = '8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf'":
+                f"lock_sha = '{lock_sha}'",
+            '090ffc0c304e6cdc08a6b4400bbe33cb20dcb076485cf318e6291b50dd134438':
+                manifest_sha,
+            'root.stat().st_uid != 0': 'root.stat().st_uid != os.getuid()',
+            'path.stat().st_uid != 0': 'path.stat().st_uid != os.getuid()',
             '/opt/baite-rdos': str(base),
             '/var/lib/baite-rdos': str(dbdir),
             '/etc/baite-rdos': str(config),
@@ -339,6 +371,7 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         (releases / ORIGINAL_OLD / 'deploy/STARTUP_FILE_PRESERVATION').unlink()
         fallback = releases / SAFE_OLD
         (fallback / 'deploy').mkdir(parents=True)
+        (fallback / 'requirements.lock').write_bytes(b'fixture pinned requirements\n')
         (fallback / 'deploy/STARTUP_FILE_PRESERVATION').write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n')
         (fallback / '.venv/bin').mkdir(parents=True)
         (fallback / '.venv/bin/python').symlink_to(sys.executable)
@@ -425,6 +458,44 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         self.assertFalse(list((root / 'opt/baite-rdos').glob('.rdos2-stage-*')))
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
         self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+
+    def test_missing_offline_wheel_refuses_before_maintenance(self):
+        root, script, env = self.fixture()
+        cache = root / 'opt/baite-rdos/wheelhouse/requirements-8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf'
+        cache.chmod(0o755)
+        next(cache.glob('*.whl')).unlink()
+        cache.chmod(0o555)
+        result = subprocess.run(['bash', str(script), NEW], env=env,
+            capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('wheelhouse file set differs', result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
+
+    def test_corrupt_offline_wheel_refuses_before_maintenance(self):
+        root, script, env = self.fixture()
+        cache = root / 'opt/baite-rdos/wheelhouse/requirements-8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf'
+        wheel = next(cache.glob('*.whl'))
+        wheel.chmod(0o644)
+        wheel.write_bytes(b'altered wheel bytes')
+        wheel.chmod(0o444)
+        result = subprocess.run(['bash', str(script), NEW], env=env,
+            capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('offline wheel missing or hash changed', result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
+
+    def test_changed_release_lock_refuses_before_maintenance(self):
+        root, script, env = self.fixture()
+        candidate_lock = root / 'opt/baite-rdos/releases' / NEW / 'requirements.lock'
+        candidate_lock.write_text('unexpected dependency\n')
+        result = subprocess.run(['bash', str(script), NEW], env=env,
+            capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Trusted RDOS offline wheelhouse missing or changed', result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
 
     def test_failed_main_fetch_never_enters_maintenance_or_switches_code(self):
         root, script, env = self.fixture()

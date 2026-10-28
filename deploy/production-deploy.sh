@@ -21,6 +21,7 @@ safe_old_ref=refs/heads/codex/rdos2-safe-rollback-20261028
 safe_old_sha=5272f506ecfe47212cf4a6820aac3eb12ec9a1f7
 database=/var/lib/baite-rdos/baite.db
 python=$base/tools/bin/python3.12
+wheelhouse=$base/wheelhouse/requirements-8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf
 proxy=/www/server/panel/vhost/nginx/proxy/www.yjmt.cn
 nginx=/www/server/nginx/sbin/nginx
 override=/etc/systemd/system/baite-rdos.service.d/rdos2.conf
@@ -69,6 +70,45 @@ release_sealed() {
     target=$(readlink -e "$link") || return 1
     [[ $target == "$tree/"* || $target == "$trusted_python" ]] || return 1
   done < <(find "$tree" -type l -print0)
+}
+verify_wheelhouse() {
+  "$python" - "$wheelhouse" "$1" <<'PYWHEELS'
+import hashlib, os, stat, sys
+from pathlib import Path
+root, lock = map(Path, sys.argv[1:])
+lock_sha = '8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf'
+manifest_sha = '090ffc0c304e6cdc08a6b4400bbe33cb20dcb076485cf318e6291b50dd134438'
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+if not root.is_dir() or root.is_symlink() or root.stat().st_uid != 0 or root.stat().st_mode & 0o222:
+    raise SystemExit('Trusted RDOS offline wheelhouse missing or changed')
+if not lock.is_file() or lock.is_symlink():
+    raise SystemExit('RDOS release requirements.lock is not a regular file')
+for path in (root / 'requirements.lock', root / 'SHA256SUMS'):
+    if not path.exists():
+        raise SystemExit('RDOS offline wheelhouse metadata missing')
+    mode = path.lstat().st_mode
+    if not stat.S_ISREG(mode) or path.stat().st_uid != 0 or mode & 0o222:
+        raise SystemExit('RDOS offline wheelhouse metadata is not sealed')
+if (digest(lock) != lock_sha
+    or digest(root / 'requirements.lock') != lock_sha
+    or digest(root / 'SHA256SUMS') != manifest_sha):
+    raise SystemExit('Trusted RDOS offline wheelhouse missing or changed')
+entries = {}
+for line in (root / 'SHA256SUMS').read_text().splitlines():
+    sha, name = line.split('  ', 1)
+    if name in entries or '/' in name or not name.endswith('.whl'):
+        raise SystemExit('Invalid RDOS wheelhouse manifest')
+    entries[name] = sha
+if len(entries) != 17 or set(p.name for p in root.iterdir()) != set(entries) | {'SHA256SUMS', 'requirements.lock'}:
+    raise SystemExit('RDOS wheelhouse file set differs from reviewed lock')
+for name, sha in entries.items():
+    path = root / name
+    mode = path.lstat().st_mode
+    if (not stat.S_ISREG(mode) or path.stat().st_uid != 0 or mode & 0o222
+        or digest(path) != sha):
+        raise SystemExit('RDOS offline wheel missing or hash changed: ' + name)
+PYWHEELS
 }
 fingerprint_live_state() {
   "$python" - "$database" /etc/baite-rdos/rdos2-resources.json <<'PYFINGERPRINT'
@@ -238,6 +278,7 @@ trap 'recover 143' TERM
 build_release() {
   local build_sha=$1 build_release=$base/releases/$1 unreadable
   if [[ -e $build_release ]]; then
+    verify_wheelhouse "$build_release/requirements.lock"
     if ! { [[ -f $build_release/.verified && $(cat "$build_release/.verified") == "$build_sha" &&
        $(cat "$build_release/release.env") == "BAITE_APP_RELEASE=$build_sha" &&
        $(stat -c %u "$build_release/.verified") == 0 &&
@@ -249,6 +290,7 @@ build_release() {
   else
     stage=$(mktemp -d "$base/.rdos2-stage-$build_sha.XXXXXX")
     git -C "$repo" archive "$build_sha" | tar -x -C "$stage"
+    verify_wheelhouse "$stage/requirements.lock"
     [[ -f $stage/cutover/check_release.py && -f $stage/server/production_app.py &&
        $(cat "$stage/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] || return 1
     chown -R baite-rdos-deploy:baite-rdos-deploy "$stage"
@@ -257,7 +299,8 @@ build_release() {
       -p Type=oneshot -p User=baite-rdos-deploy -p NoNewPrivileges=yes \
       -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict \
       -p "ReadWritePaths=$stage" -p PrivateTmp=yes -- env -i \
-      PATH="$PATH" HOME="$stage" PYTHONDONTWRITEBYTECODE=1 bash -c '
+      PATH="$PATH" HOME="$stage" PYTHONDONTWRITEBYTECODE=1 \
+      PIP_NO_INDEX=1 PIP_FIND_LINKS="$wheelhouse" bash -c '
         set -Eeuo pipefail
         cd "$1"
         "$2" -m venv .venv
