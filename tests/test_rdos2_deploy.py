@@ -85,11 +85,20 @@ class RoutineReleaseTests(unittest.TestCase):
             path.chmod(0o755)
         command('git', '''
 case " $* " in
-  *" fetch "*) [ "$FIXTURE_FETCH_OK" = 1 ]; exit $? ;;
+  *" fetch "*)
+    calls=$(cat "$FIXTURE_FETCH_COUNT")
+    calls=$((calls+1))
+    echo "$calls" > "$FIXTURE_FETCH_COUNT"
+    [ "$FIXTURE_FETCH_OK" = 1 ]; exit $? ;;
   *" rev-parse FETCH_HEAD "*) echo "$FIXTURE_NEW"; exit 0 ;;
   *" archive "*) cat "$FIXTURE_ARCHIVE"; exit 0 ;;
 esac
 exit 1
+''')
+        command('timeout', '''
+[ "$1" = '--signal=TERM' ] && [ "$2" = '--kill-after=5s' ] && [ "$3" = 60s ] || exit 97
+shift 3
+"$@"
 ''')
         command('systemctl', '''
 case "$1" in
@@ -139,8 +148,14 @@ printf '#!/bin/sh\nexit 0\n' > "$stage/.venv/bin/uvicorn"
 chmod 755 "$stage/.venv/bin/uvicorn"
 ''')
         command('chown', 'exit 0\n')
-        command('sleep', 'exit 0\n')
+        command('sleep', '''
+[ "$1" = 2 ] || exit 98
+calls=$(cat "$FIXTURE_SLEEP_COUNT")
+echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
+''')
         (root / 'service-state').write_text('active\n')
+        (root / 'fetch-count').write_text('0\n')
+        (root / 'sleep-count').write_text('0\n')
         archive = root / 'archive.tar'
         with tarfile.open(archive, 'w') as tar:
             for name in ('cutover/check_release.py', 'server/production_app.py'):
@@ -178,6 +193,8 @@ chmod 755 "$stage/.venv/bin/uvicorn"
             'FIXTURE_SERVICE': str(root / 'service-state'), 'FIXTURE_PROXY': str(proxy),
             'FIXTURE_BAD_NEW_HEALTH': '0', 'FIXTURE_DB': str(database),
             'FIXTURE_PYTHON': sys.executable, 'FIXTURE_ARCHIVE': str(archive)}
+        env['FIXTURE_FETCH_COUNT'] = str(root / 'fetch-count')
+        env['FIXTURE_SLEEP_COUNT'] = str(root / 'sleep-count')
         return root, isolated, env
 
     def test_failed_staging_does_not_mark_a_release_verified(self):
@@ -196,6 +213,8 @@ chmod 755 "$stage/.venv/bin/uvicorn"
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
         self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        self.assertEqual((root / 'fetch-count').read_text().strip(), '3')
+        self.assertEqual((root / 'sleep-count').read_text().strip(), '2')
         self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
                          'original RDOS proxy\n')
         self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
@@ -237,6 +256,7 @@ chmod 755 "$stage/.venv/bin/uvicorn"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, NEW)
         self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        self.assertEqual((root / 'fetch-count').read_text().strip(), '2')
         self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
                          'original RDOS proxy\n')
         with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:

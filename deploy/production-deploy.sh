@@ -65,6 +65,18 @@ release_sealed() {
     [[ $target == "$tree/"* || $target == "$trusted_python" ]] || return 1
   done < <(find "$tree" -type l -print0)
 }
+fetch_main_with_retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    if timeout --signal=TERM --kill-after=5s 60s \
+      git -C "$repo" fetch --no-tags origin main; then
+      return 0
+    fi
+    if (( attempt < 3 )); then sleep 2; fi
+  done
+  echo 'Could not fetch current RDOS main within three bounded attempts' >&2
+  return 1
+}
 maintenance_gate() {
   printf '%s\n' 'location = /baite-rdos { default_type text/plain; return 503 "RDOS maintenance\n"; }' \
     'location ^~ /baite-rdos/ { default_type text/plain; return 503 "RDOS maintenance\n"; }' > "$proxy/baite-rdos.conf.next"
@@ -83,7 +95,7 @@ if [[ $old_sha == $sha ]]; then
   echo "Already serving RDOS 2.0 $sha"
   exit 0
 fi
-git -C "$repo" fetch --no-tags origin main
+fetch_main_with_retry
 [[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$sha" ]] ||
   { echo 'Only exact current main may deploy' >&2; exit 1; }
 
@@ -179,7 +191,7 @@ runuser -u baite-rdos -- test -x "$release/.venv/bin/uvicorn"
 # This checks installed migration markers and credentials; it never migrates.
 cd "$release"
 "$release/.venv/bin/python" -B -m cutover.preflight_formal >/dev/null
-git -C "$repo" fetch --no-tags origin main
+fetch_main_with_retry
 [[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$sha" &&
    $(readlink -f "$current") == "$old" ]] ||
   { echo 'Main or active release changed while building' >&2; exit 1; }
