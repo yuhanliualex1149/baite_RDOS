@@ -14,6 +14,11 @@ base=/opt/baite-rdos
 repo=$base/repository
 release=$base/releases/$sha
 current=$base/current
+original_old_sha=6634ff01e542492cf0173372c1ba043cba68ca5d
+first_upgrade_main=1a3888218bde12875df52f1a035d442f800113d6
+first_upgrade_ref=refs/heads/codex/rdos2-review-fixes-20261028
+safe_old_ref=refs/heads/codex/rdos2-safe-rollback-20261028
+safe_old_sha=5272f506ecfe47212cf4a6820aac3eb12ec9a1f7
 database=/var/lib/baite-rdos/baite.db
 python=$base/tools/bin/python3.12
 proxy=/www/server/panel/vhost/nginx/proxy/www.yjmt.cn
@@ -41,7 +46,7 @@ public_health() {
     "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("mode")=="production" and x.get("app_release")==sys.argv[1]' "$1"
 }
 wait_local_health() {
-  for attempt in {1..30}; do
+  for attempt in {1..12}; do
     if local_health "$1"; then return 0; fi
     sleep 2
   done
@@ -65,16 +70,34 @@ release_sealed() {
     [[ $target == "$tree/"* || $target == "$trusted_python" ]] || return 1
   done < <(find "$tree" -type l -print0)
 }
-fetch_main_with_retry() {
-  local attempt
+fingerprint_live_state() {
+  "$python" - "$database" /etc/baite-rdos/rdos2-resources.json <<'PYFINGERPRINT'
+import hashlib, json, sqlite3, sys
+from pathlib import Path
+resources=json.loads(Path(sys.argv[2]).read_text())
+paths=(Path(resources['agent_md']), Path(resources['memory_md']),
+       Path(sys.argv[1]).parent/'runtime/phase3_resources.json')
+files={str(path):hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as conn:
+    if conn.execute('PRAGMA quick_check').fetchone()[0]!='ok':
+        raise SystemExit('Current RDOS SQLite quick_check failed')
+    rows=conn.execute("SELECT kind,id,payload FROM central_records WHERE kind='central_memory' OR (kind='state' AND id='central_agent_policy') ORDER BY kind,id").fetchall()
+    records=hashlib.sha256(json.dumps(rows,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+print(json.dumps({'files':files,'selected_records_sha256':records,'sqlite_quick_check':'ok'},sort_keys=True))
+PYFINGERPRINT
+}
+fetch_ref_with_retry() {
+  local ref=$1 expected=$2 attempt
   for attempt in 1 2 3; do
     if timeout --signal=TERM --kill-after=5s 60s \
-      git -C "$repo" fetch --no-tags origin main; then
-      return 0
+      git -C "$repo" fetch --no-tags origin "$ref"; then
+      [[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$expected" ]] && return 0
+      echo "RDOS source head changed: $ref" >&2
+      return 1
     fi
     if (( attempt < 3 )); then sleep 2; fi
   done
-  echo 'Could not fetch current RDOS main within three bounded attempts' >&2
+  echo "Could not fetch RDOS ref within three bounded attempts: $ref" >&2
   return 1
 }
 maintenance_gate() {
@@ -87,8 +110,8 @@ maintenance_gate() {
   proxy_safe_to_restore
   mv -Tf "$proxy/baite-rdos.conf.next" "$proxy/baite-rdos.conf"
   mv -Tf "$proxy/baite-rdos-downloads.conf.next" "$proxy/baite-rdos-downloads.conf"
-  "$nginx" -t
-  "$nginx" -s reload
+  timeout --signal=TERM --kill-after=5s 10s "$nginx" -t
+  timeout --signal=TERM --kill-after=5s 10s "$nginx" -s reload
 }
 proxy_safe_to_restore() {
   local name
@@ -117,34 +140,67 @@ if [[ $old_sha == $sha ]]; then
   echo "Already serving RDOS 2.0 $sha"
   exit 0
 fi
-fetch_main_with_retry
-[[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$sha" ]] ||
-  { echo 'Only exact current main may deploy' >&2; exit 1; }
+release_ref=refs/heads/main
+rollback_release=$old
+rollback_sha=$old_sha
+if [[ $old_sha == "$safe_old_sha" ]]; then
+  # A failed first cutover leaves this reviewed old-business package live.
+  # The fix branch remains the authorized source until a successful switch;
+  # failure never causes an early merge to main.
+  release_ref=$first_upgrade_ref
+elif ! release_sealed "$old" ||
+   [[ ! -f "$old/deploy/STARTUP_FILE_PRESERVATION" ]] ||
+   [[ $(cat "$old/deploy/STARTUP_FILE_PRESERVATION") != RDOS2_STARTUP_FILES_PRESERVED=1 ]]; then
+  [[ $old_sha == "$original_old_sha" ]] || {
+    echo 'Unprotected previous RDOS release differs from the reviewed first-upgrade base' >&2
+    exit 1
+  }
+  release_ref=$first_upgrade_ref
+  rollback_release=$base/releases/$safe_old_sha
+  rollback_sha=$safe_old_sha
+fi
+fetch_ref_with_retry "$release_ref" "$sha"
+if [[ $release_ref == "$first_upgrade_ref" ]]; then
+  fetch_ref_with_retry refs/heads/main "$first_upgrade_main"
+fi
 
 stage=
+probe=
 backup=
 maintenance=0
 service_stopped=0
 switched=0
 proxy_conflict=0
+state_conflict=0
 recover() {
   code=$1
   trap - ERR INT TERM
-  if [[ -n $stage && -d $stage ]]; then rm -rf -- "$stage"; fi
+  if [[ -n $stage && -d $stage ]]; then rm -rf -- "$stage" || true; fi
+  if [[ -n $probe && -d $probe ]]; then rm -rf -- "$probe" || true; fi
+  if (( ! maintenance && ! service_stopped && ! switched )); then
+    echo "Release refused before maintenance; live code $old_sha remains in service. Latest data retained." >&2
+    exit "$code"
+  fi
   restored=1
   if (( proxy_conflict )); then restored=0; fi
   if (( service_stopped || switched )); then
     systemctl stop baite-rdos || true
-    ln -sfn "$old" "$base/current.rollback"
-    mv -Tf "$base/current.rollback" "$current"
-    # An older release rewrites agent.md and memory.md during lifespan. Do not
-    # start it after a failed first upgrade: data preservation outranks uptime.
-    if ! release_sealed "$old" ||
-       [[ ! -f "$old/deploy/STARTUP_FILE_PRESERVATION" || -L "$old/deploy/STARTUP_FILE_PRESERVATION" ]] ||
-       [[ $(cat "$old/deploy/STARTUP_FILE_PRESERVATION") != RDOS2_STARTUP_FILES_PRESERVED=1 ]]; then
-      echo 'Previous code has no startup-file preservation proof; keeping maintenance and user files intact' >&2
+    linked=0
+    if ln -sfn "$rollback_release" "$base/current.rollback" &&
+       mv -Tf "$base/current.rollback" "$current"; then
+      linked=1
+    else
       restored=0
-    elif ! systemctl start baite-rdos || ! wait_local_health "$old_sha"; then
+      echo 'Could not switch RDOS symlink to safe rollback package' >&2
+    fi
+    # The first upgrade uses a separately sealed copy of old business code
+    # with only startup-file protection. Never restart the unprotected package.
+    if (( ! linked )) || ! release_sealed "$rollback_release" ||
+       [[ ! -f "$rollback_release/deploy/STARTUP_FILE_PRESERVATION" || -L "$rollback_release/deploy/STARTUP_FILE_PRESERVATION" ]] ||
+       [[ $(cat "$rollback_release/deploy/STARTUP_FILE_PRESERVATION") != RDOS2_STARTUP_FILES_PRESERVED=1 ]]; then
+      echo 'Safe rollback release proof missing; keeping maintenance and user files intact' >&2
+      restored=0
+    elif ! systemctl start baite-rdos || ! wait_local_health "$rollback_sha"; then
       restored=0
       systemctl stop baite-rdos || true
     fi
@@ -156,15 +212,20 @@ recover() {
     else
       restored=0
     fi
-    if (( restored )) && { ! "$nginx" -t || ! "$nginx" -s reload || ! public_health "$old_sha"; }; then
+    if (( restored )) && { ! timeout --signal=TERM --kill-after=5s 10s "$nginx" -t ||
+       ! timeout --signal=TERM --kill-after=5s 10s "$nginx" -s reload ||
+       ! public_health "$rollback_sha"; }; then
       restored=0
     fi
   fi
   if (( ! restored && maintenance && ! proxy_conflict )); then maintenance_gate || true; fi
+  if (( state_conflict )); then
+    echo 'Live RDOS state differed after candidate startup. Original file copies are in the root-only backup; latest files and database were retained. Inspect the difference before claiming preservation.' >&2
+  fi
   if (( restored )); then
-    echo "Release failed; old code healthy. Latest database retained. Backup: $backup" >&2
+    echo "Release failed; rollback code $rollback_sha healthy. Latest database retained. Backup: $backup" >&2
   else
-    echo "Release failed; recovery health unverified. Maintenance was attempted; inspect code, proxy and data. Backup: $backup" >&2
+    echo "Release failed; recovery health unverified. Maintenance was attempted; inspect code, proxy and data. Current=$(readlink -f "$current" 2>/dev/null || echo unknown), service=$(systemctl is-active baite-rdos 2>/dev/null || echo unknown). Backup: $backup" >&2
   fi
   exit "$code"
 }
@@ -172,67 +233,159 @@ trap 'recover $?' ERR
 trap 'recover 130' INT
 trap 'recover 143' TERM
 
-# Build in a fresh private directory. A failed test never leaves .verified.
-if [[ -e $release ]]; then
-  if ! { [[ -f $release/.verified && $(cat "$release/.verified") == "$sha" &&
-     $(cat "$release/release.env") == "BAITE_APP_RELEASE=$sha" &&
-     $(stat -c %u "$release/.verified") == 0 &&
-     -x $release/.venv/bin/python && -x $release/.venv/bin/uvicorn ]] &&
-     release_sealed "$release"; }; then
-    echo 'Existing target lacks a sealed verified build' >&2
-    exit 1
+# Build both the candidate and first-upgrade rollback package before
+# maintenance. A failed test never leaves a verified release.
+build_release() {
+  local build_sha=$1 build_release=$base/releases/$1 unreadable
+  if [[ -e $build_release ]]; then
+    if ! { [[ -f $build_release/.verified && $(cat "$build_release/.verified") == "$build_sha" &&
+       $(cat "$build_release/release.env") == "BAITE_APP_RELEASE=$build_sha" &&
+       $(stat -c %u "$build_release/.verified") == 0 &&
+       -x $build_release/.venv/bin/python && -x $build_release/.venv/bin/uvicorn ]] &&
+       release_sealed "$build_release"; }; then
+      echo "Existing release lacks a sealed verified build: $build_sha" >&2
+      return 1
+    fi
+  else
+    stage=$(mktemp -d "$base/.rdos2-stage-$build_sha.XXXXXX")
+    git -C "$repo" archive "$build_sha" | tar -x -C "$stage"
+    [[ -f $stage/cutover/check_release.py && -f $stage/server/production_app.py &&
+       $(cat "$stage/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] || return 1
+    chown -R baite-rdos-deploy:baite-rdos-deploy "$stage"
+    chmod -R go-w "$stage"
+    systemd-run --quiet --wait --pipe --collect --unit="rdos2-build-$build_sha" \
+      -p Type=oneshot -p User=baite-rdos-deploy -p NoNewPrivileges=yes \
+      -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict \
+      -p "ReadWritePaths=$stage" -p PrivateTmp=yes -- env -i \
+      PATH="$PATH" HOME="$stage" PYTHONDONTWRITEBYTECODE=1 bash -c '
+        set -Eeuo pipefail
+        cd "$1"
+        "$2" -m venv .venv
+        .venv/bin/python -m pip install -r requirements.lock
+        .venv/bin/python -m pip check
+        .venv/bin/python -B -m cutover.check_release
+        .venv/bin/python -B -m compileall -q cutover server lab node_skills
+      ' _ "$stage" "$python"
+    [[ -z $(find "$stage" ! -type d ! -type f ! -type l -print -quit) ]] || return 1
+    chown -R root:root "$stage"
+    find "$stage" -type d -exec chmod 0755 {} +
+    find "$stage" -type f -perm /111 -exec chmod 0755 {} +
+    find "$stage" -type f ! -perm /111 -exec chmod 0644 {} +
+    find "$stage" \( -type d -o -type f \) -exec chmod a-s {} +
+    unreadable=$(runuser -u baite-rdos -- find "$stage" -type f ! -readable -print -quit)
+    [[ -z $unreadable ]] || return 1
+    runuser -u baite-rdos -- test -x "$stage/.venv/bin/uvicorn" || return 1
+    printf 'BAITE_APP_RELEASE=%s\n' "$build_sha" > "$stage/release.env"
+    printf '%s\n' "$build_sha" > "$stage/.verified.tmp"
+    chmod 0644 "$stage/release.env" "$stage/.verified.tmp"
+    mv -Tf "$stage/.verified.tmp" "$stage/.verified"
+    release_sealed "$stage" || return 1
+    mv -T "$stage" "$build_release"
+    stage=
   fi
-else
-  stage=$(mktemp -d "$base/.rdos2-stage-$sha.XXXXXX")
-  git -C "$repo" archive "$sha" | tar -x -C "$stage"
-  [[ -f $stage/cutover/check_release.py && -f $stage/server/production_app.py &&
-     $(cat "$stage/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] || exit 1
-  chown -R baite-rdos-deploy:baite-rdos-deploy "$stage"
-  chmod -R go-w "$stage"
-  systemd-run --quiet --wait --pipe --collect --unit="rdos2-build-$sha" \
-    -p Type=oneshot -p User=baite-rdos-deploy -p NoNewPrivileges=yes \
-    -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict \
-    -p "ReadWritePaths=$stage" -p PrivateTmp=yes -- env -i \
-    PATH="$PATH" HOME="$stage" PYTHONDONTWRITEBYTECODE=1 bash -c '
-      set -Eeuo pipefail
-      cd "$1"
-      "$2" -m venv .venv
-      .venv/bin/python -m pip install -r requirements.lock
-      .venv/bin/python -m pip check
-      .venv/bin/python -B -m cutover.check_release
-      .venv/bin/python -B -m compileall -q cutover server lab node_skills
-    ' _ "$stage" "$python"
-  [[ -z $(find "$stage" ! -type d ! -type f ! -type l -print -quit) ]] || exit 1
-  chown -R root:root "$stage"
-  find "$stage" -type d -exec chmod 0755 {} +
-  find "$stage" -type f -perm /111 -exec chmod 0755 {} +
-  find "$stage" -type f ! -perm /111 -exec chmod 0644 {} +
-  find "$stage" \( -type d -o -type f \) -exec chmod a-s {} +
-  unreadable=$(runuser -u baite-rdos -- find "$stage" -type f ! -readable -print -quit)
-  [[ -z $unreadable ]]
-  runuser -u baite-rdos -- test -x "$stage/.venv/bin/uvicorn"
-  printf 'BAITE_APP_RELEASE=%s\n' "$sha" > "$stage/release.env"
-  printf '%s\n' "$sha" > "$stage/.verified.tmp"
-  chmod 0644 "$stage/release.env" "$stage/.verified.tmp"
-  mv -Tf "$stage/.verified.tmp" "$stage/.verified"
-  release_sealed "$stage"
-  mv -T "$stage" "$release"
-  stage=
+  release_sealed "$build_release" || return 1
+  [[ -f "$build_release/deploy/STARTUP_FILE_PRESERVATION" &&
+     $(cat "$build_release/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] || return 1
+  unreadable=$(runuser -u baite-rdos -- find "$build_release" -type f ! -readable -print -quit)
+  [[ -z $unreadable ]] || return 1
+  runuser -u baite-rdos -- test -x "$build_release/.venv/bin/uvicorn"
+}
+if [[ $rollback_sha == "$safe_old_sha" ]]; then
+  fetch_ref_with_retry "$safe_old_ref" "$safe_old_sha"
+  build_release "$safe_old_sha"
 fi
-release_sealed "$release"
-[[ $(cat "$release/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] ||
-  { echo 'Candidate does not preserve existing startup files' >&2; exit 1; }
-unreadable=$(runuser -u baite-rdos -- find "$release" -type f ! -readable -print -quit)
-[[ -z $unreadable ]]
-runuser -u baite-rdos -- test -x "$release/.venv/bin/uvicorn"
+build_release "$sha"
+if [[ $release_ref == "$first_upgrade_ref" ]]; then
+  [[ -f "$release/deploy/probe-agent-plan.py" && ! -L "$release/deploy/probe-agent-plan.py" ]] ||
+    { echo 'Candidate Agent Plan acceptance probe missing' >&2; exit 1; }
+  # Use only the existing service credentials and a harmless synthetic prompt.
+  # A provider rejection or timeout refuses release before maintenance.
+  systemd-run --quiet --wait --pipe --collect --unit="rdos2-agent-plan-probe-$sha" \
+    -p Type=oneshot -p User=baite-rdos -p NoNewPrivileges=yes \
+    -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict \
+    -p PrivateTmp=yes -p RuntimeMaxSec=45 \
+    -p "WorkingDirectory=$release" \
+    -p EnvironmentFile=/etc/baite-rdos/rdos.env \
+    -p EnvironmentFile=/etc/baite-rdos/rdos2.env \
+    -p Environment=HOME=/var/lib/baite-rdos \
+    -p "Environment=PATH=$PATH" -- \
+    "$release/.venv/bin/python" -B "$release/deploy/probe-agent-plan.py"
+  "$python" - /etc/baite-rdos/rdos2.env <<'PYQUOTA'
+import re,sys
+from pathlib import Path
+lines=Path(sys.argv[1]).read_text().splitlines()
+values=[line.split('=',1)[1].strip().strip('"\'') for line in lines
+        if re.match(r'^BAITE_LLM_MAX_COMPLETION_TOKENS\s*=',line)]
+if values != ['393216']:
+    raise SystemExit('Verified Agent Plan quota is not the sole explicit RDOS 2.0 environment setting; update only that field before release')
+PYQUOTA
+fi
+if [[ $rollback_sha == "$safe_old_sha" ]]; then
+  # Exercise the actual rollback ASGI lifespan as the service account against
+  # a consistent copy. The real database and user files remain untouched.
+  [[ -f "$release/deploy/probe-rollback-startup.py" &&
+     ! -L "$release/deploy/probe-rollback-startup.py" ]] ||
+    { echo 'Candidate rollback startup probe missing' >&2; exit 1; }
+  probe=$(mktemp -d /var/lib/baite-rdos/rdos2-rollback-probe.XXXXXX)
+  install -d -m 0700 "$probe/central" "$probe/runtime"
+  timeout --signal=TERM --kill-after=5s 60s "$python" - "$database" "$probe/baite.db" <<'PYPROBE_BACKUP'
+import sqlite3,sys
+source=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+target=sqlite3.connect(sys.argv[2])
+source.backup(target)
+assert target.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+target.close();source.close()
+PYPROBE_BACKUP
+  cp -p /var/lib/baite-rdos/central/agent.md /var/lib/baite-rdos/central/memory.md "$probe/central/"
+  cp -p /var/lib/baite-rdos/runtime/phase3_resources.json \
+    /var/lib/baite-rdos/runtime/peer_identity.json "$probe/runtime/"
+  "$python" - /etc/baite-rdos/rdos2-resources.json "$probe" <<'PYPROBE_CONFIG'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[2]); value=json.loads(Path(sys.argv[1]).read_text())
+value['agent_md']=str(root/'central/agent.md')
+value['memory_md']=str(root/'central/memory.md')
+(root/'rdos2-resources.json').write_text(json.dumps(value))
+PYPROBE_CONFIG
+  chown -R baite-rdos:baite-rdos "$probe"
+  chmod 0700 "$probe" "$probe/central" "$probe/runtime"
+  chmod 0600 "$probe/baite.db" "$probe/rdos2-resources.json" \
+    "$probe/central/agent.md" "$probe/central/memory.md" "$probe/runtime/"*.json
+  # Start the candidate on this copy first, then start the protected old code
+  # against any candidate startup writes. Both must preserve the copied user
+  # files and selected records. No real service or live data is touched.
+  for probe_release in "$release" "$rollback_release"; do
+    probe_sha=$(basename "$probe_release")
+    systemd-run --quiet --wait --pipe --collect --unit="rdos2-startup-probe-$probe_sha" \
+      -p Type=oneshot -p User=baite-rdos -p NoNewPrivileges=yes \
+      -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict \
+      -p "ReadWritePaths=$probe" -p PrivateTmp=yes \
+      -p "WorkingDirectory=$probe_release" \
+      -p EnvironmentFile=/etc/baite-rdos/rdos.env \
+      -p EnvironmentFile=/etc/baite-rdos/rdos2.env \
+      -p "Environment=BAITE_APP_RELEASE=$probe_sha" \
+      -p Environment=HOME=/var/lib/baite-rdos \
+      -p "Environment=PATH=$PATH" -- \
+      "$probe_release/.venv/bin/python" -B "$release/deploy/probe-rollback-startup.py" \
+      "$probe_release" "$probe"
+  done
+  rm -rf -- "$probe"
+  probe=
+fi
 
 # This checks installed migration markers and credentials; it never migrates.
 cd "$release"
 "$release/.venv/bin/python" -B -m cutover.preflight_formal >/dev/null
+if [[ $rollback_sha == "$safe_old_sha" ]]; then
+  cd "$rollback_release"
+  "$rollback_release/.venv/bin/python" -B -m cutover.preflight_formal >/dev/null
+  cd "$release"
+fi
 # A normal code release must never trigger startup schema/memory migration or
 # initialize missing administrator policy over a user's current settings.
 "$python" - "$database" /etc/baite-rdos/rdos2-resources.json <<'PYSCHEMA'
 import json, sqlite3, sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 resources = json.loads(Path(sys.argv[2]).read_text())
 with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as conn:
@@ -286,11 +439,34 @@ with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as conn:
         or any(not conn.execute("SELECT 1 FROM central_records WHERE kind='maintenance_schedule' AND id=?", (name,)).fetchone()
                for name in ('hourly_refresh', 'weekly_inspection'))):
         raise SystemExit('Existing RDOS node or maintenance state needs initialization; release refused')
+    # Nginx maintenance blocks HTTP, not the in-process hourly/weekly jobs.
+    # Do not cut over near a due job or while a prior job may still write.
+    horizon=datetime.now(timezone.utc)+timedelta(minutes=30)
+    for name in ('hourly_refresh','weekly_inspection'):
+        row=conn.execute("SELECT payload FROM central_records WHERE kind='maintenance_schedule' AND id=?",(name,)).fetchone()
+        schedule=json.loads(row[0])
+        if schedule.get('enabled'):
+            try:
+                due=datetime.fromisoformat(schedule['next_due_at'])
+                if due.tzinfo is None:
+                    raise ValueError('missing zone')
+            except (KeyError,TypeError,ValueError):
+                raise SystemExit('Enabled RDOS maintenance has an invalid due time; release refused')
+            if due <= horizon:
+                raise SystemExit('Enabled RDOS maintenance is due within 30 minutes; wait for a quiet release window')
+    for (payload,) in conn.execute("SELECT payload FROM central_records WHERE kind='maintenance_run'"):
+        if json.loads(payload).get('status') in ('queued','running','draining'):
+            raise SystemExit('RDOS maintenance run may still be active; release refused')
 PYSCHEMA
-fetch_main_with_retry
-[[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$sha" &&
-   $(readlink -f "$current") == "$old" ]] ||
-  { echo 'Main or active release changed while building' >&2; exit 1; }
+fetch_ref_with_retry "$release_ref" "$sha"
+if [[ $release_ref == "$first_upgrade_ref" ]]; then
+  fetch_ref_with_retry refs/heads/main "$first_upgrade_main"
+fi
+if [[ $rollback_sha == "$safe_old_sha" ]]; then
+  fetch_ref_with_retry "$safe_old_ref" "$safe_old_sha"
+fi
+[[ $(readlink -f "$current") == "$old" ]] ||
+  { echo 'Active release changed while building' >&2; exit 1; }
 local_health "$old_sha"
 install -d -m 0700 /var/lib/baite-rdos/cutover-backups
 backup=$(mktemp -d "/var/lib/baite-rdos/cutover-backups/pre-deploy-$sha.XXXXXX")
@@ -299,13 +475,23 @@ cp -p /etc/baite-rdos/rdos.env /etc/baite-rdos/rdos2.env \
   /etc/baite-rdos/rdos2-resources.json "$backup/"
 cp -p "$proxy/baite-rdos.conf" "$proxy/baite-rdos-downloads.conf" "$backup/"
 maintenance=1
+maintenance_started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+maintenance_deadline_epoch=$(($(date +%s)+600))
+echo "RDOS maintenance starts $maintenance_started_utc; candidate health deadline $(date -u -d '@'"$maintenance_deadline_epoch" +%Y-%m-%dT%H:%M:%SZ). Recovery may add bounded service drain/start time."
+within_window() {
+  (( $(date +%s) <= maintenance_deadline_epoch )) || {
+    echo 'RDOS candidate maintenance deadline exceeded; starting safe recovery' >&2
+    return 1
+  }
+}
 maintenance_gate
 [[ $(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
   https://yjmt.cn/baite-rdos/api/health) == 503 ]] ||
   { echo 'Public maintenance gate did not take effect' >&2; exit 1; }
 service_stopped=1
 systemctl stop baite-rdos
-"$python" - "$database" "$backup/baite.db" <<'PYBACKUP'
+within_window
+timeout --signal=TERM --kill-after=5s 60s "$python" - "$database" "$backup/baite.db" <<'PYBACKUP'
 import sqlite3,sys
 source=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
 target=sqlite3.connect(sys.argv[2])
@@ -314,24 +500,38 @@ assert target.execute('PRAGMA quick_check').fetchone()[0]=='ok'
 target.close();source.close()
 PYBACKUP
 chmod 0600 "$backup/baite.db"
-ln -sfn "$old" "$base/previous.next"
+install -d -m 0700 "$backup/user-files" "$backup/user-files/central" "$backup/user-files/runtime"
+cp -p /var/lib/baite-rdos/central/agent.md /var/lib/baite-rdos/central/memory.md "$backup/user-files/central/"
+cp -p /var/lib/baite-rdos/runtime/phase3_resources.json "$backup/user-files/runtime/"
+chmod -R go-rwx "$backup/user-files"
+within_window
+state_before=$(fingerprint_live_state)
+printf '%s\n' "$state_before" > "$backup/state-before.json"
+ln -sfn "$rollback_release" "$base/previous.next"
 mv -Tf "$base/previous.next" "$base/previous"
 ln -sfn "$release" "$base/current.next"
 mv -Tf "$base/current.next" "$current"
 switched=1
 systemctl start baite-rdos
 wait_local_health "$sha"
+within_window
 [[ $(systemctl is-active baite-rdos) == active ]] || exit 1
 curl -fsS --max-time 10 http://127.0.0.1:8010/ >/dev/null
 curl -fsS --max-time 10 http://127.0.0.1:8010/static/central.js >/dev/null
 curl -fsS --max-time 10 http://127.0.0.1:8010/api/runtime/info |
   "$python" -c 'import json,sys; assert json.load(sys.stdin).get("mode")=="production"'
+if ! state_after=$(fingerprint_live_state) || [[ $state_after != "$state_before" ]]; then
+  state_conflict=1
+  echo 'Live RDOS files or selected records changed during candidate startup; refusing public cutover' >&2
+  false
+fi
 require_gate_unchanged
 cp -p "$backup/baite-rdos.conf" "$proxy/baite-rdos.conf"
 cp -p "$backup/baite-rdos-downloads.conf" "$proxy/baite-rdos-downloads.conf"
-"$nginx" -t
-"$nginx" -s reload
+timeout --signal=TERM --kill-after=5s 10s "$nginx" -t
+timeout --signal=TERM --kill-after=5s 10s "$nginx" -s reload
 public_health "$sha"
+within_window
 curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/ >/dev/null
 curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/static/central.js >/dev/null
 maintenance=0
