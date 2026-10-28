@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -65,6 +66,21 @@ class RoutineReleaseTests(unittest.TestCase):
         with sqlite3.connect(database) as conn:
             conn.execute('CREATE TABLE business (payload TEXT)')
             conn.execute("INSERT INTO business VALUES ('before')")
+            conn.execute('CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)')
+            conn.execute("INSERT INTO settings VALUES ('schema_version','8','fixture')")
+            conn.execute('CREATE TABLE central_records (kind TEXT,id TEXT,payload TEXT,updated_at TEXT,PRIMARY KEY(kind,id))')
+            for name, payload in (
+                ('phase1_schema', {'version': 2}),
+                ('central_memory_schema', {'version': 2}),
+                ('central_agent_policy', {'version': 7, 'content': 'current administrator policy'}),
+            ):
+                conn.execute('INSERT INTO central_records VALUES (?,?,?,?)',
+                    ('state', name, json.dumps(payload), 'fixture'))
+            conn.execute('INSERT INTO central_records VALUES (?,?,?,?)',
+                ('central_memory', 'user-memory', json.dumps({'content': 'current user memory'}), 'fixture'))
+        memory = dbdir / 'runtime/central/memory.md'
+        memory.parent.mkdir(parents=True)
+        memory.write_text('current user memory view\n')
         config = root / 'etc/baite-rdos'
         config.mkdir(parents=True)
         for name in ('rdos.env', 'rdos2.env', 'rdos2-resources.json'):
@@ -219,6 +235,19 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
                          'original RDOS proxy\n')
         self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
 
+    def test_missing_runtime_marker_refuses_startup_migration_before_maintenance(self):
+        root, script, env = self.fixture()
+        database = root / 'var/lib/baite-rdos/baite.db'
+        with sqlite3.connect(database) as conn:
+            conn.execute("DELETE FROM central_records WHERE kind='state' AND id='central_memory_schema'")
+        result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        self.assertEqual((root / 'var/lib/baite-rdos/runtime/central/memory.md').read_text(),
+                         'current user memory view\n')
+        self.assertFalse((root / 'var/lib/baite-rdos/cutover-backups').exists())
+
     def test_preverified_release_with_writable_or_external_source_is_rejected(self):
         root, script, env = self.fixture()
         candidate = root / 'opt/baite-rdos/releases' / NEW
@@ -245,7 +274,13 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
         self.assertEqual((root / 'service-state').read_text().strip(), 'active')
         with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:
+            self.assertIn(('before',), conn.execute('SELECT payload FROM business').fetchall())
             self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
+            self.assertEqual(json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='central_memory' AND id='user-memory'").fetchone()[0])['content'],
+                             'current user memory')
+        self.assertEqual((root / 'var/lib/baite-rdos/runtime/central/memory.md').read_text(),
+                         'current user memory view\n')
+        self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
                          'original RDOS proxy\n')
         self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))
@@ -260,7 +295,13 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
                          'original RDOS proxy\n')
         with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:
+            self.assertIn(('before',), conn.execute('SELECT payload FROM business').fetchall())
             self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
+            self.assertEqual(json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='central_memory' AND id='user-memory'").fetchone()[0])['content'],
+                             'current user memory')
+        self.assertEqual((root / 'var/lib/baite-rdos/runtime/central/memory.md').read_text(),
+                         'current user memory view\n')
+        self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))
 
     def test_fresh_stage_seals_only_after_service_readability_check(self):

@@ -191,6 +191,24 @@ runuser -u baite-rdos -- test -x "$release/.venv/bin/uvicorn"
 # This checks installed migration markers and credentials; it never migrates.
 cd "$release"
 "$release/.venv/bin/python" -B -m cutover.preflight_formal >/dev/null
+# A normal code release must never trigger startup schema/memory migration or
+# initialize missing administrator policy over a user's current settings.
+"$python" - "$database" <<'PYSCHEMA'
+import json, sqlite3, sys
+with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as conn:
+    schema = conn.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
+    def state(name):
+        row = conn.execute("SELECT payload FROM central_records WHERE kind='state' AND id=?", (name,)).fetchone()
+        return json.loads(row[0]) if row else None
+    phase1 = state('phase1_schema')
+    memory = state('central_memory_schema')
+    policy = state('central_agent_policy')
+    if (not schema or schema[0] != '8' or not isinstance(phase1, dict)
+        or phase1.get('version') != 2 or not isinstance(memory, dict)
+        or memory.get('version') != 2 or not isinstance(policy, dict)
+        or not isinstance(policy.get('content'), str) or not policy['content']):
+        raise SystemExit('Existing RDOS schema or memory policy requires migration; release refused before maintenance')
+PYSCHEMA
 fetch_main_with_retry
 [[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$sha" &&
    $(readlink -f "$current") == "$old" ]] ||
