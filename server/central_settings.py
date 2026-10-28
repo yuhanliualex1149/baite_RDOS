@@ -137,14 +137,18 @@ def initialize():
     with db.connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
         current = memory._get(conn, 'state', _POLICY_ID)
+        existing_policy = current is not None
         if not current:
             current = {**_baseline(), 'updated_at': db.utc_now()}
             memory._put(conn, 'state', _POLICY_ID, current)
             memory._put(conn, 'central_agent_policy_history', str(current['version']), current)
-    try:
-        _write_policy()
-    except Exception:
-        pass
+    # Restarting established production code must not replace direct file edits.
+    # Explicit authorized Panel saves still update the file.
+    if os.environ.get('RDOS_RUNTIME_MODE') != 'production' or not existing_policy:
+        try:
+            _write_policy()
+        except Exception:
+            pass
     return {**current, **_file_state(current)}
 
 

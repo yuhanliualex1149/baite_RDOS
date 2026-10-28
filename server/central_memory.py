@@ -803,11 +803,18 @@ def initialize():
                  'migrated_ids': migrated})
     result = {'schema_version': 2, 'created': created, 'migrated_ids': migrated,
               'history_imported': False, 'summary_updated': False}
-    try:
-        _write_summary()
-        result['summary_updated'] = True
-    except Exception:
-        result.update(_summary_failure('中央记忆已初始化'))
+    # This is a rollback-only compatibility patch. The established formal
+    # database already has its summary; restart must preserve direct edits.
+    # A missing file is rejected by the release preflight, never regenerated
+    # through this startup path. Authorized memory saves retain their writer.
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production' and current is not None and current.get('version') == 2:
+        result['summary_preserved'] = True
+    else:
+        try:
+            _write_summary()
+            result['summary_updated'] = True
+        except Exception:
+            result.update(_summary_failure('中央记忆已初始化'))
     return result
 
 

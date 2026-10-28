@@ -36,7 +36,7 @@ async def lifespan(_: FastAPI):
     phase3_service.initialize()
     peer_tasks.initialize()
     from server.central_api import _sync_registered_projects
-    _sync_registered_projects()
+    _sync_registered_projects(persist=False)
     central_memory.initialize()
     central_settings.initialize()
     await central_maintenance.start(enabled=os.environ.get('RDOS_MAINTENANCE_ENABLED') == '1')

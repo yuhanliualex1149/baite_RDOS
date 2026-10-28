@@ -15,7 +15,7 @@ import unittest
 class FormalAppStartupTests(unittest.TestCase):
     def test_existing_accounts_and_subpath_boot_without_lab_guard(self):
         source = textwrap.dedent(r'''
-            import hashlib, os, sqlite3, tempfile, subprocess, json
+            import hashlib, os, sqlite3, tempfile, subprocess, json, shutil
             from pathlib import Path
             from unittest.mock import patch
             from fastapi.testclient import TestClient
@@ -77,9 +77,9 @@ class FormalAppStartupTests(unittest.TestCase):
                 with patch.object(production_runtime, 'load', return_value=formal):
                     from server.production_app import app
                 from server import peer_tasks
-                if Path(peer_tasks.BUNDLED_NODE).is_file():
-                    # External runtime fixture on macOS; Linux uses LIVE_NODE.
-                    production_runtime._PEER_NODE = Path(peer_tasks.BUNDLED_NODE)
+                node_binary = peer_tasks.BUNDLED_NODE if Path(peer_tasks.BUNDLED_NODE).is_file() else shutil.which('node')
+                if node_binary:
+                    production_runtime._PEER_NODE = Path(node_binary)
                 from server import phase3_feishu
                 records = {TASK_TABLE: {}, 'tblFormalEvents123': {}}
                 task_writes = []
@@ -247,6 +247,33 @@ class FormalAppStartupTests(unittest.TestCase):
                 with sqlite3.connect(database) as conn:
                     assert conn.execute('SELECT COUNT(*) FROM central_users').fetchone()[0] == 3
                     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='phase3_mock'").fetchone()[0] == 0
+                # The rollback artifact must boot old business code on an
+                # established DB without replacing direct file edits.
+                memory_file = root / 'central/memory.md'
+                registry_file = root / 'runtime/phase3_resources.json'
+                assert memory_file.is_file() and registry_file.is_file()
+                policy.write_bytes(b'direct policy edit after first startup\n')
+                memory_file.write_bytes(b'direct memory edit after first startup\n')
+                registry = json.loads(registry_file.read_text(encoding='utf-8'))
+                registry['test_direct_edit'] = 'retained'
+                registry_file.write_text(json.dumps(registry), encoding='utf-8')
+                expected = tuple(path.read_bytes() for path in (policy, memory_file, registry_file))
+                with sqlite3.connect(database) as conn:
+                    conn.execute('INSERT INTO central_records VALUES(?,?,?,?)',
+                                 ('state','rollback_data_marker',json.dumps({'retained':True}),'2026-01-02'))
+                with patch.object(phase3_feishu._CLIExecutor, 'identity', return_value={'account_fingerprint': fingerprint}), patch.object(phase3_feishu.subprocess, 'run', side_effect=transport):
+                    with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn') as client:
+                        assert client.get('/baite-rdos/api/health').status_code == 200
+                    from server import central_maintenance
+                    with patch.object(central_maintenance, 'start', side_effect=RuntimeError('fixture startup failure')):
+                        try:
+                            with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn'):
+                                raise AssertionError('startup unexpectedly succeeded')
+                        except RuntimeError as exc:
+                            assert str(exc) == 'fixture startup failure'
+                assert tuple(path.read_bytes() for path in (policy, memory_file, registry_file)) == expected
+                with sqlite3.connect(database) as conn:
+                    assert json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='state' AND id='rollback_data_marker'").fetchone()[0]) == {'retained': True}
         ''')
         env = dict(os.environ)
         env.pop('RDOS_LAB_RUNTIME', None)
