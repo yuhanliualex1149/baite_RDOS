@@ -6,7 +6,7 @@
 
 ## 本地启动与角色测试
 
-复用当前虚拟环境和 `.env.local`，不要覆盖既有配置。中央 Agent 使用已确认的 Agent Plan 接入；代码默认模型为 `deepseek-v4-pro`，`thinking=enabled`、`reasoning_effort=high`、`max_completion_tokens=4096`。已有配置以本机实际值为准，不能仅凭代码默认值宣称运行模型已经切换。从项目目录启动：
+复用当前虚拟环境和 `.env.local`，不要覆盖既有配置。中央 Agent 使用已确认的 Agent Plan 接入；代码默认模型为 `deepseek-v4-pro`，`thinking=enabled`、`reasoning_effort=high`。对方舟 Agent Plan 的该模型，请求显式发送 `max_completion_tokens=384000`，推理与回答共用这份额度；这是模型表的最大回答额，并非承诺每次请求都能用满。已有配置以本机实际值为准，不能仅凭代码默认值宣称运行模型已经切换。从项目目录启动：
 
 ```bash
 .venv/bin/python start_local.py
@@ -48,7 +48,7 @@ Panel 生成可复制的短指令和 **24 小时受限只读说明链接**。链
 
 首轮默认总预算 **180 秒、6 次模型调用、12 次工具调用**，包含前置资料读取；单个模型请求默认最多 90 秒，实际请求与重试按剩余总时间收缩。高推理保持启用，不会因超时偷偷切模型或降低推理。运行记录展示总耗时、阶段耗时、实际模型、调用量及失败；达到限制保留已完成步骤，可核对远端结果后重试原运行，继续未完成工作，不能承诺自动完成全部后续事项。
 
-本机配置可显式调整：`BAITE_AGENT_MAX_SECONDS`（1–600）、`BAITE_AGENT_MAX_MODEL_CALLS`（1–12）、`BAITE_AGENT_MAX_TOOL_CALLS`（1–24）、`BAITE_LLM_REQUEST_TIMEOUT`（1–180）、`BAITE_LLM_MAX_COMPLETION_TOKENS`（1024–32768）。`BAITE_LLM_MODEL`、`BAITE_LLM_THINKING`、`BAITE_LLM_REASONING_EFFORT` 决定实际模型参数；默认 enabled/high/4096。越界会报错，不静默截断配置；增加预算意味着更长等待及更多模型使用，应根据实际失败记录调整。
+本机配置可显式调整：`BAITE_AGENT_MAX_SECONDS`（1–600）、`BAITE_AGENT_MAX_MODEL_CALLS`（1–12）、`BAITE_AGENT_MAX_TOOL_CALLS`（1–24）、`BAITE_LLM_REQUEST_TIMEOUT`（1–180）、`BAITE_LLM_MAX_COMPLETION_TOKENS`（方舟 Agent Plan `deepseek-v4-pro` 为 1024–384000，其他模型沿用 1024–32768）。未配置时，前者使用 384000，其他模型沿用 8192；已有环境变量仍优先于代码默认值，配置工具不再为新配置写入 4096。`BAITE_LLM_MODEL`、`BAITE_LLM_THINKING`、`BAITE_LLM_REASONING_EFFORT` 决定实际模型参数。越界会报错，不静默截断配置；增加预算意味着更长等待及更多模型使用，应根据实际失败记录调整。正式服务若已显式配置 8192，本次代码修改不会自动更改该配置，需在之后受控上线时单独核对。[方舟模型表](https://docs.volcengine.com/docs/ark/model-list?lang=en)给出的模型回答上限与[通用 Chat API 参数说明](https://docs.volcengine.com/docs/ark/chat-api?lang=en)范围尚不完全一致，正式接口接受 384000 仍需验证；[上下文管理说明](https://docs.volcengine.com/docs/ark/context-management?lang=zh)明确 `max_completion_tokens` 包含思维与回答。
 
 ## 验收记录怎么读
 

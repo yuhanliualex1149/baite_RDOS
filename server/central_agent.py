@@ -36,6 +36,9 @@ class CentralAgent:
     max_model_calls = 6
     max_tool_calls = 12
     request_timeout = 90.0
+    # Ark lists 384k maximum answer tokens for deepseek-v4-pro. This budget
+    # includes reasoning and visible output; the provider's omitted default is 4k.
+    deepseek_v4_pro_completion_tokens = 384000
 
     def _local_mode(self) -> bool:
         transport = getattr(self, "transport", None)
@@ -71,9 +74,15 @@ class CentralAgent:
         self.thinking = os.environ.get("BAITE_LLM_THINKING", "enabled")
         if self.reasoning_effort not in {"low", "medium", "high", "xhigh", "max"} or self.thinking not in {"enabled", "disabled"}:
             raise AgentError("model_config", "模型 thinking 或 reasoning_effort 配置无效")
-        # High reasoning consumes this same output quota before emitting JSON.
-        # Use one visible quota for interpretation and the business response.
-        self.max_completion_tokens = self._setting("BAITE_LLM_MAX_COMPLETION_TOKENS", 8192, 1024, 32768, int)
+        # Keep an explicit operator setting, but do not force the old 8192 cap
+        # (or Ark's 4k omitted-parameter default) on this specific model.
+        # Other providers retain their existing bounded request contract.
+        ark_deepseek_v4_pro = (self.base_url == 'https://ark.cn-beijing.volces.com/api/plan/v3'
+                               and self.model == 'deepseek-v4-pro')
+        default_completion = self.deepseek_v4_pro_completion_tokens if ark_deepseek_v4_pro else 8192
+        maximum_completion = self.deepseek_v4_pro_completion_tokens if ark_deepseek_v4_pro else 32768
+        self.max_completion_tokens = self._setting(
+            "BAITE_LLM_MAX_COMPLETION_TOKENS", default_completion, 1024, maximum_completion, int)
         self.max_seconds = self._setting("BAITE_AGENT_MAX_SECONDS", self.max_seconds, 1, 600, float)
         self.max_model_calls = self._setting("BAITE_AGENT_MAX_MODEL_CALLS", self.max_model_calls, 1, 12, int)
         self.max_tool_calls = self._setting("BAITE_AGENT_MAX_TOOL_CALLS", self.max_tool_calls, 1, 24, int)
@@ -168,7 +177,9 @@ class CentralAgent:
         self.prior_usage = usage
         await emit({'type': 'model_response', 'model_call': usage['model_calls'],
                     'usage': response.get('usage') or {}})
-        if reason in {'length', 'content_filter'} or message.get('tool_calls'):
+        if reason == 'length':
+            raise AgentError('model_incomplete', '模型输出额度耗尽，推理和回答共用该额度；请求解析未完成，本次未执行任务动作。')
+        if reason == 'content_filter' or message.get('tool_calls'):
             raise AgentError('request_understanding_failed', '未完整理解当前请求，本次未执行任务动作。')
         content = message.get('content') or ''
         if content.startswith('```') and content.rstrip().endswith('```'):
@@ -269,7 +280,9 @@ class CentralAgent:
                 await emit({"type": "model_response", "model_call": usage["model_calls"], "usage": call_usage,
                             "elapsed_seconds": round(time.monotonic() - started, 3),
                             "stage_elapsed_seconds": round(time.monotonic() - model_started, 3)})
-                if finish_reason in {"length", "content_filter"}:
+                if finish_reason == "length":
+                    raise AgentError("model_incomplete", "模型输出额度耗尽，推理和回答共用该额度；本次运行不能报告为完成")
+                if finish_reason == "content_filter":
                     raise AgentError("model_incomplete", "模型回复未完整生成，本次运行不能报告为完成")
                 message = self._redact(message)
                 conversation.append(message)
