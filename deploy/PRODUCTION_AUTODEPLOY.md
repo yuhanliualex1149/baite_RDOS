@@ -1,36 +1,21 @@
-# RDOS production deployment
+# RDOS 2.0 routine releases
 
-Production URL: https://yjmt.cn/baite-rdos/
-Production branch: `main`. The old application is archived on `archive/pre-central-agent-20261011`.
+Production URL: https://yjmt.cn/baite-rdos/. Code releases use the exact current main SHA. The initial migration and activation record remains in cutover/OPERATIONS.md; it is not part of routine publishing.
 
-## Current state (2026-10-11)
+## One release path
 
-The previous application has been taken offline at the owner's request. Its database is retained only in `/var/lib/baite-rdos/retired-20261011T131658Z/`; the active database path is empty. The public RDOS routes return HTTP 503 until the replacement application is ready. YXXZ is separate and unchanged.
+.github/workflows/production.yml asks the restricted SSH gateway for check before any deploy. Only a gateway reporting RDOS2_DEPLOY_PROTOCOL=2 and the exact SHA-256 of this commit's deploy/production-deploy.sh may receive deploy <SHA>. An older installed gateway or script fails this check before the write request. The installed root-owned /usr/local/sbin/rdos-production-deploy must contain the reviewed deploy/production-deploy.sh; the installed gateway must contain the reviewed deploy/ssh-gateway.sh. Updating repository files alone does not update either installed executable.
 
-The GitHub Actions connection-only check is verified. This is not a successful application deployment. No staging website or approval gate is used.
+The root script accepts only the exact current main SHA, serializes on /run/lock/baite-rdos-deploy.lock, and keeps the current service running during staging. It builds an exact Git archive as the unprivileged deployment user with an empty environment and runs python -B -m cutover.check_release plus pip check. It checks the sealed source and virtual environment are readable by baite-rdos before writing .verified atomically. A failed build leaves no verified release.
 
-## Normal operation
+Before stopping the service, the script runs the read-only formal preflight, rechecks main and the active release, saves the three existing RDOS configuration files and the two RDOS Nginx snippets in a root-only backup directory, and gates both public RDOS paths with HTTP 503. After the service drains, it takes an SQLite backup through the backup API and checks it. It then changes only the RDOS current symlink, starts the existing service, and verifies the exact local SHA, static assets, runtime info, public SHA and public assets. Maintenance is removed only after these checks.
 
-- A push to `main` deploys the exact commit. Changes limited to `.github/`, `deploy/`, `docs/`, or Markdown do not trigger a rollout. Such changes can be followed by a manual run when appropriate.
-- Actions → RDOS production → Run workflow: `check` only verifies the dedicated SSH connection and reports service state. `deploy` publishes the selected main SHA; the server rejects a commit that is no longer the latest main.
-- Preserve `.github/workflows/production.yml` and the deployment documentation when bringing in the replacement local application. Do not force-push over remote configuration commits.
-- Deployments are serialized both by GitHub concurrency and a server lock.
-- Dependency installation, `pip check`, unittest discovery, and the E2E demo must pass in an unprivileged build sandbox before live service changes.
-- Versioned releases live under `/opt/baite-rdos/releases/<SHA>`. The runtime configuration stays in `/etc/baite-rdos/rdos.env`; the database stays at `/var/lib/baite-rdos/baite.db`. No deployment overwrites these with repository fixtures.
-- Before an update, the stopped SQLite database is backed up with the SQLite backup API and checked for integrity. The release symlink is changed atomically. Both local and public health must report the exact SHA.
-- A successful deployment restores only RDOS's two saved reverse-proxy snippets, enables `baite-rdos` and its backup timer, and leaves YXXZ untouched.
-- On failure, the previous code is restored only if the database's complete logical contents are unchanged, and its health is checked. If the database changed or recovery health fails, RDOS stays offline with the database preserved for deliberate recovery. The script never automatically restores an older database over newer records.
+On failure, recovery switches back to the previous code and checks its health while retaining the latest database. It never restores the backup over newer business records. If previous-code health cannot be proved, RDOS stays under maintenance for manual recovery. First-time schema or Feishu migration is never invoked by this script.
 
-## Replacement application's first deployment
+## Before enabling a normal push release
 
-The repaired application must be pushed to main only when ready. With the active database absent, the application initializes a clean database using the configured administrator username and a password of at least 10 characters. Ensure those initialization values have been supplied through a secure interface; no default password is created. After initialization, normal deployments retain the database and do not recreate accounts.
+1. Review the exact candidate, diff, tests and currently installed root scripts; confirm the current service uses the RDOS 2.0 override. Do not infer installed behavior from repository files.
+2. Deliberately install the reviewed gateway and deployment script at their existing root-owned paths, preserving the existing restricted SSH and sudo command scope. This is a separate production change and is not performed by a repository commit.
+3. Run the workflow's connection-only check and require the protocol marker. Then use the authorized release procedure for a specific main SHA. Verify backup, local/public version, static page, account login and intended business read/write with appropriate authorization. The script's public read-only checks do not prove a real client's Skill installation or natural scheduled execution.
 
-Health alone does not establish that the new central agent works. Verify the Linux service user's `lark-cli` executable and authorization, model API configuration, and the new version's intended scheduling behavior before declaring the replacement fully usable. The old `BAITE_DISABLE_EXTERNAL_SYNC` flag does not necessarily disable the new central scheduler. Never run a shadow copy with live integration credentials for a deployment check.
-
-## Access and maintenance
-
-The repository secret is `RDOS_DEPLOY_SSH_KEY`. It authenticates only `baite-rdos-deploy` on the production host. The public key has a forced command with forwarding and PTY disabled. That gateway accepts only `check` or `deploy <40-character-SHA>`; it does not allow an arbitrary shell.
-
-The root-owned installed entry points are `/usr/local/sbin/rdos-ssh-gateway` and `/usr/local/sbin/rdos-production-deploy`. Their reviewed source is stored here. Editing a repository deployment script does not automatically replace the privileged server copy: review and install privileged script changes deliberately. No YXXZ credentials or deployment permissions are shared.
-
-If a failed release is still the current SHA and health cannot be restored, inspect its logs and supply a corrected commit; do not delete or reset the database. Retired databases and backup files are not automatically destroyed.
+The workflow also supports manual check and deploy; pushes that change only .github/, deploy/, docs/ or Markdown do not trigger deployment. Repository branch and installed-script changes must be coordinated before the next ordinary code push. YXXZ is a separate site and is outside this release path.

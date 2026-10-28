@@ -1,278 +1,208 @@
 #!/usr/bin/env bash
-# Installed, root-owned server entry point. Never run a downloaded copy as root.
+# Installed root-owned entry for routine RDOS 2.0 code releases.
+# First-time database/Feishu migration is deliberately not part of this path.
 set -Eeuo pipefail
 umask 077
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-[[ $(id -u) == 0 && $# == 1 && $1 =~ ^[0-9a-f]{40}$ ]] || exit 64
+[[ $# == 1 ]] || exit 64
+if [[ $1 == --protocol ]]; then
+  echo RDOS2_DEPLOY_PROTOCOL=2
+  exit 0
+fi
+[[ $(id -u) == 0 && $1 =~ ^[0-9a-f]{40}$ ]] || exit 64
 sha=$1
 base=/opt/baite-rdos
 repo=$base/repository
 release=$base/releases/$sha
 current=$base/current
-db=/var/lib/baite-rdos/baite.db
+database=/var/lib/baite-rdos/baite.db
 python=$base/tools/bin/python3.12
-build_user=baite-rdos-deploy
-github_api=https://api.github.com/repos/yuhanliualex1149/baite_RDOS
+proxy=/www/server/panel/vhost/nginx/proxy/www.yjmt.cn
+nginx=/www/server/nginx/sbin/nginx
+override=/etc/systemd/system/baite-rdos.service.d/rdos2.conf
+export PATH=/www/server/nodejs/v26.1.0/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec 9>/run/lock/baite-rdos-deploy.lock
-flock -n 9 || { echo 'Another RDOS deployment is running'; exit 75; }
-[[ -x $python && -f /etc/baite-rdos/rdos.env && -L $current ]] || { echo 'Production prerequisites missing'; exit 1; }
-if [[ ! -f $db ]]; then
-  "$python" - /etc/baite-rdos/rdos.env <<'PYCONF'
-import sys
-values={}
-for line in open(sys.argv[1]):
-    if '=' in line and not line.lstrip().startswith('#'):
-        key,value=line.strip().split('=',1); values[key]=value.strip().strip('\"\'')
-if not values.get('BAITE_ADMIN_USERNAME') or len(values.get('BAITE_ADMIN_PASSWORD','')) < 10:
-    raise SystemExit('Empty database requires a configured administrator username and password of at least 10 characters. No deployment performed.')
-PYCONF
-fi
+flock -n 9 || { echo 'Another RDOS release is running' >&2; exit 75; }
+[[ -x $python && -d $repo && -L $current && -f $database && -f $override &&
+   -f /etc/baite-rdos/rdos.env && -f /etc/baite-rdos/rdos2.env &&
+   -f /etc/baite-rdos/rdos2-resources.json &&
+   -f $proxy/baite-rdos.conf && -f $proxy/baite-rdos-downloads.conf &&
+   -x $nginx ]] || { echo 'Existing RDOS 2.0 prerequisites missing' >&2; exit 1; }
 old=$(readlink -f "$current")
 [[ $old == "$base/releases/"* && -d $old ]] || exit 1
-if [[ $old == "$release" ]]; then
-  curl -fsS --max-time 5 http://127.0.0.1:8010/api/health | "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("app_release")==sys.argv[1]' "$sha"
-  echo "Already active and healthy: $sha"; exit 0
-fi
-github_main_sha() {
-  curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 2 \
-    -H 'Accept: application/vnd.github+json' \
-    "$github_api/git/ref/heads/main" |
-    "$python" -c 'import json,re,sys; x=json.load(sys.stdin); o=x.get("object",{}); s=o.get("sha",""); assert x.get("ref")=="refs/heads/main" and o.get("type")=="commit" and re.fullmatch(r"[0-9a-f]{40}",s); print(s)'
+old_sha=$(basename "$old")
+[[ $old_sha =~ ^[0-9a-f]{40}$ ]] || exit 1
+
+local_health() {
+  curl -fsS --max-time 5 http://127.0.0.1:8010/api/health |
+    "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("mode")=="production" and x.get("app_release")==sys.argv[1]' "$1"
 }
-fetch_main_with_retry() {
-  local attempt
-  for attempt in 1 2 3; do
-    if timeout --signal=TERM --kill-after=5s 60s git -C "$repo" fetch --no-tags origin main; then
-      main_source=git
-      return 0
-    fi
-    if (( attempt < 3 )); then
-      echo "GitHub fetch failed (attempt $attempt/3); retrying..." >&2
-      sleep 2
-    fi
+public_health() {
+  curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/api/health |
+    "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("mode")=="production" and x.get("app_release")==sys.argv[1]' "$1"
+}
+wait_local_health() {
+  for attempt in {1..30}; do
+    if local_health "$1"; then return 0; fi
+    sleep 2
   done
-  if [[ ${allow_api_fallback:-0} == 1 ]]; then
-    echo 'GitHub git fetch failed; checking the current main through the GitHub API...' >&2
-    if api_main_sha=$(github_main_sha); then
-      main_source=api
-      return 0
-    fi
-  fi
-  echo 'Failed to fetch main after 3 attempts; production unchanged' >&2
   return 1
 }
-current_main_sha() {
-  if [[ $main_source == api ]]; then
-    printf '%s\n' "$api_main_sha"
-  else
-    git -C "$repo" rev-parse refs/remotes/origin/main
-  fi
+maintenance_gate() {
+  printf '%s\n' 'location = /baite-rdos { default_type text/plain; return 503 "RDOS maintenance\n"; }' \
+    'location ^~ /baite-rdos/ { default_type text/plain; return 503 "RDOS maintenance\n"; }' > "$proxy/baite-rdos.conf.next"
+  printf '%s\n' 'location ^~ /baite-rdos/downloads/ { default_type text/plain; return 503 "RDOS maintenance\n"; }' \
+    > "$proxy/baite-rdos-downloads.conf.next"
+  mv -Tf "$proxy/baite-rdos.conf.next" "$proxy/baite-rdos.conf"
+  mv -Tf "$proxy/baite-rdos-downloads.conf.next" "$proxy/baite-rdos-downloads.conf"
+  "$nginx" -t
+  "$nginx" -s reload
 }
-extract_github_archive() {
-  local archive
-  archive=$(mktemp "$base/main-archive.XXXXXX")
-  if ! curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --retry-delay 2 \
-      -H 'Accept: application/vnd.github+json' \
-      -o "$archive" "$github_api/tarball/$sha"; then
-    rm -- "$archive"
-    echo 'Exact-commit GitHub archive download failed; production unchanged' >&2
-    return 1
-  fi
-  if ! "$python" - "$archive" "$release" "$sha" <<'PYARCHIVE'
-import pathlib, re, shutil, sys, tarfile
+[[ $(systemctl is-active baite-rdos) == active ]] || exit 1
+local_health "$old_sha"
+public_health "$old_sha"
+if [[ $old_sha == $sha ]]; then
+  public_health "$sha"
+  echo "Already serving RDOS 2.0 $sha"
+  exit 0
+fi
+git -C "$repo" fetch --no-tags origin main
+[[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$sha" ]] ||
+  { echo 'Only exact current main may deploy' >&2; exit 1; }
 
-archive, destination, sha = sys.argv[1:]
-root_name = None
-with tarfile.open(archive, 'r:gz') as source:
-    members = source.getmembers()
-    if not members:
-        raise SystemExit('GitHub archive is empty')
-    for member in members:
-        path = pathlib.PurePosixPath(member.name)
-        parts = path.parts
-        if path.is_absolute() or '..' in parts or not parts:
-            raise SystemExit('GitHub archive contains an unsafe path')
-        if root_name is None:
-            root_name = parts[0]
-            commit_suffix = root_name.removeprefix('yuhanliualex1149-baite_RDOS-')
-            if (not root_name.startswith('yuhanliualex1149-baite_RDOS-')
-                    or not re.fullmatch(r'[0-9a-f]{7,40}', commit_suffix)
-                    or not sha.startswith(commit_suffix)):
-                raise SystemExit('GitHub archive does not identify the requested commit')
-        if parts[0] != root_name or not (member.isdir() or member.isfile()):
-            raise SystemExit('GitHub archive contains an unsupported entry')
-    for member in members:
-        parts = pathlib.PurePosixPath(member.name).parts
-        if len(parts) == 1:
-            continue
-        target = pathlib.Path(destination).joinpath(*parts[1:])
-        if member.isdir():
-            target.mkdir(mode=0o755, parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-            with source.extractfile(member) as original, target.open('xb') as output:
-                shutil.copyfileobj(original, output)
-            target.chmod(0o755 if member.mode & 0o111 else 0o644)
-PYARCHIVE
-  then
-    rm -- "$archive"
-    echo 'Exact-commit GitHub archive validation failed; production unchanged' >&2
-    return 1
-  fi
-  rm -- "$archive"
-}
-allow_api_fallback=1
-main_source=git
-api_main_sha=
-fetch_main_with_retry
-[[ $(current_main_sha) == "$sha" ]] || { echo 'Only the current main commit may deploy'; exit 1; }
-archive_source=$main_source
-if [[ -e $release ]]; then
-  [[ $(readlink -f "$base/previous" || true) != "$release" ]] || { echo 'Target is the retained rollback release; inspect before rebuilding'; exit 1; }
-  failed=$(mktemp -d "$base/incomplete-release.XXXXXX")
-  mv "$release" "$failed/tree"
-fi
-install -d -m 0755 "$release"
-if [[ $archive_source == api ]]; then
-  extract_github_archive
-else
-  git -C "$repo" archive "$sha" | tar -x -C "$release"
-fi
-chown -R "$build_user:$build_user" "$release"
-# Build and tests cannot read production credentials or the production database.
-systemd-run --quiet --wait --pipe --collect --unit="rdos-build-$sha" -p Type=oneshot -p User="$build_user" -p NoNewPrivileges=yes -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict -p "ReadWritePaths=$release" -p PrivateTmp=yes -- env -i PATH="$PATH" HOME="$release" BAITE_DISABLE_EXTERNAL_SYNC=true BAITE_DB_PATH="$release/data/ci.db" PYTHONDONTWRITEBYTECODE=1 bash -c '
-  set -euo pipefail
-  cd "$1"
-  "$2" -m venv .venv
-  .venv/bin/python -m pip install -r requirements.lock
-  .venv/bin/python -m pip check
-  .venv/bin/python -m unittest discover -v
-  .venv/bin/python tests/e2e_demo.py
-' _ "$release" "$python"
-# systemd has reaped the build control group. Sanitize behind a root-only parent.
-quarantine=$(mktemp -d "$base/build-result.XXXXXX")
-mv "$release" "$quarantine/tree"
-sealed=$(mktemp -d "$base/sealed-release.XXXXXX")
-mkdir "$sealed/tree"
-cp -a --no-preserve=ownership "$quarantine/tree/." "$sealed/tree/"
-if find "$sealed/tree" ! -type f ! -type d ! -type l -print -quit | grep -q .; then
-  echo 'Unsupported build artifact type'; exit 1
-fi
-find "$sealed/tree" -type d -exec chmod 0755 {} +
-find "$sealed/tree" -type f -perm /111 -exec chmod 0755 {} +
-find "$sealed/tree" -type f ! -perm /111 -exec chmod 0644 {} +
-find "$sealed/tree" \( -type f -o -type d \) -exec chmod a-s {} +
-meta=$(mktemp "$sealed/release-env.XXXXXX")
-printf 'BAITE_APP_RELEASE=%s\n' "$sha" > "$meta"
-chmod 0644 "$meta"
-mv -Tf "$meta" "$sealed/tree/release.env"
-meta=$(mktemp "$sealed/verified.XXXXXX")
-chmod 0644 "$meta"
-mv -Tf "$meta" "$sealed/tree/.verified"
-mv "$sealed/tree" "$release"
-# Recheck main after the build, before any service interruption.
-fetch_main_with_retry
-[[ $(current_main_sha) == "$sha" ]] || { echo 'Superseded by a newer main commit; production unchanged'; exit 1; }
-backup=/var/lib/baite-rdos/backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$sha.sqlite3
-database_fingerprint() {
-  "$python" - "$db" <<'PY'
-import hashlib, sqlite3, sys
-with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro', uri=True) as c:
-    digest=hashlib.sha256()
-    for statement in c.iterdump():
-        digest.update(statement.encode()); digest.update(b'\n')
-    digest.update(str(c.execute('PRAGMA user_version').fetchone()[0]).encode())
-    print(digest.hexdigest())
-PY
-}
-health() {
-  curl -fsS --max-time 3 http://127.0.0.1:8010/api/health |
-    "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("app_release")==sys.argv[1]' "$1"
-}
-proxy=/www/server/panel/vhost/nginx/proxy/www.yjmt.cn
-saved_proxy=/opt/baite-rdos/offline-proxy-backup
-nginx=/www/server/nginx/sbin/nginx
-public_enabled=0
-make_public_offline() {
-  printf '%s\n' 'location = /baite-rdos { default_type text/plain; return 503 "RDOS is offline. New version pending.\n"; }' 'location ^~ /baite-rdos/ { default_type text/plain; return 503 "RDOS is offline. New version pending.\n"; }' > "$proxy/baite-rdos.conf"
-  printf '%s\n' 'location ^~ /baite-rdos/downloads/ { default_type text/plain; return 503 "RDOS is offline. New version pending.\n"; }' > "$proxy/baite-rdos-downloads.conf"
-  "$nginx" -t && "$nginx" -s reload
-}
-had_database=0
-old_fingerprint=none
-if [[ -f $db ]]; then had_database=1; fi
-stopped=0
+stage=
+backup=
+maintenance=0
+service_stopped=0
 switched=0
 recover() {
-  result=${1:-1}
-  [[ $result != 0 ]] || result=1
+  code=$1
   trap - ERR INT TERM
-  if (( stopped )); then
+  if [[ -n $stage && -d $stage ]]; then rm -rf -- "$stage"; fi
+  restored=1
+  if (( service_stopped || switched )); then
     systemctl stop baite-rdos || true
-    if (( had_database )) && { (( ! switched )) || [[ $(database_fingerprint) == "$old_fingerprint" ]]; }; then
-      ln -sfn "$old" "$base/current.rollback"
-      mv -Tf "$base/current.rollback" "$current"
-      systemctl start baite-rdos
-      rollback_ok=0
-      for attempt in {1..15}; do
-        if health "${old##*/}"; then rollback_ok=1; break; fi
-        sleep 2
-      done
-      if (( rollback_ok )); then
-        echo 'Deployment failed; previous release restored and healthy; database unchanged.' >&2
-      else
-        systemctl stop baite-rdos || true
-        make_public_offline || true
-        echo 'Rollback health check failed; service stopped, database retained.' >&2
-      fi
-    else
-      make_public_offline || true
-      echo "Database contents changed: service stopped for safe recovery. Database retained; pre-deploy backup: $backup" >&2
+    ln -sfn "$old" "$base/current.rollback"
+    mv -Tf "$base/current.rollback" "$current"
+    if ! systemctl start baite-rdos || ! wait_local_health "$old_sha"; then
+      restored=0
+      systemctl stop baite-rdos || true
     fi
   fi
-  exit "${result:-1}"
+  if (( maintenance && restored )); then
+    cp -p "$backup/baite-rdos.conf" "$proxy/baite-rdos.conf" || restored=0
+    cp -p "$backup/baite-rdos-downloads.conf" "$proxy/baite-rdos-downloads.conf" || restored=0
+    if (( restored )) && { ! "$nginx" -t || ! "$nginx" -s reload || ! public_health "$old_sha"; }; then
+      restored=0
+    fi
+  fi
+  if (( ! restored && maintenance )); then maintenance_gate || true; fi
+  if (( restored )); then
+    echo "Release failed; old code healthy. Latest database retained. Backup: $backup" >&2
+  else
+    echo "Release failed; recovery health unverified. Maintenance was attempted; inspect code, proxy and data. Backup: $backup" >&2
+  fi
+  exit "$code"
 }
 trap 'recover $?' ERR
 trap 'recover 130' INT
 trap 'recover 143' TERM
-systemctl stop baite-rdos
-stopped=1
-if (( had_database )); then old_fingerprint=$(database_fingerprint); fi
-# SQLite backup only; no second application process or external integration is started.
-if (( had_database )); then
-"$python" - "$db" "$backup" <<'PY'
-import sqlite3, sys
-src=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro', uri=True)
-dst=sqlite3.connect(sys.argv[2]); src.backup(dst)
-assert dst.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-dst.close(); src.close()
-PY
-chmod 0600 "$backup"
+
+# Build in a fresh private directory. A failed test never leaves .verified.
+if [[ -e $release ]]; then
+  [[ -f $release/.verified && $(cat "$release/.verified") == "$sha" &&
+     $(cat "$release/release.env") == "BAITE_APP_RELEASE=$sha" &&
+     $(stat -c %u "$release/.verified") == 0 &&
+     -x $release/.venv/bin/python && -x $release/.venv/bin/uvicorn ]] ||
+    { echo 'Existing target lacks a verified build' >&2; exit 1; }
+else
+  stage=$(mktemp -d "$base/.rdos2-stage-$sha.XXXXXX")
+  git -C "$repo" archive "$sha" | tar -x -C "$stage"
+  [[ -f $stage/cutover/check_release.py && -f $stage/server/production_app.py ]] || exit 1
+  chown -R baite-rdos-deploy:baite-rdos-deploy "$stage"
+  chmod -R go-w "$stage"
+  systemd-run --quiet --wait --pipe --collect --unit="rdos2-build-$sha" \
+    -p Type=oneshot -p User=baite-rdos-deploy -p NoNewPrivileges=yes \
+    -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict \
+    -p "ReadWritePaths=$stage" -p PrivateTmp=yes -- env -i \
+    PATH="$PATH" HOME="$stage" PYTHONDONTWRITEBYTECODE=1 bash -c '
+      set -Eeuo pipefail
+      cd "$1"
+      "$2" -m venv .venv
+      .venv/bin/python -m pip install -r requirements.lock
+      .venv/bin/python -m pip check
+      .venv/bin/python -B -m cutover.check_release
+      .venv/bin/python -B -m compileall -q cutover server lab node_skills
+    ' _ "$stage" "$python"
+  [[ -z $(find "$stage" ! -type d ! -type f ! -type l -print -quit) ]] || exit 1
+  chown -R root:root "$stage"
+  find "$stage" -type d -exec chmod 0755 {} +
+  find "$stage" -type f -perm /111 -exec chmod 0755 {} +
+  find "$stage" -type f ! -perm /111 -exec chmod 0644 {} +
+  find "$stage" \( -type d -o -type f \) -exec chmod a-s {} +
+  unreadable=$(runuser -u baite-rdos -- find "$stage" -type f ! -readable -print -quit)
+  [[ -z $unreadable ]]
+  runuser -u baite-rdos -- test -x "$stage/.venv/bin/uvicorn"
+  printf 'BAITE_APP_RELEASE=%s\n' "$sha" > "$stage/release.env"
+  printf '%s\n' "$sha" > "$stage/.verified.tmp"
+  chmod 0644 "$stage/release.env" "$stage/.verified.tmp"
+  mv -Tf "$stage/.verified.tmp" "$stage/.verified"
+  mv -T "$stage" "$release"
+  stage=
 fi
+unreadable=$(runuser -u baite-rdos -- find "$release" -type f ! -readable -print -quit)
+[[ -z $unreadable ]]
+runuser -u baite-rdos -- test -x "$release/.venv/bin/uvicorn"
+
+# This checks installed migration markers and credentials; it never migrates.
+cd "$release"
+"$release/.venv/bin/python" -B -m cutover.preflight_formal >/dev/null
+git -C "$repo" fetch --no-tags origin main
+[[ $(git -C "$repo" rev-parse FETCH_HEAD) == "$sha" &&
+   $(readlink -f "$current") == "$old" ]] ||
+  { echo 'Main or active release changed while building' >&2; exit 1; }
+local_health "$old_sha"
+install -d -m 0700 /var/lib/baite-rdos/cutover-backups
+backup=$(mktemp -d "/var/lib/baite-rdos/cutover-backups/pre-deploy-$sha.XXXXXX")
+chmod 0700 "$backup"
+cp -p /etc/baite-rdos/rdos.env /etc/baite-rdos/rdos2.env \
+  /etc/baite-rdos/rdos2-resources.json "$backup/"
+cp -p "$proxy/baite-rdos.conf" "$proxy/baite-rdos-downloads.conf" "$backup/"
+maintenance=1
+maintenance_gate
+[[ $(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+  https://yjmt.cn/baite-rdos/api/health) == 503 ]] ||
+  { echo 'Public maintenance gate did not take effect' >&2; exit 1; }
+service_stopped=1
+systemctl stop baite-rdos
+"$python" - "$database" "$backup/baite.db" <<'PYBACKUP'
+import sqlite3,sys
+source=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+target=sqlite3.connect(sys.argv[2])
+source.backup(target)
+assert target.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+target.close();source.close()
+PYBACKUP
+chmod 0600 "$backup/baite.db"
 ln -sfn "$old" "$base/previous.next"
 mv -Tf "$base/previous.next" "$base/previous"
 ln -sfn "$release" "$base/current.next"
 mv -Tf "$base/current.next" "$current"
 switched=1
 systemctl start baite-rdos
-ok=0
-for attempt in {1..30}; do
-  if health "$sha"; then ok=1; break; fi
-  sleep 2
-done
-[[ $ok == 1 ]]
-# Restore only the two existing RDOS proxy snippets; unrelated sites are untouched.
-if [[ -f $saved_proxy/baite-rdos.conf && -f $saved_proxy/baite-rdos-downloads.conf ]]; then
-  cp -p "$saved_proxy/baite-rdos.conf" "$proxy/baite-rdos.conf"
-  cp -p "$saved_proxy/baite-rdos-downloads.conf" "$proxy/baite-rdos-downloads.conf"
-  "$nginx" -t
-  "$nginx" -s reload
-  public_enabled=1
-fi
-curl -fsS --retry 3 --retry-delay 2 --max-time 10 https://yjmt.cn/baite-rdos/api/health |
-  "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("app_release")==sys.argv[1]' "$sha"
-systemctl enable baite-rdos baite-rdos-backup.timer
-systemctl start baite-rdos-backup.timer
-stopped=0
+wait_local_health "$sha"
+[[ $(systemctl is-active baite-rdos) == active ]] || exit 1
+curl -fsS --max-time 10 http://127.0.0.1:8010/ >/dev/null
+curl -fsS --max-time 10 http://127.0.0.1:8010/static/central.js >/dev/null
+curl -fsS --max-time 10 http://127.0.0.1:8010/api/runtime/info |
+  "$python" -c 'import json,sys; assert json.load(sys.stdin).get("mode")=="production"'
+cp -p "$backup/baite-rdos.conf" "$proxy/baite-rdos.conf"
+cp -p "$backup/baite-rdos-downloads.conf" "$proxy/baite-rdos-downloads.conf"
+"$nginx" -t
+"$nginx" -s reload
+public_health "$sha"
+curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/ >/dev/null
+curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/static/central.js >/dev/null
+maintenance=0
+service_stopped=0
 trap - ERR INT TERM
-echo "Deployed RDOS commit $sha; database and production configuration retained."
+echo "Deployed RDOS 2.0 $sha; latest database retained. Backup: $backup"

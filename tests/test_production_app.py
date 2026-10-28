@@ -15,7 +15,7 @@ import unittest
 class FormalAppStartupTests(unittest.TestCase):
     def test_existing_accounts_and_subpath_boot_without_lab_guard(self):
         source = textwrap.dedent(r'''
-            import hashlib, os, sqlite3, tempfile, subprocess, json
+            import hashlib, os, sqlite3, tempfile, subprocess, json, shutil
             from pathlib import Path
             from unittest.mock import patch
             from fastapi.testclient import TestClient
@@ -77,9 +77,10 @@ class FormalAppStartupTests(unittest.TestCase):
                 with patch.object(production_runtime, 'load', return_value=formal):
                     from server.production_app import app
                 from server import peer_tasks
-                if Path(peer_tasks.BUNDLED_NODE).is_file():
-                    # External runtime fixture on macOS; Linux uses LIVE_NODE.
-                    production_runtime._PEER_NODE = Path(peer_tasks.BUNDLED_NODE)
+                node_binary = peer_tasks.BUNDLED_NODE if Path(peer_tasks.BUNDLED_NODE).is_file() else shutil.which('node')
+                if node_binary:
+                    # Use the already installed test runtime; never install one.
+                    production_runtime._PEER_NODE = Path(node_binary)
                 from server import phase3_feishu
                 records = {TASK_TABLE: {}, 'tblFormalEvents123': {}}
                 task_writes = []
@@ -127,6 +128,21 @@ class FormalAppStartupTests(unittest.TestCase):
                         assert login.status_code == 200, login.text[:300]
                         assert 'Path=/baite-rdos/' in login.headers['set-cookie']
                         assert client.get('/baite-rdos/api/central/auth/me').status_code == 200
+                        from server import central_store
+                        denied_pause = client.patch('/baite-rdos/api/central/runtime', json={'paused': True})
+                        assert denied_pause.status_code == 403
+                        assert not (central_store.get('state', 'runtime') or {}).get('paused')
+                        paused = client.patch('/baite-rdos/api/central/runtime',
+                            headers={'Origin': 'https://yjmt.cn'}, json={'paused': True})
+                        assert paused.status_code == 200 and paused.json()['runtime']['paused'] is True
+                        assert client.get('/baite-rdos/api/runtime/info').json()['runtime']['paused'] is True
+                        assert client.get('/baite-rdos/api/central/overview').json()['runtime']['paused'] is True
+                        assert client.get('/baite-rdos/api/central/maintenance/state').json()['paused'] is True
+                        resumed = client.patch('/baite-rdos/api/central/runtime',
+                            headers={'Origin': 'https://yjmt.cn'}, json={'paused': False})
+                        assert resumed.status_code == 200
+                        assert client.get('/baite-rdos/api/runtime/info').json()['runtime']['paused'] is False
+                        assert client.get('/baite-rdos/api/central/overview').json()['runtime']['paused'] is False
                         projects = client.get('/baite-rdos/api/central/projects')
                         assert projects.status_code == 200, projects.text[:300]
                         assert 'rdos-self' in projects.text

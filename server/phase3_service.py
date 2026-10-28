@@ -1042,7 +1042,15 @@ async def refresh(actor,operation_id='',project_id=PROJECT_ID,*,task_records=Non
     if not maintenance:_admin(actor)
     projects.get_project(project_id)
     try:
-        return await _refresh_project(actor, operation_id, project_id,task_records=task_records,event_records=event_records,registry=registry,maintenance=maintenance)
+        for attempt in range(3):
+            try:
+                return await _refresh_project(actor, operation_id, project_id,
+                    task_records=task_records if attempt == 0 else None,
+                    event_records=event_records if attempt == 0 else None,
+                    registry=registry if attempt == 0 else None, maintenance=maintenance)
+            except local.RefreshRace:
+                if attempt == 2:
+                    _error('refresh_race', '任务在同步期间连续更新；保留原进展，请稍后重试')
     except BaseException as exc:
         previous = local.get('state', 'refresh:' + project_id) or (local.get('state', 'refresh') if project_id == PROJECT_ID else {}) or {}
         local.put('state', 'refresh:' + project_id, {**previous, 'complete': False, 'attempted_at': db.utc_now(),
@@ -1054,10 +1062,15 @@ async def _refresh_project(actor,operation_id,project_id,*,task_records=None,eve
     backend=backends.get_backend()
     discovery=getattr(backend,'refresh_registry',None)
     if discovery and registry is None:await asyncio.to_thread(discovery)
+    heads_before = local.task_heads()
+    def require_unchanged_heads():
+        if local.task_heads() != heads_before:
+            raise local.RefreshRace('任务在同步读取期间已更新；重新读取远端')
     # Complete reads before replacing any projection. No timestamp-only cursor.
     tasks=task_records if task_records is not None else await asyncio.to_thread(backend.list_tasks)
     raw_events=event_records if event_records is not None else await asyncio.to_thread(backend.list_events)
     registry=registry if registry is not None else await asyncio.to_thread(backend.registry)
+    require_unchanged_heads()
     # Capability acknowledgements must precede task acceptance in the same scan.
     for system_event in raw_events:
         if isinstance(system_event,dict) and system_event.get('event_type') in ('node_registry_snapshot','peer_capability_ack'):
@@ -1090,6 +1103,7 @@ async def _refresh_project(actor,operation_id,project_id,*,task_records=None,eve
             issues+=1
     selected.extend(raw for raw in tasks if not isinstance(raw,dict) or not raw.get('task_id'))
     tasks=selected
+    require_unchanged_heads()
     valid=[]
     for raw in tasks:
         try:
@@ -1097,6 +1111,8 @@ async def _refresh_project(actor,operation_id,project_id,*,task_records=None,eve
             local.remember_version(raw['task_id'],raw['requirements_version'],_requirements(raw))
             valid.append(raw)
         except (ValueError,KeyError,TypeError) as exc:
+            if getattr(exc, 'code', None) == 'task_rollback':
+                require_unchanged_heads()
             issues+=1
             local.quarantine(raw,str(exc),'task')
             previous=local.get('task_cache',raw.get('task_id','')) if isinstance(raw,dict) else None
@@ -1120,6 +1136,13 @@ async def _refresh_project(actor,operation_id,project_id,*,task_records=None,eve
     for document in scoped_registry.get('documents',[]):
         identifier=document.get('id') or document.get('object_id')
         documents.append(await asyncio.to_thread(backend.read_document,identifier))
+    require_unchanged_heads()
+    refresh_record={'at':db.utc_now(),'attempted_at':db.utc_now(),'operation_id':operation_id,'complete':True,
+        'error':'','mode':registry.get('mode','unknown')}
+    # Commit only a current snapshot before indexing its events. A concurrent
+    # task write must not make a failed refresh expose new events with old tasks.
+    local.replace_cache(valid,documents,refresh_record,project_id=project_id,expected_heads=heads_before)
+    local.put('state','scope',registry)
     by_id={t['task_id']:t for t in valid if not t.get('integrity_error')}
     ingested=[]
     # Corrections are evaluated after their originals, independent of remote page order.
@@ -1131,10 +1154,6 @@ async def _refresh_project(actor,operation_id,project_id,*,task_records=None,eve
         except (ValueError,KeyError,TypeError) as exc:
             issues+=1
             local.quarantine(raw,str(exc),'event')
-    refresh_record={'at':db.utc_now(),'attempted_at':db.utc_now(),'operation_id':operation_id,'complete':True,
-        'error':'','mode':registry.get('mode','unknown')}
-    local.replace_cache(valid,documents,refresh_record,project_id=project_id)
-    local.put('state','scope',registry)
     for event in ingested:
         if event.get('event_type') not in ('submission','review','check_result'):continue
         for ref in event.get('task_refs',[]):

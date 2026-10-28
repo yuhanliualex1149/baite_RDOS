@@ -721,12 +721,13 @@
   function renderRuntime(){
     const runtime=state.overview?.runtime||{};
     const configured=labInfo?.runtime?.model_mode==='agent_plan';
-    put('runtime-state','<dl class="runtime-list"><dt>中央模型</dt><dd>'+esc(configured?'已连接 Agent Plan':'连接状态待核对')+'</dd><dt>任务与协作记录</dt><dd>使用已登记飞书入口</dd><dt>节点检查</dt><dd>由各工作节点按自己的检查安排读取当前任务</dd></dl>');
+    put('runtime-state','<dl class="runtime-list"><dt>中央模型</dt><dd>'+esc(configured?'已连接 Agent Plan':'连接状态待核对')+'</dd><dt>中央 Agent 与周期检查</dt><dd>'+esc(runtime.paused?'已暂停':'运行中')+'</dd><dt>任务与协作记录</dt><dd>使用已登记飞书入口</dd><dt>节点检查</dt><dd>由各工作节点按自己的检查安排读取当前任务</dd></dl>');
     if(developerMode){
       put('runtime-state',$('runtime-state').innerHTML+'<dl class="runtime-list"><dt>环境标识</dt><dd class="mono">'+esc(labInfo?.env_id)+'</dd><dt>运行代次</dt><dd class="mono">'+esc(labInfo?.generation)+'</dd><dt>中央长期调度</dt><dd>关闭</dd></dl>');
       put('project-health-list',list(runtime.project_health).map(h=>'<article class="item-card"><h3>'+esc(projectName(h.project_id))+'</h3>'+pill(h.needs_attention?'待处理':h.status||'待核对')+'<pre>'+esc(safeJSON(h))+'</pre></article>').join('')||empty('尚无项目检查记录'));
     }
-    $('toggle-runtime').disabled=true;
+    $('toggle-runtime').textContent=runtime.paused?'恢复中央 Agent':'暂停中央 Agent';
+    $('toggle-runtime').disabled=!admin()||!state.overview;
   }
 
   function renderDiagnostics(){

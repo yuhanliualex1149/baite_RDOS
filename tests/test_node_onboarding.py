@@ -111,3 +111,87 @@ async def scenario():
     assert len(local.items('node_onboarding'))==1
 asyncio.run(scenario())
 ''')
+
+    def test_unpublished_plan_can_be_replanned_after_project_is_deactivated(self):
+        self.check('''
+from unittest.mock import patch
+async def scenario():
+    n=new_node();old_project=assign(n)
+    with patch.object(node_onboarding.service,'apply_task_action',side_effect=RuntimeError('before dispatch')):
+        try:await node_onboarding.prepare(n['node_id'],admin)
+        except RuntimeError:pass
+        else:raise AssertionError('expected injected interruption')
+    old_plan=local.get('node_onboarding',n['node_id'])
+    assert not backend3.list_tasks() and central.get('operation',old_plan['operation_id']) is None
+    await projects.deactivate_project(old_project['id'],admin,'deactivate-unpublished',old_project['revision'])
+    new_project=projects.create_project({'name':'新接入项目','node_ids':[n['node_id']]},admin,'new-onboard-project')
+    result=await node_onboarding.prepare(n['node_id'],admin)
+    assert result['task']['project_id']==new_project['id']
+    assert result['task']['task_id']==old_plan['task_id']
+    assert len(backend3.list_tasks())==1
+    assert local.get('draft',old_plan['draft_id'])['status']=='superseded'
+    assert len(local.items('node_onboarding_history'))==1
+    assert (await node_onboarding.prepare(n['node_id'],admin))['task']['task_id']==old_plan['task_id']
+asyncio.run(scenario())
+''')
+
+    def test_new_admin_replans_only_a_confirmed_unpublished_plan(self):
+        self.check('''
+from unittest.mock import patch
+async def scenario():
+    n=new_node();assign(n)
+    with patch.object(node_onboarding.service,'apply_task_action',side_effect=RuntimeError('before dispatch')):
+        try:await node_onboarding.prepare(n['node_id'],admin)
+        except RuntimeError:pass
+    old_plan=local.get('node_onboarding',n['node_id'])
+    successor=store.create_user('successor-admin','接任管理员',['admin'],'successor-admin-password')['user']
+    store.update_user(admin['id'],{'enabled':False},actor_id=successor['id'])
+    result=await node_onboarding.prepare(n['node_id'],successor)
+    plan=local.get('node_onboarding',n['node_id'])
+    assert result['task']['task_id']==old_plan['task_id'] and plan['actor_id']==successor['id']
+    assert plan['operation_id']!=old_plan['operation_id'] and plan['attempt']==1
+    assert len(backend3.list_tasks())==1
+asyncio.run(scenario())
+''')
+
+    def test_unknown_remote_write_does_not_replan_or_use_successor_authority(self):
+        self.check('''
+from unittest.mock import patch
+async def scenario():
+    n=new_node();assign(n)
+    with patch.object(backend3,'write_task',side_effect=RuntimeError('response unknown')):
+        try:await node_onboarding.prepare(n['node_id'],admin)
+        except RuntimeError:pass
+        else:raise AssertionError('expected injected transport failure')
+    old_plan=local.get('node_onboarding',n['node_id'])
+    old_op=central.get('operation',old_plan['operation_id'])
+    assert old_op['status']=='uncertain' and old_op.get('dispatched_at') and not backend3.list_tasks()
+    successor=store.create_user('unknown-successor','接任管理员',['admin'],'unknown-successor-password')['user']
+    store.update_user(admin['id'],{'enabled':False},actor_id=successor['id'])
+    await failure('write_uncertain',node_onboarding.prepare(n['node_id'],successor))
+    assert local.get('node_onboarding',n['node_id'])==old_plan
+    assert not local.items('node_onboarding_history') and not backend3.list_tasks()
+asyncio.run(scenario())
+''')
+
+    def test_pre_dispatched_operation_is_retired_before_successor_publishes(self):
+        self.check('''
+from unittest.mock import patch
+async def scenario():
+    n=new_node();assign(n)
+    with patch.object(node_onboarding.service.ops,'run_write',side_effect=RuntimeError('before dispatch')):
+        try:await node_onboarding.prepare(n['node_id'],admin)
+        except RuntimeError:pass
+        else:raise AssertionError('expected injected interruption')
+    old=local.get('node_onboarding',n['node_id'])
+    op=central.get('operation',old['operation_id'])
+    assert op['status']=='pending' and not op.get('dispatched_at') and not backend3.list_tasks()
+    successor=store.create_user('replacement-admin','接任管理员',['admin'],'replacement-admin-password')['user']
+    store.update_user(admin['id'],{'enabled':False},actor_id=successor['id'])
+    result=await node_onboarding.prepare(n['node_id'],successor)
+    assert result['task']['task_id']==old['task_id'] and len(backend3.list_tasks())==1
+    retired=central.get('operation',old['operation_id'])
+    assert retired['status']=='conflict' and retired['error_code']=='onboarding_superseded'
+    assert retired['superseded_by']==local.get('node_onboarding',n['node_id'])['operation_id']
+asyncio.run(scenario())
+''')
