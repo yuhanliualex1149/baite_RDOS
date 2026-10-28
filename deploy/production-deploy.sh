@@ -46,6 +46,21 @@ public_health() {
   curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/api/health |
     "$python" -c 'import json,sys; x=json.load(sys.stdin); assert x.get("status")=="ok" and x.get("mode")=="production" and x.get("app_release")==sys.argv[1]' "$1"
 }
+wait_public_health() {
+  for attempt in {1..15}; do
+    if public_health "$1"; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+wait_public_maintenance() {
+  for attempt in {1..15}; do
+    if [[ $(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+      https://yjmt.cn/baite-rdos/api/health || true) == 503 ]]; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
 wait_local_health() {
   for attempt in {1..12}; do
     if local_health "$1"; then return 0; fi
@@ -222,6 +237,8 @@ recover() {
     exit "$code"
   fi
   restored=1
+  recovery_sha=$rollback_sha
+  if (( ! service_stopped && ! switched )); then recovery_sha=$old_sha; fi
   if (( proxy_conflict )); then restored=0; fi
   if (( service_stopped || switched )); then
     systemctl stop baite-rdos || true
@@ -254,7 +271,7 @@ recover() {
     fi
     if (( restored )) && { ! timeout --signal=TERM --kill-after=5s 10s "$nginx" -t ||
        ! timeout --signal=TERM --kill-after=5s 10s "$nginx" -s reload ||
-       ! public_health "$rollback_sha"; }; then
+       ! wait_public_health "$recovery_sha"; }; then
       restored=0
     fi
   fi
@@ -263,7 +280,7 @@ recover() {
     echo 'Live RDOS state differed after candidate startup. Original file copies are in the root-only backup; latest files and database were retained. Inspect the difference before claiming preservation.' >&2
   fi
   if (( restored )); then
-    echo "Release failed; rollback code $rollback_sha healthy. Latest database retained. Backup: $backup" >&2
+    echo "Release failed; rollback code $recovery_sha healthy. Latest database retained. Backup: $backup" >&2
   else
     echo "Release failed; recovery health unverified. Maintenance was attempted; inspect code, proxy and data. Current=$(readlink -f "$current" 2>/dev/null || echo unknown), service=$(systemctl is-active baite-rdos 2>/dev/null || echo unknown). Backup: $backup" >&2
   fi
@@ -528,9 +545,10 @@ within_window() {
   }
 }
 maintenance_gate
-[[ $(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
-  https://yjmt.cn/baite-rdos/api/health) == 503 ]] ||
-  { echo 'Public maintenance gate did not take effect' >&2; exit 1; }
+if ! wait_public_maintenance; then
+  echo 'Public maintenance gate did not take effect' >&2
+  recover 1
+fi
 service_stopped=1
 systemctl stop baite-rdos
 within_window
@@ -558,7 +576,7 @@ switched=1
 systemctl start baite-rdos
 wait_local_health "$sha"
 within_window
-[[ $(systemctl is-active baite-rdos) == active ]] || exit 1
+[[ $(systemctl is-active baite-rdos) == active ]] || recover 1
 curl -fsS --max-time 10 http://127.0.0.1:8010/ >/dev/null
 curl -fsS --max-time 10 http://127.0.0.1:8010/static/central.js >/dev/null
 curl -fsS --max-time 10 http://127.0.0.1:8010/api/runtime/info |
@@ -573,7 +591,7 @@ cp -p "$backup/baite-rdos.conf" "$proxy/baite-rdos.conf"
 cp -p "$backup/baite-rdos-downloads.conf" "$proxy/baite-rdos-downloads.conf"
 timeout --signal=TERM --kill-after=5s 10s "$nginx" -t
 timeout --signal=TERM --kill-after=5s 10s "$nginx" -s reload
-public_health "$sha"
+wait_public_health "$sha"
 within_window
 curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/ >/dev/null
 curl -fsS --max-time 10 https://yjmt.cn/baite-rdos/static/central.js >/dev/null

@@ -243,7 +243,14 @@ esac
 ''')
         command('curl', '''
 case " $* " in
-  *" %{http_code} "*) if grep -q 'RDOS maintenance' "$FIXTURE_PROXY/baite-rdos.conf"; then echo 503; else echo 200; fi; exit 0 ;;
+  *" %{http_code} "*)
+    if grep -q 'RDOS maintenance' "$FIXTURE_PROXY/baite-rdos.conf"; then
+      attempts=$(cat "$FIXTURE_GATE_ATTEMPTS")
+      attempts=$((attempts+1))
+      echo "$attempts" > "$FIXTURE_GATE_ATTEMPTS"
+      if [ "$attempts" -le "${FIXTURE_GATE_DELAY_COUNT:-0}" ]; then echo 200; else echo 503; fi
+    else echo 200; fi
+    exit 0 ;;
   *"/api/runtime/info"*) echo '{"mode":"production"}'; exit 0 ;;
 esac
 case " $* " in *"/api/health"*)
@@ -363,6 +370,8 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         env['FIXTURE_PROBE_COUNT'] = str(root / 'probe-count')
         env['FIXTURE_AGENT_PLAN_COUNT'] = str(root / 'agent-plan-count')
         env['FIXTURE_SLEEP_COUNT'] = str(root / 'sleep-count')
+        env['FIXTURE_GATE_ATTEMPTS'] = str(root / 'gate-attempts')
+        (root / 'gate-attempts').write_text('0\n')
         return root, isolated, env
 
     def first_upgrade_fixture(self):
@@ -630,6 +639,42 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
                          'current user memory view\n')
         self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))
+
+    def test_public_maintenance_gate_waits_for_propagation(self):
+        root, script, env = self.fixture()
+        env['FIXTURE_GATE_DELAY_COUNT'] = '2'
+        result = subprocess.run(['bash', str(script), NEW], env=env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / 'gate-attempts').read_text().strip(), '3')
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, NEW)
+
+    def test_public_maintenance_gate_timeout_restores_old_site(self):
+        root, script, env = self.first_upgrade_fixture()
+        env['FIXTURE_GATE_DELAY_COUNT'] = '100'
+        result = subprocess.run(['bash', str(script), NEW], env=env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Public maintenance gate did not take effect', result.stderr)
+        self.assertIn('rollback code ' + ORIGINAL_OLD + ' healthy', result.stderr)
+        self.assertEqual((root / 'gate-attempts').read_text().strip(), '15')
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, ORIGINAL_OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
+                         'original RDOS proxy\n')
+        with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:
+            self.assertIn(('before',), conn.execute('SELECT payload FROM business').fetchall())
+            self.assertNotIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
+            self.assertEqual(json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='central_memory' AND id='user-memory'").fetchone()[0])['content'],
+                             'current user memory')
+        self.assertEqual((root / 'var/lib/baite-rdos/central/agent.md').read_text(),
+                         'current administrator policy\n')
+        self.assertEqual((root / 'var/lib/baite-rdos/central/memory.md').read_text(),
+                         'current user memory view\n')
+        self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(),
+                         'BAITE_LLM_MAX_COMPLETION_TOKENS=393216\n')
+        self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*')))
+        self.assertFalse(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))
 
     def test_concurrent_file_edit_is_preserved_and_cutover_marked_uncertain(self):
         root, script, env = self.fixture()
