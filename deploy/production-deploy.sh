@@ -315,7 +315,7 @@ build_release() {
     find "$stage" -type f -perm /111 -exec chmod 0755 {} +
     find "$stage" -type f ! -perm /111 -exec chmod 0644 {} +
     find "$stage" \( -type d -o -type f \) -exec chmod a-s {} +
-    unreadable=$(runuser -u baite-rdos -- find "$stage" -type f ! -readable -print -quit)
+    unreadable=$(cd / && runuser -u baite-rdos -- find "$stage" -type f ! -readable -print -quit)
     [[ -z $unreadable ]] || return 1
     runuser -u baite-rdos -- test -x "$stage/.venv/bin/uvicorn" || return 1
     printf 'BAITE_APP_RELEASE=%s\n' "$build_sha" > "$stage/release.env"
@@ -329,7 +329,7 @@ build_release() {
   release_sealed "$build_release" || return 1
   [[ -f "$build_release/deploy/STARTUP_FILE_PRESERVATION" &&
      $(cat "$build_release/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] || return 1
-  unreadable=$(runuser -u baite-rdos -- find "$build_release" -type f ! -readable -print -quit)
+  unreadable=$(cd / && runuser -u baite-rdos -- find "$build_release" -type f ! -readable -print -quit)
   [[ -z $unreadable ]] || return 1
   runuser -u baite-rdos -- test -x "$build_release/.venv/bin/uvicorn"
 }

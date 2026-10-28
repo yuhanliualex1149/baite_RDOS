@@ -260,6 +260,10 @@ exit 0
 shift
 shift
 shift
+if [ "${FIXTURE_RUNUSER_REQUIRE_ROOT:-0}" = 1 ] && [ "$1" = find ] && [ "$(pwd -P)" != / ]; then
+  echo 'find: Failed to restore initial working directory' >&2
+  exit 1
+fi
 if [ "$FIXTURE_UNREADABLE" = 1 ] && [ "$1" = find ]; then echo "$FIXTURE_BASE/unreadable"; exit 0; fi
 "$@"
 ''')
@@ -687,3 +691,13 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         self.assertEqual((candidate / '.verified').read_text().strip(), NEW)
         self.assertEqual((candidate / 'release.env').read_text().strip(), 'BAITE_APP_RELEASE=' + NEW)
         self.assertEqual((root / 'opt/baite-rdos/current').resolve(), candidate)
+
+    def test_service_readability_check_uses_accessible_working_directory(self):
+        root, script, env = self.fixture(verified=False)
+        env.update(FIXTURE_STAGE_OK='1', FIXTURE_RUNUSER_REQUIRE_ROOT='1')
+        admin_private = root / 'admin-private'
+        admin_private.mkdir(mode=0o700)
+        result = subprocess.run(['bash', str(script), NEW], cwd=admin_private, env=env,
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, NEW)
