@@ -216,7 +216,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests[0]["reasoning_effort"], "high")
         # Ark's omitted-parameter default is 4k, so both calls must send the
         # model-specific quota explicitly rather than simply remove the field.
-        self.assertEqual([r["max_completion_tokens"] for r in self.requests], [384000, 384000])
+        self.assertEqual([r["max_completion_tokens"] for r in self.requests], [393216, 393216])
         self.assertGreaterEqual(result["elapsed_seconds"], 0)
         for step in self.steps:
             self.assertIn("elapsed_seconds", step)
@@ -237,7 +237,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             agent = self.ark_agent(lambda _: httpx.Response(200, json=reply("已完成")))
             await self.run_agent(agent)
         self.assertEqual(self.requests[-1]["max_completion_tokens"], 64000)
-        with patch.dict(os.environ, {"BAITE_LLM_MAX_COMPLETION_TOKENS": "384001"}):
+        with patch.dict(os.environ, {"BAITE_LLM_MAX_COMPLETION_TOKENS": "393217"}):
             with self.assertRaises(AgentError) as raised:
                 self.ark_agent(lambda _: httpx.Response(200, json=reply("unused")))
         self.assertEqual(raised.exception.code, "model_config")
@@ -252,17 +252,17 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             large, usage={"prompt_tokens": 10, "completion_tokens": 12000, "total_tokens": 12010})))
         result = await self.run_agent(agent)
         self.assertEqual(result["content"], large)
-        self.assertEqual(self.requests[0]["max_completion_tokens"], 384000)
+        self.assertEqual(self.requests[0]["max_completion_tokens"], 393216)
 
         self.requests.clear()
         truncated = self.ark_agent(lambda _: httpx.Response(200, json=reply(
             '{"purpose":', finish_reason="length",
-            usage={"prompt_tokens": 10, "completion_tokens": 384000, "total_tokens": 384010})))
+            usage={"prompt_tokens": 10, "completion_tokens": 393216, "total_tokens": 393226})))
         with self.assertRaises(AgentError) as raised:
             await truncated.interpret_request([{"role": "user", "content": "测试请求"}])
         self.assertEqual(raised.exception.code, "model_incomplete")
         self.assertIn("输出额度耗尽", raised.exception.message)
-        self.assertEqual(self.requests[0]["max_completion_tokens"], 384000)
+        self.assertEqual(self.requests[0]["max_completion_tokens"], 393216)
 
         self.requests.clear()
         truncated = self.ark_agent(lambda _: httpx.Response(200, json=reply(

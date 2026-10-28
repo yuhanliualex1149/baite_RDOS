@@ -137,7 +137,14 @@ recover() {
     systemctl stop baite-rdos || true
     ln -sfn "$old" "$base/current.rollback"
     mv -Tf "$base/current.rollback" "$current"
-    if ! systemctl start baite-rdos || ! wait_local_health "$old_sha"; then
+    # An older release rewrites agent.md and memory.md during lifespan. Do not
+    # start it after a failed first upgrade: data preservation outranks uptime.
+    if ! release_sealed "$old" ||
+       [[ ! -f "$old/deploy/STARTUP_FILE_PRESERVATION" || -L "$old/deploy/STARTUP_FILE_PRESERVATION" ]] ||
+       [[ $(cat "$old/deploy/STARTUP_FILE_PRESERVATION") != RDOS2_STARTUP_FILES_PRESERVED=1 ]]; then
+      echo 'Previous code has no startup-file preservation proof; keeping maintenance and user files intact' >&2
+      restored=0
+    elif ! systemctl start baite-rdos || ! wait_local_health "$old_sha"; then
       restored=0
       systemctl stop baite-rdos || true
     fi
@@ -178,7 +185,8 @@ if [[ -e $release ]]; then
 else
   stage=$(mktemp -d "$base/.rdos2-stage-$sha.XXXXXX")
   git -C "$repo" archive "$sha" | tar -x -C "$stage"
-  [[ -f $stage/cutover/check_release.py && -f $stage/server/production_app.py ]] || exit 1
+  [[ -f $stage/cutover/check_release.py && -f $stage/server/production_app.py &&
+     $(cat "$stage/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] || exit 1
   chown -R baite-rdos-deploy:baite-rdos-deploy "$stage"
   chmod -R go-w "$stage"
   systemd-run --quiet --wait --pipe --collect --unit="rdos2-build-$sha" \
@@ -212,6 +220,8 @@ else
   stage=
 fi
 release_sealed "$release"
+[[ $(cat "$release/deploy/STARTUP_FILE_PRESERVATION") == RDOS2_STARTUP_FILES_PRESERVED=1 ]] ||
+  { echo 'Candidate does not preserve existing startup files' >&2; exit 1; }
 unreadable=$(runuser -u baite-rdos -- find "$release" -type f ! -readable -print -quit)
 [[ -z $unreadable ]]
 runuser -u baite-rdos -- test -x "$release/.venv/bin/uvicorn"
@@ -247,8 +257,8 @@ with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as conn:
     memory_view = Path(resources['memory_md'])
     peer_keys = Path(sys.argv[1]).parent / 'runtime/peer_identity.json'
     registry_view = Path(sys.argv[1]).parent / 'runtime/phase3_resources.json'
-    if (not agent.is_file() or agent.read_text().rstrip('\n') != policy['content']
-        or not memory_view.is_file() or not peer_keys.is_file() or peer_keys.is_symlink()
+    if (not agent.is_file() or not memory_view.is_file()
+        or not peer_keys.is_file() or peer_keys.is_symlink()
         or peer_keys.stat().st_nlink != 1 or not registry_view.is_file()
         or registry_view.is_symlink() or registry_view.stat().st_nlink != 1):
         raise SystemExit('Current RDOS memory or identity files need reconciliation; release refused')

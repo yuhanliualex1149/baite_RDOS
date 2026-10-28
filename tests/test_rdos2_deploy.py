@@ -50,8 +50,13 @@ class RoutineReleaseTests(unittest.TestCase):
         (tool / 'python3.12').symlink_to(sys.executable)
         old = releases / OLD
         old.mkdir()
+        (old / 'deploy').mkdir()
+        (old / 'deploy/STARTUP_FILE_PRESERVATION').write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n')
         candidate = releases / NEW
         if verified:
+            candidate.mkdir()
+            (candidate / 'deploy').mkdir()
+            (candidate / 'deploy/STARTUP_FILE_PRESERVATION').write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n')
             (candidate / '.venv/bin').mkdir(parents=True)
             (candidate / '.venv/bin/python').symlink_to(sys.executable)
             uvicorn = candidate / '.venv/bin/uvicorn'
@@ -158,7 +163,14 @@ case "$1" in
     echo active > "$FIXTURE_SERVICE"
     if [ "$(basename "$(readlink -f "$FIXTURE_CURRENT")")" = "$FIXTURE_NEW" ]; then
       "$FIXTURE_PYTHON" -c 'import os,sqlite3; c=sqlite3.connect(os.environ["FIXTURE_DB"]); c.execute("INSERT INTO business VALUES (?)",("new-business-record",)); c.commit(); c.close()'
+      if [ "$FIXTURE_EDIT_STARTUP_FILES" = 1 ]; then
+        echo 'direct policy edit after gate' > "$FIXTURE_CENTRAL/agent.md"
+        echo 'direct memory edit after gate' > "$FIXTURE_CENTRAL/memory.md"
+      fi
       if [ "$FIXTURE_PROXY_EDIT" = 1 ]; then echo 'external user edit' > "$FIXTURE_PROXY/baite-rdos.conf"; fi
+    elif [ "$FIXTURE_OLD_REWRITES" = 1 ]; then
+      echo 'old startup overwrote policy' > "$FIXTURE_CENTRAL/agent.md"
+      echo 'old startup overwrote memory' > "$FIXTURE_CENTRAL/memory.md"
     fi
     ;;
   *) exit 1 ;;
@@ -209,10 +221,10 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         (root / 'sleep-count').write_text('0\n')
         archive = root / 'archive.tar'
         with tarfile.open(archive, 'w') as tar:
-            for name in ('cutover/check_release.py', 'server/production_app.py'):
+            for name in ('cutover/check_release.py', 'server/production_app.py', 'deploy/STARTUP_FILE_PRESERVATION'):
                 item = root / name
                 item.parent.mkdir(parents=True, exist_ok=True)
-                item.write_text('fixture\n')
+                item.write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n' if name.endswith('STARTUP_FILE_PRESERVATION') else 'fixture\n')
                 tar.add(item, arcname=name)
         # Rewrite only an isolated copy. No fixture command uses real paths,
         # credentials, network, service managers or repository state.
@@ -241,8 +253,10 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         env = {**os.environ, 'FIXTURE_BASE': str(base), 'FIXTURE_FETCH_OK': '1',
             'FIXTURE_STAGE_OK': '0', 'FIXTURE_UNREADABLE': '0',
             'FIXTURE_PROXY_EDIT': '0',
+            'FIXTURE_EDIT_STARTUP_FILES': '0', 'FIXTURE_OLD_REWRITES': '0',
             'FIXTURE_NEW': NEW, 'FIXTURE_CURRENT': str(base / 'current'),
             'FIXTURE_SERVICE': str(root / 'service-state'), 'FIXTURE_PROXY': str(proxy),
+            'FIXTURE_CENTRAL': str(dbdir / 'central'),
             'FIXTURE_BAD_NEW_HEALTH': '0', 'FIXTURE_DB': str(database),
             'FIXTURE_PYTHON': sys.executable, 'FIXTURE_ARCHIVE': str(archive)}
         env['FIXTURE_FETCH_COUNT'] = str(root / 'fetch-count')
@@ -332,6 +346,7 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
     def test_failed_health_rolls_back_code_and_retains_new_business_data(self):
         root, script, env = self.fixture()
         env['FIXTURE_BAD_NEW_HEALTH'] = '1'
+        env['FIXTURE_EDIT_STARTUP_FILES'] = '1'
         result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=20)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
@@ -341,8 +356,10 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
             self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
             self.assertEqual(json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='central_memory' AND id='user-memory'").fetchone()[0])['content'],
                              'current user memory')
+        self.assertEqual((root / 'var/lib/baite-rdos/central/agent.md').read_text(),
+                         'direct policy edit after gate\n')
         self.assertEqual((root / 'var/lib/baite-rdos/central/memory.md').read_text(),
-                         'current user memory view\n')
+                         'direct memory edit after gate\n')
         self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
                          'original RDOS proxy\n')
@@ -350,6 +367,7 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
 
     def test_verified_release_reaches_public_health_and_restores_proxy(self):
         root, script, env = self.fixture()
+        env['FIXTURE_EDIT_STARTUP_FILES'] = '1'
         result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, NEW)
@@ -362,10 +380,38 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
             self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
             self.assertEqual(json.loads(conn.execute("SELECT payload FROM central_records WHERE kind='central_memory' AND id='user-memory'").fetchone()[0])['content'],
                              'current user memory')
+        self.assertEqual((root / 'var/lib/baite-rdos/central/agent.md').read_text(),
+                         'direct policy edit after gate\n')
         self.assertEqual((root / 'var/lib/baite-rdos/central/memory.md').read_text(),
-                         'current user memory view\n')
+                         'direct memory edit after gate\n')
         self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))
+
+    def test_existing_file_edits_different_from_database_do_not_block_or_get_overwritten(self):
+        root, script, env = self.fixture()
+        policy = root / 'var/lib/baite-rdos/central/agent.md'
+        memory = root / 'var/lib/baite-rdos/central/memory.md'
+        policy.write_text('existing direct policy edit\n')
+        memory.write_text('existing direct memory edit\n')
+        result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(policy.read_text(), 'existing direct policy edit\n')
+        self.assertEqual(memory.read_text(), 'existing direct memory edit\n')
+
+    def test_first_upgrade_failure_refuses_old_startup_that_would_overwrite_files(self):
+        root, script, env = self.fixture()
+        (root / 'opt/baite-rdos/releases' / OLD / 'deploy/STARTUP_FILE_PRESERVATION').unlink()
+        env.update(FIXTURE_BAD_NEW_HEALTH='1', FIXTURE_EDIT_STARTUP_FILES='1', FIXTURE_OLD_REWRITES='1')
+        result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('no startup-file preservation proof', result.stderr)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'inactive')
+        self.assertIn('RDOS maintenance', (root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text())
+        self.assertEqual((root / 'var/lib/baite-rdos/central/agent.md').read_text(), 'direct policy edit after gate\n')
+        self.assertEqual((root / 'var/lib/baite-rdos/central/memory.md').read_text(), 'direct memory edit after gate\n')
+        with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:
+            self.assertIn(('new-business-record',), conn.execute('SELECT payload FROM business').fetchall())
 
     def test_fresh_stage_seals_only_after_service_readability_check(self):
         root, script, env = self.fixture(verified=False)

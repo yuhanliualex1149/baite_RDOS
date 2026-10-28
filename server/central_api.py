@@ -615,11 +615,11 @@ async def create_project(payload: ProjectCreate, user: dict = Depends(admin)):
         raise failure(exc) from exc
 
 
-def _sync_registered_projects():
+def _sync_registered_projects(*, persist=True):
     from server import phase3_backend, rdos_projects
     backend = phase3_backend.get_backend()
     if hasattr(backend, 'register_projects'):
-        backend.register_projects(rdos_projects.list_projects(None, include_inactive=True))
+        backend.register_projects(rdos_projects.list_projects(None, include_inactive=True), persist=persist)
 
 
 async def _legacy_create_project(payload: ProjectCreate, user: dict):

@@ -129,8 +129,13 @@ def _file_state(value):
         matching = path.is_file() and path.read_text(encoding='utf-8').rstrip('\n') == value['content']
     except Exception:
         matching = False
-    return {'file_updated': matching, **({} if matching else {
-        'file_error': '数据库中的职责有效；受限职责文件尚未更新，请稍后重试保存或重启。'})}
+    if matching:
+        return {'file_updated': True}
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
+        return {'file_updated': False, 'file_error':
+            '数据库中的职责仍生效；现有职责文件与数据库不一致，重启会保留文件。请在 Panel 核对并明确保存希望采用的内容。'}
+    return {'file_updated': False, 'file_error':
+        '数据库中的职责有效；受限职责文件尚未更新，请稍后重试保存或重启。'}
 
 
 def initialize():
@@ -141,10 +146,15 @@ def initialize():
             current = {**_baseline(), 'updated_at': db.utc_now()}
             memory._put(conn, 'state', _POLICY_ID, current)
             memory._put(conn, 'central_agent_policy_history', str(current['version']), current)
-    try:
-        _write_policy()
-    except Exception:
-        pass
+    # An existing formal file may contain an administrator's direct edits.
+    # Startup is not an authorized settings change: preserve those bytes even
+    # when they differ from the database projection. Explicit Panel saves still
+    # call _write_policy and update the file after their DB transaction.
+    if os.environ.get('RDOS_RUNTIME_MODE') != 'production' or not _policy_path().exists():
+        try:
+            _write_policy()
+        except Exception:
+            pass
     return {**current, **_file_state(current)}
 
 
@@ -202,6 +212,10 @@ def memory_preview(actor):
         content = path.read_text(encoding='utf-8')
         if not path.is_file() or path.stat().st_nlink != 1:
             raise ValueError('invalid summary')
+        if content != memory._summary_content():
+            return {'content': '', 'hash': '', 'available': False,
+                    'summary_updated_at': None, 'generated': False,
+                    'error': '现有记忆文件与数据库中的有效记忆不一致；文件已保留，但直接编辑不会自动生效。请在 Panel 核对后明确保存所需记忆。'}
         return {'content': content, 'hash': store.digest(content), 'available': True,
                 'summary_updated_at': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
                 'generated': True}

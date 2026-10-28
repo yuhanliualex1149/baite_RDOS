@@ -36,9 +36,10 @@ class CentralAgent:
     max_model_calls = 6
     max_tool_calls = 12
     request_timeout = 90.0
-    # Ark lists 384k maximum answer tokens for deepseek-v4-pro. This budget
-    # includes reasoning and visible output; the provider's omitted default is 4k.
-    deepseek_v4_pro_completion_tokens = 384000
+    # Agent Plan's ZCode example gives 393216 output tokens for this model.
+    # This includes reasoning and visible output; live API acceptance still
+    # requires verification before switching the production environment.
+    deepseek_v4_pro_completion_tokens = 393216
 
     def _local_mode(self) -> bool:
         transport = getattr(self, "transport", None)

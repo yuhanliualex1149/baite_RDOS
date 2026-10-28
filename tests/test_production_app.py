@@ -260,6 +260,59 @@ class FormalAppStartupTests(unittest.TestCase):
                         altered = phase3_backend.get_backend().list_events()[0]
                         assert altered['verified_actor']['identity_mode'] == 'actual'
                         assert altered['body'] != event['body']
+                    # A direct edit after any release preflight must survive a
+                    # real formal lifespan, even when the DB projection differs.
+                    registry_file = root / 'runtime/phase3_resources.json'
+                    registry = json.loads(registry_file.read_text(encoding='utf-8'))
+                    finance_view = next(p for p in registry['projects'] if p['id'] == FINANCE_PROJECT)
+                    finance_view['name'] = 'direct registry edit after preflight'
+                    registry_file.write_text(json.dumps(registry, ensure_ascii=False), encoding='utf-8')
+                    registry_file.chmod(0o600)
+                    registry_bytes = registry_file.read_bytes()
+                    policy.write_text('direct user policy edit after preflight\n', encoding='utf-8')
+                    memory_view = root / 'central/memory.md'
+                    memory_view.write_text('direct user memory edit after preflight\n', encoding='utf-8')
+                    policy.chmod(0o600)
+                    memory_view.chmod(0o600)
+                    with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn') as client:
+                        assert client.get('/baite-rdos/api/health').status_code == 200
+                        assert policy.read_text() == 'direct user policy edit after preflight\n'
+                        assert memory_view.read_text() == 'direct user memory edit after preflight\n'
+                        assert registry_file.read_bytes() == registry_bytes
+                        login = client.post('/baite-rdos/api/central/auth/login',
+                            headers={'Origin': 'https://yjmt.cn'},
+                            json={'username': 'admin', 'password': 'fixture-password-123'})
+                        assert login.status_code == 200, login.text
+                        current = client.get('/baite-rdos/api/central/settings/agent').json()
+                        assert current['file_updated'] is False
+                        assert '重启会保留文件' in current['file_error']
+                        stale = client.get('/baite-rdos/api/central/settings/memory-preview').json()
+                        assert stale['available'] is False and '不会自动生效' in stale['error']
+                        saved = client.put('/baite-rdos/api/central/settings/agent',
+                            headers={'Origin': 'https://yjmt.cn'},
+                            json={'content':'explicit Panel policy', 'expected_version':current['version'],
+                                  'operation_id':'formal-explicit-policy'})
+                        assert saved.status_code == 200 and saved.json()['file_updated'], saved.text
+                        remembered = client.post('/baite-rdos/api/central/settings/memories',
+                            headers={'Origin': 'https://yjmt.cn'},
+                            json={'operation':'remember', 'operation_id':'formal-explicit-memory',
+                                  'expected_version':0, 'topic':'正式记忆测试', 'content':'显式更新有效'})
+                        assert remembered.status_code == 200 and remembered.json()['summary_updated'], remembered.text
+                        assert client.get('/baite-rdos/api/central/settings/memory-preview').json()['available'] is True
+                    assert policy.read_text() == 'explicit Panel policy\n'
+                    assert '显式更新有效' in memory_view.read_text()
+                    policy.write_text('direct policy edit before failed startup\n', encoding='utf-8')
+                    memory_view.write_text('direct memory edit before failed startup\n', encoding='utf-8')
+                    from server import central_maintenance
+                    with patch.object(central_maintenance, 'start', side_effect=RuntimeError('fixture startup failure')):
+                        try:
+                            with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn'):
+                                raise AssertionError('startup unexpectedly succeeded')
+                        except RuntimeError as exc:
+                            assert str(exc) == 'fixture startup failure'
+                    assert policy.read_text() == 'direct policy edit before failed startup\n'
+                    assert memory_view.read_text() == 'direct memory edit before failed startup\n'
+                    assert registry_file.read_bytes() == registry_bytes
                 with sqlite3.connect(database) as conn:
                     assert conn.execute('SELECT COUNT(*) FROM central_users').fetchone()[0] == 3
                     assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='phase3_mock'").fetchone()[0] == 0
