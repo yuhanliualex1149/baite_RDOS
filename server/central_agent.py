@@ -73,7 +73,13 @@ class CentralAgent:
             raise AgentError("model_config", "模型 thinking 或 reasoning_effort 配置无效")
         # High reasoning consumes this same output quota before emitting JSON.
         # Use one visible quota for interpretation and the business response.
-        self.max_completion_tokens = self._setting("BAITE_LLM_MAX_COMPLETION_TOKENS", 8192, 1024, 32768, int)
+        # The protected old-business rollback must accept the operator's new
+        # Agent Plan setting without relaxing other models' existing bounds.
+        # Its default remains unchanged; the live endpoint must be verified
+        # before this explicit value is installed.
+        agent_plan_limit = (393216 if self.base_url == 'https://ark.cn-beijing.volces.com/api/plan/v3'
+                            and self.model == 'deepseek-v4-pro' else 32768)
+        self.max_completion_tokens = self._setting("BAITE_LLM_MAX_COMPLETION_TOKENS", 8192, 1024, agent_plan_limit, int)
         self.max_seconds = self._setting("BAITE_AGENT_MAX_SECONDS", self.max_seconds, 1, 600, float)
         self.max_model_calls = self._setting("BAITE_AGENT_MAX_MODEL_CALLS", self.max_model_calls, 1, 12, int)
         self.max_tool_calls = self._setting("BAITE_AGENT_MAX_TOOL_CALLS", self.max_tool_calls, 1, 24, int)

@@ -186,6 +186,18 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.base_url, "https://example.test/v1")
         self.assertEqual(agent.model, "configured-model")
 
+    async def test_protected_old_code_accepts_only_exact_agent_plan_quota_override(self):
+        with patch.dict(os.environ, {'BAITE_LLM_MAX_COMPLETION_TOKENS': '393216'}):
+            agent = CentralAgent(api_key='fixture-only',
+                base_url='https://ark.cn-beijing.volces.com/api/plan/v3',
+                model='deepseek-v4-pro')
+            self.assertEqual(agent.max_completion_tokens, 393216)
+            with self.assertRaises(AgentError) as other_model:
+                CentralAgent(api_key='fixture-only',
+                    base_url='https://ark.cn-beijing.volces.com/api/plan/v3',
+                    model='other-model')
+            self.assertEqual(other_model.exception.code, 'model_config')
+
     async def test_flash_uses_supported_bounded_reasoning_and_keeps_truncation_failure(self):
         agent = self.agent(lambda _: httpx.Response(200, json=reply("尚未完成", finish_reason="length")))
         agent.model = "glm-5.3-flash"
