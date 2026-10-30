@@ -6,8 +6,66 @@ business synchronization or health-processing completion hooks.
 from __future__ import annotations
 
 import json
+import re
 import time
 from server import central_store as store, phase1_runtime as runtime
+
+
+def _diagnostic_subject(message):
+    # A prohibition such as “不修改任务或记忆” describes a write boundary,
+    # not a request to inspect tasks or search memory. Keep the original
+    # authenticated message intact; this projection only selects read sources.
+    return re.sub(r'(?:不要|不许|不)(?:修改|写入|发布|办理|保存|创建|下发|执行)[^。；，,]*', '', message)
+
+
+def _operational_diagnostic(message):
+    """Narrow live work-state questions; historical reasoning remains recall.
+
+    This selects the minimum source type, never a project or permission. The
+    normal saved run and each tool still own scope and read authorization.
+    """
+    message = _diagnostic_subject(message)
+    current = bool(re.search(r'目前|当前|现在|最新|今天|本周', message))
+    historical = bool(re.search(r'历史|以前|过去|当时|上次|之前|记忆|记住|约定', message))
+    reasoning = bool(re.search(r'判断|决定|原则|习惯|怎么|如何|约定|记住', message))
+    checking = bool(re.search(r'检查|核对|查看|查询|查一下|状态|进展|情况|是否正常', message))
+    if historical and reasoning and (not current or not checking):
+        return False
+    subject = bool(re.search(r'节点|接入|回写|回执|定时|周报|飞书|任务|运行状态|系统状态|服务状态', message))
+    return subject and (current or checking)
+
+
+def _operational_evidence(name, args, result):
+    """A successful read of work-state records, not an unrelated memory hit."""
+    if name in {'central_inspect_overview', 'phase3_read_workspace', 'phase3_list_tasks'}:
+        return True
+    entities = {'projects', 'tasks', 'events', 'runs', 'operations', 'health', 'read_receipts', 'tool_calls'}
+    if name in {'central_inspect_records', 'central_inspect_database'}:
+        return (args.get('entity', 'tasks') in entities and not args.get('schema')
+                and (result.get('evidence') or {}).get('source_available') is not False)
+    return False
+
+
+def _initial_diagnostic_read(message, requires_work_state):
+    """Choose a bounded first read from the authenticated question.
+
+    Provider tool-choice support is not a prerequisite for observing current
+    work state. These calls still pass through the normal permissioned tool
+    service; their results and receipts precede the model's summary.
+    """
+    message = _diagnostic_subject(message)
+    if requires_work_state:
+        return 'central_inspect_overview', {'fresh': bool(re.search(r'最新|实时|重新读取|重新核对', message))}
+    if (re.search(r'记住|记得|约定|历史|以前|过去|当时|之前|上次', message)
+            or re.search(r'(?:查看|查询|查一下).{0,12}记忆|记忆.{0,12}(?:内容|条目|规则)', message)):
+        return 'central_memory_search', {'include_history': bool(re.search(r'历史|以前|过去|当时|之前|上次', message))}
+    # A concrete source path can be observed without inventing a code search.
+    # Broad code questions continue through the existing read tools and retain
+    # the final no-evidence protection if the model does not actually read.
+    path = re.search(r'\b((?:server|lab|cutover|tests|node_skills)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\b', message)
+    if path:
+        return 'central_inspect_code', {'path': path.group(1), 'start_line': 1, 'end_line': 80}
+    return None
 
 
 def _task_result_text(results):
@@ -56,6 +114,10 @@ async def run_chat(run, actor, started):
     from server.central_agent import AgentError, CentralAgent
     from server.central_inspection import INSPECTION_TOOLS
     from server.lab_model_provider import make_agent
+
+    evidence_tools = INSPECTION_TOOLS | {
+        'central_memory_search', 'central_recall_decisions', 'phase3_read_workspace',
+        'phase3_list_tasks', 'phase3_read_document', 'phase3_list_knowledge', 'phase3_read_knowledge'}
 
     run['interactive_readonly'] = True  # No incidental business health writes.
     store.put('run', run['id'], run)
@@ -117,6 +179,9 @@ async def run_chat(run, actor, started):
 
     plan = await central_requests.prepare(run, actor, interpret)
     run.update(request_plan=plan['id'], purpose=plan['purpose'], model=plan.get('model'))
+    requires_work_state = plan['purpose'] == 'diagnose' and _operational_diagnostic(run['message'])
+    if plan['purpose'] == 'diagnose':
+        run['diagnostic_evidence_requirement'] = 'work_state' if requires_work_state else 'relevant_source'
     store.put('run', run['id'], run)
     check_boundary()
     if plan['purpose']=='maintain':
@@ -160,9 +225,7 @@ async def run_chat(run, actor, started):
                 if key in saved:
                     run[key] = saved[key]
         target = (name, store.digest(args))
-        if result.get('ok') and (name in INSPECTION_TOOLS or name in {
-                'central_memory_search', 'central_recall_decisions', 'phase3_read_workspace', 'phase3_list_tasks', 'phase3_read_document',
-                'phase3_list_knowledge', 'phase3_read_knowledge'}):
+        if result.get('ok') and name in evidence_tools:
             evidence = result.get('evidence') or {}
             limits = [label for key, label in (
                 ('complete', '最新来源读取不完整'), ('source_available', '对应记录来源暂不可用'),
@@ -172,13 +235,33 @@ async def run_chat(run, actor, started):
                 'receipt_id': result.get('inspection_receipt_id'), 'evidence_hash': result.get('evidence_hash') or store.digest(result),
                 'summary': result.get('summary') or ('已查找可供中央参考的历史判断。' if name=='central_recall_decisions' else
                                                      '已读取可供中央参考的共享记忆。' if name=='central_memory_search'
-                                                     else '已读取所选业务资料的对应版本。'), 'limits': limits}
+                                                     else '已读取所选业务资料的对应版本。'), 'limits': limits,
+                'work_state': _operational_evidence(name, args, result)}
+            if plan['purpose'] == 'diagnose':
+                # The next recorded tool step persists partial evidence too,
+                # even when a later model response fails the evidence gate.
+                run['diagnostic_evidence'] = list(observations.values())
         if result.get('ok'):
             failures.pop(target, None)
         else:
             failures[target] = {'tool': name, 'code': result.get('code', 'tool_failed'),
                                 'error': result.get('error', '本次操作未完成')}
         return result
+
+    if plan['purpose'] == 'diagnose':
+        first_read = _initial_diagnostic_read(run['message'], requires_work_state)
+        if first_read:
+            check_boundary()
+            name, args = first_read
+            number = run.setdefault('usage', {}).get('tool_calls', 0) + 1
+            if number > agent.max_tool_calls:
+                raise AgentError('tool_limit', '本次检查读取次数已达上限，尚未取得新的检查证据。')
+            await on_step({'type': 'tool_call', 'name': name, 'arguments': args,
+                           'tool_call': number, 'origin': 'trusted_diagnostic'})
+            result = await invoke(name, args)
+            outcome['diagnostic_results'] = [{'tool': name, 'arguments': args, 'result': result}]
+            await on_step({'type': 'tool_result', 'name': name, 'result': result,
+                           'tool_call': number, 'origin': 'trusted_diagnostic'})
 
     # A fixed request plan is executable authority; a second free-text reply is
     # not needed to decide whether to do an already authorized action.
@@ -259,9 +342,10 @@ async def run_chat(run, actor, started):
         run['maintenance_complete']=bool(completed) and len(completed)==len(maintenance_results) and all(completed)
     if plan['purpose'] == 'diagnose' and not maintenance_results:
         run['diagnostic_evidence'] = list(observations.values())
-        if not observations:
+        if not observations or requires_work_state and not any(item['work_state'] for item in observations.values()):
             failures[('inspection', 'missing')] = {'tool': 'central_inspection', 'code': 'evidence_missing',
-                'error': '尚未取得本次检查证据，不能据此判断工作或系统正常。'}
+                'error': '尚未取得本次工作状态检查证据，记忆或资料不能代替节点、任务与运行记录。' if requires_work_state else
+                         '尚未取得本次检查证据，不能据此判断工作或系统正常。'}
         elif any(item['limits'] for item in observations.values()):
             failures[('inspection', 'incomplete')] = {'tool': 'central_inspection', 'code': 'evidence_incomplete',
                 'error': '；'.join(dict.fromkeys(limit for item in observations.values() for limit in item['limits']))}

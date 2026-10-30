@@ -112,6 +112,26 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
+    def test_lost_response_with_changed_remote_is_not_adopted_or_republished(self):
+        self.check('''
+async def scenario():
+    n=new_node();assign(n)
+    backend3.fault('task_after_commit')
+    await failure('write_uncertain',node_onboarding.prepare(n['node_id'],admin))
+    plan=local.get('node_onboarding',n['node_id'])
+    remote=backend3.read_task(plan['task_id'])
+    remote['title']='外部同版本改写'
+    backend3._save('task',remote['task_id'],remote)
+    count=len(backend3._items('operation'))
+    await failure('operation_conflict',node_onboarding.prepare(n['node_id'],admin))
+    assert local.get('node_onboarding',n['node_id'])==plan
+    assert len(backend3._items('operation'))==count and len(backend3.list_tasks())==1
+    assert backend3.read_task(plan['task_id'])==remote
+    assert not local.get('task_authority',plan['task_id']+'@1')
+    assert central.get('operation',plan['operation_id'])['status']=='conflict'
+asyncio.run(scenario())
+''')
+
     def test_unpublished_plan_can_be_replanned_after_project_is_deactivated(self):
         self.check('''
 from unittest.mock import patch

@@ -1603,7 +1603,7 @@ def _maintenance_tool_specs(run):
     for name,description in [('central_refresh_feishu','启动登记范围的全量飞书刷新。会按既有规则处理有效回执，返回后台运行状态；已启动不表示已完成。'),
                              ('central_start_inspection','启动先同步再只读诊断的系统检查，返回后台运行状态；报告在Panel，不自动修复。'),
                              ('central_maintenance_status','查询已启动刷新或系统检查的实际状态和简报。')]:
-        if _explicit_readonly(run) and name!='central_maintenance_status':continue
+        if (run.get('purpose') == 'diagnose' or _explicit_readonly(run)) and name!='central_maintenance_status':continue
         props={'run_id':{'type':'string'}} if name=='central_maintenance_status' else {}
         values.append({'type':'function','function':{'name':name,'description':description,
             'parameters':{'type':'object','properties':props,'additionalProperties':False,
@@ -1621,6 +1621,7 @@ async def _maintenance_tool(name,args,run,user):
             if not set(item.get('project_ids',[])).issubset(run['allowed_projects']):
                 raise PermissionError('维护记录超出当前对话项目范围')
         else:
+            if run.get('purpose') == 'diagnose':raise PermissionError('当前请求为只读检查，未启动业务同步')
             if _explicit_readonly(run):raise PermissionError('当前请求明确只读，未启动业务同步')
             action='refresh' if name=='central_refresh_feishu' else 'inspection'
             operation_id=run['operation_id']+':'+name

@@ -11,6 +11,52 @@ from server import phase3_feishu, rdos_contract
 
 
 class UpgradeTaskTests(unittest.TestCase):
+    def test_title_may_identify_member_without_changing_upgrade_scope(self):
+        task_id='RDOS-2-UPGRADE-XIAOFEI'
+        original={**upgrade_tasks.task_payload(task_id),'project_id':'project_rdos',
+                  'requirements_version':3,'business_status':'active'}
+        renamed={**original,'title':'更新 RDOS 工作协作方式：潇斐'}
+        self.assertEqual(upgrade_tasks.legacy_columns(renamed,'op'),
+                         upgrade_tasks.legacy_columns(original,'op'))
+        for title in ('',None,42):
+            with self.subTest(title=title),self.assertRaises(ValueError):
+                upgrade_tasks.legacy_columns({**original,'title':title},'op')
+
+    def test_formal_preflight_rejects_bad_projection_without_cli_or_journal(self):
+        task_id='RDOS-2-UPGRADE-XIAOFEI'
+        task={**upgrade_tasks.task_payload(task_id),'project_id':'project_rdos','env_id':'formal_test',
+              'generation':'a'*32,'requirements_version':3,'record_revision':6,'business_status':'active'}
+        registry={'env_id':'formal_test','generation':'a'*32,'projects':[{'id':'project_rdos'}]}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(phase3_feishu,'_FORMAL',True):
+            executor=mock.Mock()
+            backend=phase3_feishu.FeishuBackend({'root':directory,'phase3':{'registry_path':directory+'/registry.json'}},registry,executor)
+            with self.assertRaises(ValueError):
+                backend.validate_task_write({**task,'goal':'skip skill validation'},'op:task')
+            executor.assert_not_called()
+            self.assertFalse(backend.operations_path.exists())
+            backend.validate_task_write({**task,'title':'更新 RDOS 工作协作方式：潇斐'},'op:task')
+            self.assertFalse(executor.mock_calls)
+
+    def test_old_title_refusal_evidence_is_narrow_and_never_journal_absence_only(self):
+        from pathlib import Path
+        task_id='RDOS-2-UPGRADE-XIAOFEI'
+        task={**upgrade_tasks.task_payload(task_id),'title':'更新 RDOS 工作协作方式：潇斐',
+              'project_id':'project_rdos','env_id':'formal_test','generation':'a'*32,
+              'requirements_version':3,'record_revision':6,'business_status':'active'}
+        registry={'env_id':'formal_test','generation':'a'*32,'projects':[{'id':'project_rdos'}]}
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(phase3_feishu,'_FORMAL',True):
+            Path(directory,'runtime').mkdir()
+            backend=phase3_feishu.FeishuBackend({'root':directory,'phase3':{'registry_path':directory+'/registry.json'}},registry,mock.Mock())
+            self.assertIsNone(backend.unwritten_legacy_upgrade_evidence(task,'op:task','op:event'))
+            backend.operations_path.write_text('{}')
+            proof=backend.unwritten_legacy_upgrade_evidence(task,'op:task','op:event')
+            self.assertFalse(proof['transport_attempted'])
+            self.assertIsNone(backend.unwritten_legacy_upgrade_evidence({**task,'task_id':'other'},'op:task','op:event'))
+            self.assertIsNone(backend.unwritten_legacy_upgrade_evidence({**task,'title':'更新 RDOS 工作协作方式'},'op:task','op:event'))
+            for state in ('sent','verified'):
+                backend.operations_path.write_text(json.dumps({'op:task':{'state':state}}))
+                self.assertIsNone(backend.unwritten_legacy_upgrade_evidence(task,'op:task','op:event'))
+
     def test_three_fixed_nodes_keep_original_members_and_single_readable_row(self):
         self.assertEqual(len(upgrade_tasks.UPGRADES), 3)
         self.assertEqual({v['node_id'] for v in upgrade_tasks.UPGRADES.values()},

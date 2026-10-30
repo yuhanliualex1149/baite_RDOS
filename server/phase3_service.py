@@ -356,11 +356,12 @@ async def _commit_task(task, event, opid, mark):
         from server import peer_tasks
         task = peer_tasks.sign_task_update(task)
     event = {**event, 'operation_id': opid + ':event'}
+    # Deterministic adapter/legacy-column refusal happens before admission to
+    # any external side effect, including before reserving a future revision.
+    backend.validate_task_write(task, opid + ':task')
+    backend.validate_event_write(event, opid + ':event')
     prepared.update(prepared_task=task, prepared_event=event)
     central.put('operation', opid, prepared)
-    _remember_authority(task, opid)
-    local.immutable('trusted_event', event['id'], {'hash': central.digest(backends.payload(event)), 'operation_id': opid})
-    mark()
     current = await asyncio.to_thread(backend.read_task, task['task_id'])
     if not current or backends.payload(current) != backends.payload(task):
         if current and current.get('record_revision', 0) >= task['record_revision']:
@@ -368,12 +369,15 @@ async def _commit_task(task, event, opid, mark):
         sent = central.get('operation', opid)
         if sent.get('task_dispatched'):
             _error('write_uncertain', '原任务写入已经发出但未见目标结果；未重发')
+        mark()
+        sent = central.get('operation', opid)
         sent['task_dispatched'] = True
         central.put('operation', opid, sent)
         await asyncio.to_thread(backend.write_task, task, opid + ':task')
     current = await asyncio.to_thread(backend.read_task, task['task_id'])
     if not current or backends.payload(current) != backends.payload(task):
         _error('write_uncertain', '任务关键字段未完整读回')
+    _remember_authority(current, opid)
     local.confirm_task_head(current, central.digest(backends.payload(current)))
     authorizing = central.get('operation', task.get('grant_operation_id','')) or {}
     plan = authorizing.get('planned_task') or {}
@@ -387,12 +391,15 @@ async def _commit_task(task, event, opid, mark):
         sent = central.get('operation', opid)
         if sent.get('event_dispatched'):
             _error('write_uncertain', '原回执已经发出但未见结果；未重复追加')
+        mark()
+        sent = central.get('operation', opid)
         sent['event_dispatched'] = True
         central.put('operation', opid, sent)
         await asyncio.to_thread(backend.append_event, event, opid + ':event')
         matches = [e for e in await asyncio.to_thread(backend.list_events) if e.get('id') == event['id']]
     if not matches or any(backends.payload(e) != backends.payload(event) for e in matches):
         _error('write_uncertain', '任务已写入，协作回执尚未完整核对')
+    local.immutable('trusted_event', event['id'], {'hash': central.digest(backends.payload(event)), 'operation_id': opid})
     local.remember_version(task['task_id'], task['requirements_version'], _requirements(task))
     local.put('task_cache', task['task_id'], current)
     _ingest_event(matches[0], {task['task_id']: task})

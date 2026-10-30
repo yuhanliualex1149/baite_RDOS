@@ -61,7 +61,7 @@ def legacy_columns(task: dict, operation_id: str) -> dict:
         return {}
     if (task.get('project_id') != formal.DEFAULT_PROJECT
             or task.get('executor_node_ids') != [item['node_id']]
-            or task.get('title') != '更新 RDOS 工作协作方式'
+            or not isinstance(task.get('title'), str) or not task['title'].strip()
             or task.get('goal') != instructions(task['task_id'])
             or task.get('task_type') != 'action'
             or task.get('completion_rule') != {'kind': 'receipt_recorded'}

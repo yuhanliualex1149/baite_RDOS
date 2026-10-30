@@ -46,6 +46,9 @@ async def transition(kind, identifier, action, actor, operation_id, expected_has
     request = {'kind':kind,'id':identifier,'action':action,'actor_id':user['id'],'expected_hash':expected_hash}
     audit_id = 'draft_lifecycle:' + operation_id
     async with WRITE_LOCK:
+        if kind == 'draft' and action == 'delete':
+            from server.phase3_write_recovery import recover_before_draft_delete
+            await recover_before_draft_delete(identifier, expected_hash, actor, audit_id)
         with db.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
             # Recheck inside the publishing lock and the same transaction, even
@@ -74,7 +77,9 @@ async def transition(kind, identifier, action, actor, operation_id, expected_has
             if action=='delete':
                 if item.get('status') not in {'draft','rejected'}:
                     raise DraftError('invalid_transition','只能删除未发布草稿')
-                if item.get('publication') or any(op.get('dispatched_at') or op.get('prepared_fields') or op.get('status')=='succeeded' for op in linked):
+                from server.phase3_write_recovery import retired_unwritten
+                if item.get('publication') or any((op.get('dispatched_at') or op.get('prepared_fields') or op.get('status')=='succeeded')
+                                                and not retired_unwritten(op) for op in linked):
                     raise DraftError('write_uncertain','草稿已经发布或结果待核对，请先核对原发布')
                 item.update(status='deleted',deleted_at=db.utc_now(),deleted_by=user['id'],
                             restore_status=item.get('status','draft'))

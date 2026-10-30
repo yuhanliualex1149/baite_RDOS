@@ -211,6 +211,51 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
+    def test_pending_pause_preview_is_read_only_and_continuation_reconciles_original(self):
+        self.check('''
+async def scenario():
+    second=create_project()
+    task=await start_in_project(second)
+    backend3.fault('task_after_commit')
+    result=await projects.deactivate_project(second['id'],admin,'pending-pause-preview',1)
+    plan=result['deactivation']['plans'][0]
+    before=central.get('operation',plan['operation_id'])
+    assert before['status']=='uncertain' and not local.get('task_authority',task['id']+'@2')
+    head=local.get('task_head',task['id']);cache=local.get('task_cache',task['id'])
+    preview=await projects.preview_deactivate(second['id'],admin)
+    assert preview['status']=='deactivating' and preview['resume_operation']['operation_id']=='pending-pause-preview'
+    assert central.get('operation',plan['operation_id'])==before
+    assert local.get('task_head',task['id'])==head and local.get('task_cache',task['id'])==cache
+    assert not local.get('task_authority',task['id']+'@2')
+    # Preview evidence does not grant ordinary task execution or install authority.
+    await failure('task_tampered',service._read_task(task['id']))
+    stopped=await projects.deactivate_project(second['id'],admin,'pending-pause-preview',1)
+    assert stopped['status']=='inactive' and backend3.read_task(task['id'])['record_revision']==2
+    assert central.get('operation',plan['operation_id'])['status']=='succeeded'
+    assert local.get('task_authority',task['id']+'@2')['operation_id']==plan['operation_id']
+asyncio.run(scenario())
+''')
+
+    def test_pending_pause_changed_remote_is_not_preview_authority_or_replayed(self):
+        self.check('''
+async def scenario():
+    second=create_project();task=await start_in_project(second)
+    backend3.fault('task_after_commit')
+    result=await projects.deactivate_project(second['id'],admin,'changed-pending-pause',1)
+    plan=result['deactivation']['plans'][0]
+    op=central.get('operation',plan['operation_id'])
+    remote=backend3.read_task(task['id']);remote['title']='外部同版本改写'
+    backend3._save('task',task['id'],remote)
+    writes=len(backend3._items('operation'))
+    await failure('task_tampered',projects.preview_deactivate(second['id'],admin))
+    await failure('task_tampered',projects.deactivate_project(second['id'],admin,'changed-pending-pause',1))
+    assert central.get('operation',plan['operation_id'])==op
+    assert len(backend3._items('operation'))==writes and backend3.read_task(task['id'])==remote
+    assert not local.get('task_authority',task['id']+'@2')
+    assert projects.get_project(second['id'])['status']=='deactivating'
+asyncio.run(scenario())
+''')
+
     def test_failed_sync_keeps_last_success_time_and_other_project_state(self):
         self.check('''
 async def scenario():

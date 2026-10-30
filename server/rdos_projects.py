@@ -402,10 +402,50 @@ def update_project(project_id, payload, actor, operation_id, expected_revision):
     return result
 
 
+def _observed_pending_pause(task, project):
+    """Read-only preview of this project's own unconfirmed pause result.
+
+    This is not a task authority or grant. Only an explicit continuation may
+    reconcile the saved operation and publish its readback authority.
+    """
+    from server import phase3_backend
+    if project.get('status') != 'deactivating':
+        return False
+    plan=next((p for p in (project.get('deactivation') or {}).get('plans', [])
+               if p.get('task_id')==task.get('task_id')),None)
+    if not plan:
+        return False
+    op=central.get('operation',plan.get('operation_id','')) or {}
+    binding=op.get('authorization') or {}
+    prepared=op.get('prepared_task') or {}
+    base={'record_revision':plan.get('expected_revision'),
+          'requirements_version':plan.get('expected_requirements_version')}
+    return (op.get('action')=='phase3_task:pause' and op.get('status')=='uncertain'
+        and bool(op.get('dispatched_at')) and op.get('task_dispatched') is True
+        and bool(binding) and central.digest(binding)==op.get('authorization_hash')
+        and binding.get('action')==op['action'] and binding.get('payload_hash')==op.get('payload_hash')
+        and binding.get('target_kind')=='phase3_task' and binding.get('target_id')==task.get('task_id')
+        and binding.get('project_id')==project['id'] and binding.get('base')==base
+        and prepared.get('project_id')==project['id'] and prepared.get('business_status')=='paused'
+        and task.get('record_revision')==plan['expected_revision']+1
+        and task.get('requirements_version')==plan['expected_requirements_version']
+        and phase3_backend.payload(task)==phase3_backend.payload(prepared))
+
+
 async def _live_tasks(project_id):
     from server import phase3_backend, phase3_service
     rows = await asyncio.to_thread(phase3_backend.get_backend().list_tasks)
-    tasks = [phase3_service._validate_task(row) for row in rows if isinstance(row, dict) and row.get('project_id') == project_id]
+    project=get_project(project_id)
+    tasks=[]
+    for row in rows:
+        if not isinstance(row,dict) or row.get('project_id')!=project_id:
+            continue
+        try:
+            tasks.append(phase3_service._validate_task(row))
+        except phase3_service.Phase3Error as exc:
+            if exc.code!='task_tampered' or not _observed_pending_pause(row,project):
+                raise
+            tasks.append({**row,'_pending_pause_readback':True})
     observed = {task['task_id'] for task in tasks}
     cached = {task['task_id']: task for task in local.items('task_cache')}
     required = {task_id for task_id, task in cached.items() if task.get('project_id') == project_id
@@ -489,13 +529,19 @@ async def _deactivate_project(project_id, actor, operation_id, expected_revision
             task_id = plan['task_id']
             if task_id not in progress['pending_task_ids']:
                 continue
-            current = await service._read_task(task_id)
             pause_operation = central.get('operation', plan['operation_id'])
-            if current['business_status'] in ('active', 'pending_review') or (pause_operation and pause_operation.get('status') != 'succeeded'):
+            if pause_operation and pause_operation.get('status') == 'uncertain':
+                # A committed write may have lost its response before the
+                # authority index existed. Resume only this original operation.
                 current = await service.apply_task_action(task_id, 'pause', {'reason': '项目停用，暂停当前工作。'}, user,
                     plan['operation_id'], plan['expected_revision'], plan['expected_requirements_version'])
-            elif current['business_status'] not in ('paused', 'closed'):
-                _error('write_uncertain', '相关任务暂停结果待核对')
+            else:
+                current = await service._read_task(task_id)
+                if current['business_status'] in ('active', 'pending_review') or (pause_operation and pause_operation.get('status') != 'succeeded'):
+                    current = await service.apply_task_action(task_id, 'pause', {'reason': '项目停用，暂停当前工作。'}, user,
+                        plan['operation_id'], plan['expected_revision'], plan['expected_requirements_version'])
+                elif current['business_status'] not in ('paused', 'closed'):
+                    _error('write_uncertain', '相关任务暂停结果待核对')
             progress['pending_task_ids'].remove(task_id)
             if current['business_status'] == 'closed':
                 ended = progress.setdefault('ended_task_ids', [])

@@ -1096,8 +1096,66 @@ class FeishuBackend:
             return event_readback_payload(value, self.resources)
         return _payload(value)
 
-    def _write_record(self, kind, value, opid):
+    def _record_fields(self, kind, value, opid):
+        """Pure validation/projection, shared by admission and the actual write."""
         self._check_scope(value)
+        if not value.get('task_id' if kind == 'task' else 'id'):
+            _fail('invalid_record', '缺少任务或事件ID')
+        desired = {**_payload(value), 'operation_id': opid}
+        wire = rdos_contract.encode(desired, self.resources) if self.resources.get('public_protocol_version') == 2 else desired
+        fields = {'操作ID': opid, '记录数据': _json(wire)}
+        if kind == 'task':
+            fields.update({'任务ID': wire['task_id'], '标题': wire.get('title', ''),
+                '状态': wire.get('business_status', ''), '执行节点': ', '.join(wire.get('executor_node_ids', [])),
+                '要求版本': str(wire.get('requirements_version', '')), '记录修订': str(wire.get('record_revision', ''))})
+            if _FORMAL:
+                from cutover.upgrade_tasks import legacy_columns
+                fields['当前项目ID'] = wire.get('project_id', '')
+                fields.update(legacy_columns(value, opid))
+        else:
+            fields.update({'事件ID': wire['id'], '类型': wire.get('event_type', wire.get('type', '')),
+                '自报节点': wire.get('claimed_node_id', ''), '任务引用': _json(wire.get('task_refs', []))})
+        return fields
+
+    def validate_task_write(self, task, opid):
+        self._record_fields('task', task, opid)
+
+    def validate_event_write(self, event, opid):
+        self._record_fields('event', event, opid)
+
+    def unwritten_legacy_upgrade_evidence(self, task, task_opid, event_opid):
+        """Only the historical fixed-title refusal proves this old local failure.
+
+        Journal absence alone never proves that a general write did not occur.
+        The old bridge rejected this exact shape before its durable send marker
+        and CLI call. A missing/deleted journal cannot supply recovery evidence.
+        """
+        if not _FORMAL or not self.operations_path.is_file():
+            return None
+        from cutover.upgrade_tasks import UPGRADES, instructions
+        from cutover import production_config as formal
+        item = UPGRADES.get(task.get('task_id'))
+        if (not item or task.get('project_id') != formal.DEFAULT_PROJECT
+            or task.get('executor_node_ids') != [item['node_id']]
+            or task.get('goal') != instructions(task['task_id'])
+            or task.get('title') == '更新 RDOS 工作协作方式'
+            or not isinstance(task.get('title'), str) or not task['title'].strip()
+            or task.get('task_type') != 'action'
+            or task.get('completion_rule') != {'kind':'receipt_recorded'}):
+            return None
+        self._check_scope(task)
+        with _LOCK:
+            journal = self._operations()
+            if any(journal.get(key, {}).get('state') in ('sent', 'verified') for key in (task_opid,event_opid)):
+                return None
+            if any(key in journal for key in (task_opid,event_opid)):
+                return None
+            return {'kind':'legacy_upgrade_title_rejected_before_cli_v1',
+                'adapter_journal_hash':_hash(journal), 'task_operation_id':task_opid,
+                'event_operation_id':event_opid, 'transport_attempted':False}
+
+    def _write_record(self, kind, value, opid):
+        fields = self._record_fields(kind, value, opid)
         table = self.resources["tasks_table" if kind == "task" else "events_table"]
         id_key = "task_id" if kind == "task" else "id"
         if not value.get(id_key):
@@ -1135,19 +1193,6 @@ class FeishuBackend:
                 identifier = existing[0]["record_id"]
             elif kind == "task" and value.get("record_revision") != 1:
                 _fail("version_conflict", "新任务记录必须从修订1开始")
-            wire = rdos_contract.encode(desired, self.resources) if self.resources.get('public_protocol_version') == 2 else desired
-            fields = {"操作ID": opid, "记录数据": _json(wire)}
-            if kind == "task":
-                fields.update({"任务ID": wire["task_id"], "标题": wire.get("title", ""), "状态": wire.get("business_status", ""),
-                               "执行节点": ", ".join(wire.get("executor_node_ids", [])), "要求版本": str(wire.get("requirements_version", "")),
-                               "记录修订": str(wire.get("record_revision", ""))})
-                if _FORMAL:
-                    fields['当前项目ID'] = wire.get('project_id', '')
-                    from cutover.upgrade_tasks import legacy_columns
-                    fields.update(legacy_columns(value, opid))
-            else:
-                fields.update({"事件ID": wire["id"], "类型": wire.get("event_type", wire.get("type", "")),
-                               "自报节点": wire.get("claimed_node_id", ""), "任务引用": _json(wire.get("task_refs", []))})
             self._save_operation(operations, opid, entry, state="sent")
             try:
                 self.executor.upsert(table, fields, identifier)

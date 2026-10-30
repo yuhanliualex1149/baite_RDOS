@@ -87,6 +87,14 @@ class LocalBackend:
         self._fault('read_task')
         return self._get('task', taskid)
 
+    def validate_task_write(self, task: dict, opid: str) -> None:
+        if not task.get('task_id') or type(task.get('record_revision')) is not int:
+            raise BackendError('invalid_record', '任务标识或修订无效')
+
+    def validate_event_write(self, event: dict, opid: str) -> None:
+        if not event.get('id'):
+            raise BackendError('invalid_record', '缺少协作事件标识')
+
     def write_task(self, task: dict, opid: str) -> dict:
         value = {**payload(task), 'operation_id': opid}
         def mutation(conn):

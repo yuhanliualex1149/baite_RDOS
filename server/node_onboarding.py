@@ -119,7 +119,22 @@ async def prepare(node_id, actor):
         else:
             # Read the authoritative row before deciding whether the old plan
             # can be replaced. A missing or incomplete read never proves absence.
-            published = await service._read_task(plan['task_id'], False)
+            try:
+                published = await service._read_task(plan['task_id'], False)
+            except service.Phase3Error as exc:
+                saved = central.get('operation', plan['operation_id']) or {}
+                original = central.user(plan['actor_id'])
+                # The transport may have committed before its response was
+                # lost. No authority index is published until readback; resume
+                # this exact authorized operation before judging the row.
+                if (exc.code != 'task_tampered' or not saved.get('dispatched_at')
+                    or saved.get('status') != 'uncertain' or not original
+                    or not original.get('enabled') or 'admin' not in original.get('roles', [])):
+                    raise
+                await service.apply_task_action(plan['task_id'], 'start',
+                    {'draft_id': plan['draft_id'], 'expected_hash': plan['draft_hash']}, original,
+                    plan['operation_id'], 0, 0, project_id=plan['project_id'])
+                published = await service._read_task(plan['task_id'])
             if published:
                 if published['project_id'] != plan['project_id'] or published['executor_node_ids'] != [key]:
                     raise projects.ProjectError('operation_conflict', '接入任务归属发生变化，请核对原任务', 409)

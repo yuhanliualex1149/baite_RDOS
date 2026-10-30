@@ -213,7 +213,9 @@ asyncio.run(main())
 async def main():
  protected={kind:copy.deepcopy(store.items(kind)) for kind in ['project_health','operation','central_memory','state']}
  before={kind:copy.deepcopy(local.items(kind)) for kind in ['task_cache','draft','trusted_event']}
- transport.get_backend().fault('read_events')
+ # Both the trusted initial observation and the model's explicit re-read fail.
+ # A genuinely recovered read would correctly supersede the earlier gap.
+ transport.get_backend().fault('read_events',count=2)
  fabricated='最新飞书记录已完整核对，全部正常。'
  result=await chat('请只读检查最新飞书状态。','diagnose-incomplete',purpose('diagnose'),[
   backend.tool_message('central_inspect_overview',{'fresh':True}),fabricated])
