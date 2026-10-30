@@ -24,6 +24,17 @@ SAFE_OLD = '5272f506ecfe47212cf4a6820aac3eb12ec9a1f7'
 
 
 class RoutineReleaseTests(unittest.TestCase):
+    def test_explicit_rules_migration_is_after_backups_and_before_preservation_fingerprint(self):
+        body = SCRIPT.read_text()
+        hook = body.index('--unit="rdos2-release-migration-$sha"')
+        self.assertLess(body.index('systemctl stop baite-rdos\nwithin_window'), hook)
+        self.assertLess(body.index('chmod -R go-rwx "$backup/user-files"'), hook)
+        self.assertLess(hook, body.index('state_before=$(fingerprint_live_state)'))
+        self.assertIn('-p User=baite-rdos -p NoNewPrivileges=yes', body[hook:])
+        self.assertIn('-p ReadWritePaths=/var/lib/baite-rdos', body[hook:])
+        self.assertIn('state_after != "$state_before"', body)
+        self.assertIn('due <= horizon', body)
+
     def test_protocol_and_static_guards(self):
         result = subprocess.run(['bash', str(SCRIPT), '--protocol'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -70,6 +81,8 @@ asyncio.run(exercise())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def fixture(self, *, verified=True):
+        if not sys.platform.startswith('linux'):
+            self.skipTest('Routine deployment execution requires target Linux, GNU tools and the real flock utility')
         root = Path(tempfile.mkdtemp(prefix='rdos2-release-fixture-'))
         def cleanup():
             cache = root / 'opt/baite-rdos/wheelhouse/requirements-8a14fbc486afe3a44e7c3a8a0564547b56e8dfa44778a50ab736b3d38af6fcbf'
@@ -111,6 +124,7 @@ asyncio.run(exercise())
             (candidate / 'requirements.lock').write_bytes(fixture_lock)
             (candidate / 'deploy').mkdir()
             (candidate / 'deploy/STARTUP_FILE_PRESERVATION').write_text('RDOS2_STARTUP_FILES_PRESERVED=1\n')
+            (candidate / 'deploy/migrate-next-release.py').write_text('fixture migration\n')
             (candidate / '.venv/bin').mkdir(parents=True)
             (candidate / '.venv/bin/python').symlink_to(sys.executable)
             uvicorn = candidate / '.venv/bin/uvicorn'
@@ -308,6 +322,15 @@ if [ "$FIXTURE_UNREADABLE" = 1 ] && [ "$1" = find ]; then echo "$FIXTURE_BASE/un
 ''')
         command('systemd-run', '''
 case " $* " in
+  *"migrate-next-release.py"*)
+    [ "$(cat "$FIXTURE_SERVICE")" = inactive ] || exit 85
+    grep -q 'RDOS maintenance' "$FIXTURE_PROXY/baite-rdos.conf" || exit 86
+    if [ "${FIXTURE_MIGRATION_OK:-1}" != 1 ]; then
+      "$FIXTURE_PYTHON" -c 'import os,sqlite3; c=sqlite3.connect(os.environ["FIXTURE_DB"]); c.execute("INSERT INTO business VALUES (?)",("migration-partial-record",)); c.commit(); c.close()'
+      exit 87
+    fi
+    echo '{"migration_id":"next_fixes_120_business_rules_v2","completed":true}'
+    exit 0 ;;
   *"probe-agent-plan.py"*)
     [ "$(cat "$FIXTURE_SERVICE")" = active ] || exit 80
     [ "$FIXTURE_AGENT_PLAN_OK" = 1 ] || exit 84
@@ -346,7 +369,7 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         (root / 'sleep-count').write_text('0\n')
         archive = root / 'archive.tar'
         with tarfile.open(archive, 'w') as tar:
-            for name in ('cutover/check_release.py', 'server/production_app.py', 'deploy/STARTUP_FILE_PRESERVATION', 'requirements.lock'):
+            for name in ('cutover/check_release.py', 'server/production_app.py', 'deploy/STARTUP_FILE_PRESERVATION', 'deploy/migrate-next-release.py', 'requirements.lock'):
                 item = root / name
                 item.parent.mkdir(parents=True, exist_ok=True)
                 item.write_bytes(fixture_lock if name == 'requirements.lock' else
@@ -651,6 +674,18 @@ echo "$((calls+1))" > "$FIXTURE_SLEEP_COUNT"
         self.assertEqual((root / 'etc/baite-rdos/rdos2.env').read_text(), 'fixture-only\n')
         self.assertEqual((root / 'www/server/panel/vhost/nginx/proxy/www.yjmt.cn/baite-rdos.conf').read_text(),
                          'original RDOS proxy\n')
+        self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))
+
+    def test_explicit_migration_failure_restores_old_service_and_retains_latest_database(self):
+        root, script, env = self.fixture()
+        env['FIXTURE_MIGRATION_OK'] = '0'
+        result = subprocess.run(['bash', str(script), NEW], env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((root / 'opt/baite-rdos/current').resolve().name, OLD)
+        self.assertEqual((root / 'service-state').read_text().strip(), 'active')
+        self.assertIn('latest database retained', result.stderr.lower())
+        with sqlite3.connect(root / 'var/lib/baite-rdos/baite.db') as conn:
+            self.assertIn(('migration-partial-record',), conn.execute('SELECT payload FROM business').fetchall())
         self.assertTrue(list((root / 'var/lib/baite-rdos/cutover-backups').glob('pre-deploy-*/baite.db')))
 
     def test_verified_release_reaches_public_health_and_restores_proxy(self):

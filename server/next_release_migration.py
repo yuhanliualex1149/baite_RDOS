@@ -30,7 +30,16 @@ def rewrite(content):
     return content
 
 
-def initialize():
+def policy_content(content):
+    content = rewrite(content)
+    if RULE not in content:
+        content += '\n\n' + RULE
+    if CONTEXT_RULE not in content:
+        content += '\n\n' + CONTEXT_RULE
+    return content
+
+
+def initialize(*, regenerate_views=True):
     """Keep the previous versions and mark the real release-migration source."""
     with db.connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
@@ -40,11 +49,7 @@ def initialize():
         policy = memory._get(conn, 'state', 'central_agent_policy')
         changed = []
         if policy:
-            content = rewrite(policy['content'])
-            if RULE not in content:
-                content += '\n\n' + RULE
-            if CONTEXT_RULE not in content:
-                content += '\n\n' + CONTEXT_RULE
+            content = policy_content(policy['content'])
             if content != policy['content']:
                 memory._put(conn, 'central_agent_policy_history', str(policy['version']), policy)
                 policy.update(content=content, version=policy['version'] + 1,
@@ -71,6 +76,7 @@ def initialize():
                                              'source_kind': 'release_migration'})
     # The database is authoritative. Initialization regenerates fixed views and
     # exposes its existing file-error state rather than altering external data.
-    settings.initialize()
-    memory.initialize()
+    if regenerate_views:
+        settings.initialize()
+        memory.initialize()
     return {'reused': False, 'memory_ids': changed}

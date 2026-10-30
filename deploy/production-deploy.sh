@@ -399,6 +399,10 @@ if [[ $rollback_sha == "$safe_old_sha" ]]; then
   build_release "$safe_old_sha"
 fi
 build_release "$sha"
+[[ -f "$release/deploy/migrate-next-release.py" && ! -L "$release/deploy/migrate-next-release.py" ]] || {
+  echo 'Candidate explicit migration helper missing; production unchanged' >&2
+  exit 1
+}
 if [[ $release_ref == "$first_upgrade_ref" ]]; then
   [[ -f "$release/deploy/probe-agent-plan.py" && ! -L "$release/deploy/probe-agent-plan.py" ]] ||
     { echo 'Candidate Agent Plan acceptance probe missing' >&2; exit 1; }
@@ -609,6 +613,25 @@ install -d -m 0700 "$backup/user-files" "$backup/user-files/central" "$backup/us
 cp -p /var/lib/baite-rdos/central/agent.md /var/lib/baite-rdos/central/memory.md "$backup/user-files/central/"
 cp -p /var/lib/baite-rdos/runtime/phase3_resources.json "$backup/user-files/runtime/"
 chmod -R go-rwx "$backup/user-files"
+within_window
+# This one versioned DB/derived-view change is explicit, after the consistent
+# backup and while the old service is stopped. Ordinary startup still must
+# preserve every resulting file and selected record exactly.
+systemd-run --quiet --wait --pipe --collect --unit="rdos2-release-migration-$sha" \
+  -p Type=oneshot -p User=baite-rdos -p NoNewPrivileges=yes \
+  -p KillMode=control-group -p ProtectHome=yes -p ProtectSystem=strict \
+  -p ReadWritePaths=/var/lib/baite-rdos -p PrivateTmp=yes -p RuntimeMaxSec=60 \
+  -p "WorkingDirectory=$release" \
+  -p EnvironmentFile=/etc/baite-rdos/rdos.env \
+  -p EnvironmentFile=/etc/baite-rdos/rdos2.env \
+  -p Environment=HOME=/var/lib/baite-rdos \
+  -p "Environment=PATH=$PATH" -- \
+  "$release/.venv/bin/python" -B "$release/deploy/migrate-next-release.py" > "$backup/release-migration.json"
+"$python" - "$backup/release-migration.json" <<'PYMIGRATION'
+import json,sys
+value=json.load(open(sys.argv[1]))
+assert value.get('migration_id')=='next_fixes_120_business_rules_v2' and value.get('completed') is True
+PYMIGRATION
 within_window
 state_before=$(fingerprint_live_state)
 printf '%s\n' "$state_before" > "$backup/state-before.json"
