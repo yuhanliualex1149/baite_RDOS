@@ -852,7 +852,7 @@ class FeishuBackend:
         value["documents"] = [{**d, "object_id": d["id"], "source_url": TENANT + "/docx/" + d["id"]} for d in value["documents"]]
         return value
 
-    def register_projects(self, projects):
+    def register_projects(self, projects, *, persist=True):
         """Persist only administrator-registered project roots; shared Agent stays fixed."""
         values = []
         for project in projects:
@@ -865,7 +865,8 @@ class FeishuBackend:
                 'folder_id': _identifier(project.get('resolved_folder_id') or project['folder_id'])})
         with _LOCK:
             self.resources['projects'] = values
-            config.write_json(self.path, self.resources)
+            if persist:
+                config.write_json(self.path, self.resources)
 
     def read_project_files(self, project_id):
         return self.executor.read_project_files(project_id)

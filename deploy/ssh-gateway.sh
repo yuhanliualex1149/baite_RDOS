@@ -5,6 +5,9 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
   check)
     systemctl is-active baite-rdos || true
     if systemctl is-active --quiet baite-rdos; then curl -fsS --max-time 5 http://127.0.0.1:8010/api/health; else echo 'RDOS is offline; no deployment performed.'; fi
+    # Actions requires this marker before it may request a write.
+    /usr/local/sbin/rdos-production-deploy --protocol
+    printf 'RDOS2_DEPLOY_SHA256=%s\n' "$(/usr/bin/sha256sum /usr/local/sbin/rdos-production-deploy | /usr/bin/cut -d ' ' -f 1)"
     printf '\nRDOS restricted deployment connection verified.\n'
     ;;
   *)

@@ -255,17 +255,26 @@ must return a result whose readback was already verified by the service.
             raise OperationError("write_busy", "写入通道当前忙，请稍后继续")
         async with write_lock:
             owner = {"id": operation_id, "dispatched_at": None}
-            token = _CURRENT_OPERATION.set(owner)
             initial = _check_saved_confirmation(operation_id)
             needs_reconcile = bool(initial.get("dispatched_at") or initial.get("status") == "uncertain")
 
             def begin(current: dict) -> None:
+                # Another process may retire or start the operation after the
+                # first read. Begin and retirement must serialize in SQLite.
+                if current.get("status") in ("conflict", "rejected", "succeeded"):
+                    raise OperationError("operation_conflict", "原操作已完成或退休，不能再次派发")
+                if current.get("active_attempt") or current.get("status") in ("running", "in_progress"):
+                    raise OperationError("write_busy", "原操作正在其他进程执行或核对")
+                if (current.get("authorization_hash") != initial.get("authorization_hash")
+                    or current.get("dispatched_at") != initial.get("dispatched_at")):
+                    raise OperationError("operation_conflict", "原操作授权或派发边界已变化，请重新核对")
                 number = len(current.setdefault("attempts", [])) + 1
                 current["attempts"].append({"number": number, "mode": "reconcile" if needs_reconcile else "write",
                                             "status": "running", "started_at": db.utc_now()})
                 current.update(active_attempt=number, status="uncertain" if needs_reconcile else "running")
 
             _update(operation_id, begin)
+            token = _CURRENT_OPERATION.set(owner)
             try:
                 if needs_reconcile:
                     receipt = await reconcile() if reconcile else {"status": "unknown"}

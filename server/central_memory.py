@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import threading
 import unicodedata
 
@@ -837,6 +838,22 @@ def initialize():
                  'migrated_ids': migrated})
     result = {'schema_version': 2, 'created': created, 'migrated_ids': migrated,
               'history_imported': False, 'summary_updated': False}
+    # A code-only restart of an initialized formal DB must never replace this
+    # path. A missing summary may be linked into place atomically, so an
+    # external file creation during startup cannot be overwritten. First
+    # initialization/migration retains its historical generation behavior.
+    # Explicit memory actions still regenerate their summary through the
+    # existing _write_summary calls after the authorized DB update.
+    if os.environ.get('RDOS_RUNTIME_MODE') == 'production' and current is not None and current.get('version') == 2:
+        try:
+            result['summary_updated'] = _create_summary_if_missing()
+            result['summary_preserved'] = not result['summary_updated']
+        except Exception:
+            # Do not call _summary_failure here: its legacy cleanup could
+            # remove a file created by another writer during this startup.
+            result.update(summary_stale=True,
+                          summary_error='现有记忆文件已保留；缺失摘要未能安全补建，请核对后显式保存。')
+        return result
     try:
         _write_summary()
         result['summary_updated'] = True
@@ -892,13 +909,42 @@ def _summary_failure(prefix):
             'summary_error': prefix + '，摘要暂不可用；旧摘要已停用，可稍后重建。'}
 
 
+def _summary_content():
+    """Render the complete effective DB view, including missing-file recovery."""
+    values = [item for item in store.items(_MEMORY) if item.get('status') == 'active']
+    return _render_memory(values)
+
+
+def _create_summary_if_missing():
+    """Retry a missing formal summary without replacing a concurrent edit."""
+    with _SUMMARY_LOCK:
+        path = _summary_path()
+        if path.exists():
+            return False
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        path.parent.chmod(0o700)
+        descriptor, temporary = tempfile.mkstemp(prefix='memory.md.init-', dir=path.parent)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+                output.write(_summary_content())
+                output.flush()
+                os.fsync(output.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                return False
+            return True
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+
 def _write_summary():
     with _SUMMARY_LOCK:
         path = _summary_path()
         path.parent.mkdir(mode=0o700, exist_ok=True)
         path.parent.chmod(0o700)
-        values = [item for item in store.items(_MEMORY) if item.get('status') == 'active']
-        content = _render_memory(values)
+        content = _summary_content()
         temporary = path.with_name('memory.md.tmp')
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:

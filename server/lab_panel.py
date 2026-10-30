@@ -43,7 +43,9 @@ def runtime_status() -> dict:
     if os.environ.get('RDOS_RUNTIME_MODE') == 'production':
         from server.production_runtime import require
         require()
-        return {'paused': False, 'schedule_verified': False,
+        from server import central_store
+        paused = bool((central_store.get('state', 'runtime') or {}).get('paused'))
+        return {'paused': paused, 'schedule_verified': False,
                 'model_configured': True, 'model': 'deepseek-v4-pro',
                 'model_mode': 'agent_plan', 'feishu_configured': True,
                 'backend': 'feishu_production', 'scheduler_enabled': False,

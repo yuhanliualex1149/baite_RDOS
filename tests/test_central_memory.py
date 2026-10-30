@@ -85,6 +85,24 @@ retry=memory.initialize()
 assert retry['created'] is False and retry['summary_updated']
 ''')
 
+    def test_full_view_and_missing_file_recovery_share_complete_content(self):
+        self.check('''
+memory.initialize()
+for index in range(12):
+ memory.apply_settings(admin,{'kind':'remember','topic':'持续约定'+str(index),
+  'content':('保留完整业务约定。'*160)+str(index),'scope':'organization'},'complete-view-'+str(index),0)
+expected=memory.model_snapshot(admin)['content']
+assert len(expected)>12000 and '持续约定11' in expected
+assert memory._summary_content()==expected
+path=root/'runtime/central/memory.md'
+assert path.read_text()==expected
+path.unlink()
+assert memory._create_summary_if_missing() and path.read_text()==expected
+path.write_text('保留并发或人工写入的文件。')
+assert not memory._create_summary_if_missing()
+assert path.read_text()=='保留并发或人工写入的文件。'
+''')
+
     def test_explicit_memory_deduplication_replacement_and_restart_recall(self):
         self.check('''
 c=[change('表达','先给结论','以后先给结论')]

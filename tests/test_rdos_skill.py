@@ -505,6 +505,45 @@ class NodeBusinessTests(unittest.TestCase):
         self.assertEqual(event['origin'], 'late_result')
         self.assertNotIn('result_status', event)
 
+    def test_check_counts_only_work_still_needing_a_node_action(self):
+        self.transport.task_value = task(business_status='closed', record_revision=2)
+        self.assertEqual(self.workflow.check()['state'], 'work_available')
+        acknowledgement = self.workflow.submit('task_example', 'partial', '已停止后续工作',
+            'closed-ack', event_type='closed_ack')
+        self.assertTrue(acknowledgement['readback_verified'])
+        checked = self.workflow.check()
+        self.assertEqual(checked['state'], 'no_work')
+        self.assertEqual(len(checked['tasks']), 1)  # History and correction remain reachable.
+        self.assertEqual(checked['tasks'][0]['plan']['reason'], 'closed')
+        self.transport.task_value = task(business_status='paused', record_revision=3)
+        self.assertEqual(self.workflow.check()['state'], 'work_available')
+        self.workflow.submit('task_example', 'partial', '已暂停', 'paused-ack', event_type='paused_ack')
+        self.assertEqual(self.workflow.check()['state'], 'no_work')
+        self.transport.task_value = task(business_status='pending_review', record_revision=4)
+        legacy = self.workflow.check()
+        self.assertEqual(legacy['state'], 'no_work')
+        self.assertEqual(legacy['tasks'][0]['plan']['reason'], 'awaiting_legacy_migration')
+        self.assertEqual(legacy['tasks'][0]['plan']['allowed_actions'], ['read_status', 'correct_previous_record'])
+
+    def test_check_does_not_trust_a_listed_ack_without_independent_readback(self):
+        self.transport.task_value = task(business_status='closed', record_revision=2)
+        self.workflow.submit('task_example', 'partial', '已停止后续工作',
+            'closed-ack', event_type='closed_ack')
+        original = self.transport.get
+        def changed(table, record_id):
+            value = original(table, record_id)
+            value['fields']['记录数据'] = '{}'
+            return value
+        with patch.object(self.transport, 'get', side_effect=changed):
+            with self.assertRaises(node.WorkflowError):
+                self.workflow.check()
+
+    def test_check_reports_no_new_work_after_verified_one_time_submission(self):
+        self.workflow.submit('task_example', 'completed', '当前要求已完成并读回', 'finished')
+        checked = self.workflow.check()
+        self.assertEqual(checked['state'], 'no_work')
+        self.assertEqual(checked['tasks'][0]['plan']['reason'], 'already_submitted')
+
     def test_review_blocked_by_unreadable_material_can_report_blocker(self):
         ref = {'document_id': 'unavailable_input', 'revision': 3, 'content_hash': 'unavailable'}
         self.transport.task_value = task(task_type='action', input_refs=[ref])

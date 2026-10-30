@@ -78,7 +78,7 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
         from server import lab_central_backend as backend
         async def wrapped(request):
             self.requests.append(json.loads(request.content))
-            self.assertEqual(str(request.url), "http://local-mock.invalid/chat/completions")
+            self.assertEqual(str(request.url), getattr(self, "expected_url", "http://local-mock.invalid/chat/completions"))
             self.assertNotIn("Authorization", request.headers)
             response = handler(request)
             return await response if inspect.isawaitable(response) else response
@@ -87,6 +87,16 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
         # A synthetic sentinel tests redaction without sending any credential.
         agent.api_key = "test-secret-credential"
         agent.transport.handle_async_request = wrapped
+        return agent
+
+    def ark_agent(self, handler):
+        # Keep the trusted local transport while exercising Ark's real request
+        # construction. No provider credentials or network reach this test.
+        self.expected_url = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
+        with patch.dict(os.environ, {"BAITE_LLM_MAX_COMPLETION_TOKENS": "8192"}):
+            local = self.agent(handler)
+        agent = CentralAgent(api_key="", base_url="https://ark.cn-beijing.volces.com/api/plan/v3",
+                             model="deepseek-v4-pro", transport=local.transport)
         return agent
 
     async def run_agent(self, agent, **kwargs):
@@ -199,13 +209,14 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
     async def test_deepseek_payload_keeps_enabled_high_thinking_and_reports_stage_time(self):
         with patch.dict(os.environ, {"BAITE_LLM_MODEL": "", "BAITE_LLM_REASONING_EFFORT": "high", "BAITE_LLM_THINKING": "enabled"}):
             responses = [reply(calls=[tool_call()]), reply("已读取真实反馈。")]
-            agent = self.agent(lambda _: httpx.Response(200, json=responses.pop(0)))
-            agent.model = "deepseek-v4-pro"
+            agent = self.ark_agent(lambda _: httpx.Response(200, json=responses.pop(0)))
             result = await self.run_agent(agent)
         self.assertEqual(self.requests[0]["model"], "deepseek-v4-pro")
         self.assertEqual(self.requests[0]["thinking"], {"type": "enabled"})
         self.assertEqual(self.requests[0]["reasoning_effort"], "high")
-        self.assertEqual(self.requests[0]["max_completion_tokens"], 8192)
+        # Ark's omitted-parameter default is 4k, so both calls must send the
+        # model-specific quota explicitly rather than simply remove the field.
+        self.assertEqual([r["max_completion_tokens"] for r in self.requests], [393216, 393216])
         self.assertGreaterEqual(result["elapsed_seconds"], 0)
         for step in self.steps:
             self.assertIn("elapsed_seconds", step)
@@ -220,6 +231,46 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(AgentError) as raised:
                 CentralAgent(api_key="test-only")
         self.assertEqual(raised.exception.code, "model_config")
+
+    async def test_ark_completion_budget_config_and_other_models(self):
+        with patch.dict(os.environ, {"BAITE_LLM_MAX_COMPLETION_TOKENS": "64000"}):
+            agent = self.ark_agent(lambda _: httpx.Response(200, json=reply("已完成")))
+            await self.run_agent(agent)
+        self.assertEqual(self.requests[-1]["max_completion_tokens"], 64000)
+        with patch.dict(os.environ, {"BAITE_LLM_MAX_COMPLETION_TOKENS": "393217"}):
+            with self.assertRaises(AgentError) as raised:
+                self.ark_agent(lambda _: httpx.Response(200, json=reply("unused")))
+        self.assertEqual(raised.exception.code, "model_config")
+        with patch.dict(os.environ, {"BAITE_LLM_MAX_COMPLETION_TOKENS": "64000"}):
+            with self.assertRaises(AgentError) as raised:
+                CentralAgent(api_key="", model="glm-5.3-flash")
+        self.assertEqual(raised.exception.code, "model_config")
+
+    async def test_large_ark_output_and_length_are_distinct_from_json_parse_failure(self):
+        large = "测试输出" * 4000
+        agent = self.ark_agent(lambda _: httpx.Response(200, json=reply(
+            large, usage={"prompt_tokens": 10, "completion_tokens": 12000, "total_tokens": 12010})))
+        result = await self.run_agent(agent)
+        self.assertEqual(result["content"], large)
+        self.assertEqual(self.requests[0]["max_completion_tokens"], 393216)
+
+        self.requests.clear()
+        truncated = self.ark_agent(lambda _: httpx.Response(200, json=reply(
+            '{"purpose":', finish_reason="length",
+            usage={"prompt_tokens": 10, "completion_tokens": 393216, "total_tokens": 393226})))
+        with self.assertRaises(AgentError) as raised:
+            await truncated.interpret_request([{"role": "user", "content": "测试请求"}])
+        self.assertEqual(raised.exception.code, "model_incomplete")
+        self.assertIn("输出额度耗尽", raised.exception.message)
+        self.assertEqual(self.requests[0]["max_completion_tokens"], 393216)
+
+        self.requests.clear()
+        truncated = self.ark_agent(lambda _: httpx.Response(200, json=reply(
+            "尚未完成", finish_reason="length")))
+        with self.assertRaises(AgentError) as raised:
+            await self.run_agent(truncated)
+        self.assertEqual(raised.exception.code, "model_incomplete")
+        self.assertIn("输出额度耗尽", raised.exception.message)
 
     async def test_each_model_request_and_retry_use_remaining_total_budget(self):
         attempts = []
