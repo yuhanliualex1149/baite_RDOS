@@ -305,17 +305,10 @@ def ingest_system_event(raw,*,tasks=None):
     if not isinstance(raw.get('id'),str) or not raw['id'] or raw.get('task_refs')!=[]:
         raise PeerError('invalid_event','身份登记记录格式无效')
     if raw.get('event_type')=='node_registry_snapshot':
-        payload=verified(raw.get('registry_proof'),_central_keys()['public_key'])
-        if payload.get('workspace_id')!=_registry_payload()['workspace_id']:
-            raise PeerError('out_of_scope','身份登记不属于此工作空间')
+        _registry_snapshot_claim(raw)
         return local.index_event(raw,backends.payload(raw))
     if raw.get('event_type')=='peer_capability_ack':
-        node=_node(raw.get('claimed_node_id'));identity=local.get('peer_identity',node['node_id'])
-        if not identity:raise PeerError('peer_not_bound','节点尚未绑定')
-        claim=verified(raw.get('peer_ack'),identity['public_key'])
-        public=rdos_contract.public_view(node['node_id'],backends.get_backend().registry())
-        if claim.get('skill_version') not in ('1.1.0','1.1.1','1.1.2','1.1.3','1.2.0') or claim != {'node_id':public,'binding_id':identity['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
-            raise PeerError('invalid_ack','节点能力回执与当前绑定不一致')
+        node,identity,claim=_capability_ack_claim(raw)
         with _LOCK,db.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_identity' AND id=?",(node['node_id'],)).fetchone()
@@ -407,7 +400,8 @@ def _enrollment_task(task,node_id,version, *, allow_completed=False):
     return task
 
 
-def _ingest_enrollment(raw,tasks):
+def _enrollment_claim(raw):
+    """Verify possession and immutable request references without admission."""
     if not isinstance(raw.get('id'),str) or not raw['id']:
         raise PeerError('invalid_enrollment','接入申请标识无效')
     proof=raw.get('enrollment_proof')
@@ -447,6 +441,12 @@ def _ingest_enrollment(raw,tasks):
         raise PeerError('operation_conflict','相同接入申请标识出现不同内容')
     if prior and raw.get('project_id')!=prior.get('project_id'):
         raise PeerError('out_of_scope','接入申请不能借用其他项目任务')
+    return claim,node,references,prior
+
+
+def _ingest_enrollment(raw,tasks):
+    claim,node,references,prior=_enrollment_claim(raw)
+    request_id=claim['request_id'];request_hash=central.digest(claim)
     admission=None
     if not prior:
         internal_ref=references[0]
@@ -481,6 +481,76 @@ def _ingest_enrollment(raw,tasks):
         if not current:
             _transaction_put(conn,'peer_enrollment_request',request_id,prior)
         return indexed
+
+
+def _registry_snapshot_claim(raw):
+    claim=verified(raw.get('registry_proof'),_central_keys()['public_key'])
+    if claim.get('workspace_id')!=backends.get_backend().registry().get('workspace_id',rdos_contract.PUBLIC_WORKSPACE_ID):
+        raise PeerError('out_of_scope','身份登记不属于此工作空间')
+    if (claim.get('version')!=VERSION or not isinstance(claim.get('nodes'),list)
+            or not isinstance(claim.get('projects'),list)
+            or not isinstance(claim.get('generated_at'),str) or not isinstance(claim.get('expires_at'),str)):
+        raise PeerError('invalid_registry','中央签名内容不是有效的节点登记快照')
+    return claim
+
+
+def _capability_ack_claim(raw):
+    node=_node(raw.get('claimed_node_id'));identity=local.get('peer_identity',node['node_id'])
+    if not identity:raise PeerError('peer_not_bound','节点尚未绑定')
+    claim=verified(raw.get('peer_ack'),identity['public_key'])
+    public=rdos_contract.public_view(node['node_id'],backends.get_backend().registry())
+    if claim.get('skill_version') not in ('1.1.0','1.1.1','1.1.2','1.1.3','1.2.0') or claim != {'node_id':public,'binding_id':identity['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
+        raise PeerError('invalid_ack','节点能力回执与当前绑定不一致')
+    return node,identity,claim
+
+
+def observe_system_event(raw, *, tasks=None):
+    """Verify a system event for observation; never index, admit or enable it.
+
+    Historical approved requests remain evidence after task completion or a
+    requirements update. Observing an unprocessed request verifies its original
+    assigned task version, but does not grant current execution authority.
+    """
+    from server.phase3_service import _check_scope
+    _check_scope(raw)
+    if (not isinstance(raw.get('id'),str) or not raw['id'] or not isinstance(raw.get('body'),str)):
+        raise PeerError('invalid_event','身份登记记录格式无效')
+    original_hash=local.event_fingerprint(raw['id'])
+    if original_hash and original_hash!=central.digest(backends.payload(raw)):
+        raise PeerError('event_conflict','已核对的系统记录出现同一标识的不同正文')
+    kind=raw.get('event_type')
+    if kind=='peer_enrollment_request':
+        claim,node,references,prior=_enrollment_claim(raw)
+        if not prior:
+            ref=references[0]
+            candidates=local.history(ref['task_id'])
+            current=local.get('task_cache',ref['task_id']) or (tasks or {}).get(ref['task_id'])
+            history=next((item for item in candidates if item.get('requirements_version')==ref['requirements_version']),None)
+            task=None
+            if current and current.get('dispatch_source')!='peer':
+                from server.phase3_service import _validate_task
+                current=_validate_task(current)
+                # Version history contains requirements, not project identity.
+                # Scope comes from the verified task with the same stable ID.
+                task={**current,**history} if history else current
+            if (not task or task.get('requirements_version')!=ref['requirements_version']
+                    or task.get('project_id')!=raw['project_id'] or node['node_id'] not in task.get('executor_node_ids',[])
+                    or task.get('dispatch_source')=='peer' or rules.task_type(task)!='action'):
+                raise PeerError('enrollment_not_authorized','未找到申请对应的中央任务版本与节点范围')
+        return {'kind':kind,'verification':'signature_and_task_reference_verified',
+                'registration_applied':False,'node_id':node['node_id']}
+    if raw.get('task_refs')!=[]:
+        raise PeerError('invalid_event','身份登记记录任务引用无效')
+    if kind=='node_registry_snapshot':
+        if raw.get('claimed_node_id')!='system:peer_registry' or raw.get('project_id')!=local.PROJECT_ID:
+            raise PeerError('invalid_registry','中央登记记录的来源或项目不一致')
+        _registry_snapshot_claim(raw)
+        return {'kind':kind,'verification':'central_signature_verified','registration_applied':False}
+    if kind=='peer_capability_ack':
+        node,identity,claim=_capability_ack_claim(raw)
+        return {'kind':kind,'verification':'node_signature_and_binding_verified',
+                'node_id':node['node_id'],'skill_version':claim['skill_version'],'capability_applied':False}
+    raise PeerError('invalid_event','未知的节点系统记录类型')
 
 
 def _transaction_put(conn,kind,identifier,value):

@@ -6,6 +6,7 @@ read does not ingest events, move task state, reconcile writes or save memory.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -528,6 +529,35 @@ def _task_fact(task):
     return value
 
 
+def _safe_failure(exc):
+    """Keep actionable classifications, never connector output or exceptions' text."""
+    code = getattr(exc, 'code', 'observation_failed')
+    kind = type(exc).__name__
+    return {'code': code if isinstance(code, str) and re.fullmatch(r'[a-z0-9_]{1,80}', code) else 'observation_failed',
+            'error_type': kind if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,79}', kind) else 'Exception'}
+
+
+def result_brief(result):
+    """Body-free evidence metadata retained when a large tool result is projected."""
+    if not isinstance(result, dict):
+        return {}
+    evidence = result.get('evidence') or {}
+    values = []
+    for project in evidence.get('projects', []):
+        issues = project.get('observation_issues', [])
+        values.append({'project_id': project.get('project', {}).get('id'),
+            'fresh_status': project.get('fresh_status', 'not_requested'),
+            'task_count': len(project.get('tasks', [])), 'event_count': len(project.get('events', [])),
+            'issue_count': len(issues),
+            'issue_codes': dict(Counter(item.get('code', 'invalid_record') for item in issues)),
+            'issue_types': dict(Counter(item.get('error_type', 'Unknown') for item in issues))})
+    return {'ok': result.get('ok'), 'read_only': result.get('read_only'), 'observed_at': result.get('observed_at'),
+        'inspection_receipt_id': result.get('inspection_receipt_id'),
+        'complete': evidence.get('complete'), 'fresh': evidence.get('fresh'), 'projects': values,
+        'source_errors': [{key: item.get(key) for key in ('source', 'code', 'error_type')}
+                          for item in evidence.get('source_errors', [])]}
+
+
 async def _overview(args, actor, project_ids):
     from server import rdos_projects, phase3_backend, phase3_service
     fresh = args.get('fresh', False)
@@ -541,14 +571,25 @@ async def _overview(args, actor, project_ids):
         backend = phase3_backend.get_backend()
         # A shared authority is read once. Never call refresh_registry,
         # _ingest_event, _derive_submission, reconciliation, or cache replacement.
-        try:
-            raw_tasks, raw_events = await asyncio.gather(asyncio.to_thread(backend.list_tasks), asyncio.to_thread(backend.list_events))
-            if not isinstance(raw_tasks, list) or not isinstance(raw_events, list):
-                _fail('incomplete_source', '任务或协作记录未完整返回')
-        except Exception:
+        async def read_source(name, read):
+            try:
+                values = await asyncio.to_thread(read)
+                if not isinstance(values, list):
+                    _fail('incomplete_source', '任务或协作记录未完整返回')
+                return values, None
+            except Exception as exc:
+                return None, {'source': name, **_safe_failure(exc)}
+        task_source, event_source = await asyncio.gather(
+            read_source('tasks', backend.list_tasks), read_source('events', backend.list_events))
+        errors = [error for _, error in (task_source, event_source) if error]
+        if errors:
             for project in output:
                 project.update(fresh_status='failed', fresh_error='最新只读观察未完成；保留已知缓存，不将它当成本次成功读取。')
-            return {'projects': output, 'fresh': True, 'complete': False, 'source': 'read_only_observation'}
+            return {'projects': output, 'fresh': True, 'complete': False,
+                    'source': 'read_only_observation', 'source_errors': errors}
+        raw_tasks, raw_events = task_source[0], event_source[0]
+        from server import peer_tasks
+        tasks_by_id = {value.get('task_id'): value for value in raw_tasks if isinstance(value, dict)}
         for project in output:
             pid = project['project']['id']
             if not rdos_projects.is_registered(pid):
@@ -559,18 +600,32 @@ async def _overview(args, actor, project_ids):
                 if not isinstance(raw, dict) or raw.get('project_id') != pid:
                     continue
                 try:
-                    tasks.append(_task_fact(phase3_service._validate_task(raw)))
+                    if raw.get('dispatch_source') == 'peer':
+                        # validate_task verifies signatures; accept_task would
+                        # also adopt it and write grants, which is not a read.
+                        peer_tasks.validate_task(raw)
+                        checked = raw
+                    else:
+                        checked = phase3_service._validate_task(raw)
+                    tasks.append(_task_fact(checked))
                 except (ValueError, KeyError, TypeError) as exc:
-                    issues.append({'task_id': raw.get('task_id', ''), 'code': getattr(exc, 'code', 'invalid_task'), 'message': '任务完整性或版本需核对；未处理或覆盖现有任务。'})
+                    issues.append({'task_id': raw.get('task_id', ''), **_safe_failure(exc), 'message': '任务完整性或版本需核对；未处理或覆盖现有任务。'})
             events = []
             for raw in raw_events:
                 if not isinstance(raw, dict) or raw.get('project_id') != pid:
                     continue
                 try:
-                    phase3_service._event_shape(raw)
-                    events.append({key: raw[key] for key in _FIELDS['events'] if key != 'body' and key in raw})
-                except (ValueError, KeyError, TypeError):
-                    issues.append({'event_id': raw.get('id', ''), 'code': 'invalid_event', 'message': '记录格式需核对；未摄取或推进任务。'})
+                    observation = None
+                    if raw.get('event_type') in {'node_registry_snapshot', 'peer_enrollment_request', 'peer_capability_ack'}:
+                        observation = peer_tasks.observe_system_event(raw, tasks=tasks_by_id)
+                    else:
+                        phase3_service._event_shape(raw)
+                    event = {key: raw[key] for key in _FIELDS['events'] if key != 'body' and key in raw}
+                    if observation:
+                        event['system_observation'] = observation
+                    events.append(event)
+                except (ValueError, KeyError, TypeError) as exc:
+                    issues.append({'event_id': raw.get('id', ''), **_safe_failure(exc), 'message': '记录格式或签名需核对；未摄取或推进任务。'})
             project.update(tasks=tasks, events=events, observation_issues=issues, fresh_status='partial' if issues else 'succeeded',
                            source='registered_task_authority_read_only', observed_at=db.utc_now())
     return {'projects': output, 'fresh': fresh, 'complete': all(p.get('fresh_status', 'succeeded') == 'succeeded' for p in output),

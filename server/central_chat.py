@@ -163,7 +163,11 @@ async def run_chat(run, actor, started):
         brief['tool'] = brief.get('name', '')
         for key in ('arguments', 'result'):
             if key in brief and len(json.dumps(brief[key], ensure_ascii=False)) > 6000:
-                brief[key] = {'details_available': True, 'fingerprint': store.digest(brief[key])}
+                compact = {'details_available': True, 'fingerprint': store.digest(brief[key])}
+                if key == 'result' and step.get('name') in INSPECTION_TOOLS:
+                    from server.central_inspection import result_brief
+                    compact.update(result_brief(brief[key]))
+                brief[key] = compact
         run['steps'].append(brief)
         store.put('run', run['id'], run)
 
