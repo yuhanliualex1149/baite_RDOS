@@ -707,16 +707,30 @@ class _CLIExecutor:
 
     @staticmethod
     def _rows(data):
-        items = data.get("items", data.get("records"))
-        if items is not None:
-            if not isinstance(items, list):
+        if not isinstance(data, dict):
+            _fail("invalid_response", "记录读取缺少有效结构，未视为空表")
+        collections = [data[key] for key in ("items", "records") if key in data]
+        if collections:
+            if any(not isinstance(items, list) or any(not isinstance(row, dict) for row in items)
+                   for items in collections):
                 _fail("invalid_response", "记录列表格式无效")
-            return items
-        names = data.get("fields", [])
+            if len(collections) > 1 and collections[0] != collections[1]:
+                _fail("invalid_response", "记录读取包含不一致的列表")
+            return collections[0]
+        if not all(key in data for key in ("fields", "record_id_list", "data")):
+            _fail("invalid_response", "记录读取结构不完整，未视为空表")
+        names, ids, rows = data["fields"], data["record_id_list"], data["data"]
+        if any(not isinstance(value, list) for value in (names, ids, rows)):
+            _fail("invalid_response", "记录字段、标识与正文须为列表")
         names = [f.get("name", f.get("field_name", f.get("id"))) if isinstance(f, dict) else f for f in names]
-        ids, rows = data.get("record_id_list", []), data.get("data", [])
+        if any(not isinstance(name, str) or not name for name in names) or len(set(names)) != len(names):
+            _fail("invalid_response", "记录字段名称无效或重复")
+        if any(not isinstance(identifier, str) or not identifier for identifier in ids):
+            _fail("invalid_response", "记录标识格式无效")
         if len(ids) != len(rows):
             _fail("invalid_response", "记录ID与正文数量不一致")
+        if any(not isinstance(cells, list) or len(cells) != len(names) for cells in rows):
+            _fail("invalid_response", "记录正文与字段数量不一致")
         return [{"record_id": identifier, "fields": dict(zip(names, cells))} for identifier, cells in zip(ids, rows)]
 
     def records(self, table):
@@ -734,14 +748,20 @@ class _CLIExecutor:
 
     def get_record(self, table, identifier):
         data = _data(self._run(["base", "+record-get", *self._table(table), "--record-id", _identifier(identifier), "--format", "json"]))
-        if data.get("record"):
-            return data["record"]
-        if data.get("record_id") and "fields" in data:
-            return data
-        rows = self._rows(data)
-        if len(rows) != 1 or rows[0].get("record_id") != identifier:
+        if "record" in data:
+            record = data["record"]
+        elif "record_id" in data and "fields" in data:
+            record = data
+        else:
+            rows = self._rows(data)
+            if len(rows) != 1:
+                _fail("readback_mismatch", "无法独立读回指定记录")
+            record = rows[0]
+        if not isinstance(record, dict) or not isinstance(record.get("fields"), dict):
+            _fail("invalid_response", "指定记录的正文结构无效")
+        if record.get("record_id") != identifier:
             _fail("readback_mismatch", "无法独立读回指定记录")
-        return rows[0]
+        return record
 
     def upsert(self, table, fields, identifier=None):
         allowed = TASK_FIELDS if table == self.registry["tasks_table"] else EVENT_FIELDS
@@ -1069,6 +1089,12 @@ class FeishuBackend:
             _fail("remote_conflict", "相同任务ID有不同远端正文，须人工核对")
         return values[0]
 
+    def _record_payload(self, kind, value):
+        if kind == "event":
+            from server.peer_records import event_readback_payload
+            return event_readback_payload(value, self.resources)
+        return _payload(value)
+
     def _write_record(self, kind, value, opid):
         self._check_scope(value)
         table = self.resources["tasks_table" if kind == "task" else "events_table"]
@@ -1085,7 +1111,7 @@ class FeishuBackend:
             rows = [self._decode(row, table) for row in self.executor.records(table)]
             exact = [r for r in rows if r.get("operation_id") == opid]
             if exact:
-                if any(_payload(r) != desired for r in exact):
+                if any(self._record_payload(kind, r) != self._record_payload(kind, desired) for r in exact):
                     _fail("operation_conflict", "远端同一操作标识的正文不一致")
                 self._save_operation(operations, opid, entry, state="verified", record_id=exact[0]["record_id"])
                 return exact[0]
@@ -1134,7 +1160,7 @@ class FeishuBackend:
                 _fail("write_uncertain", "写入可能已提交，尚未独立读回；不会重复发送")
             def read_complete():
                 result = [self._decode(self.executor.get_record(table, r["record_id"]), table) for r in matches]
-                return result if all(_payload(r) == desired for r in result) else []
+                return result if all(self._record_payload(kind, r) == self._record_payload(kind, desired) for r in result) else []
             verified = _visible(read_complete)
             if not verified:
                 _fail("readback_mismatch", "记录完整正文独立读回不一致")

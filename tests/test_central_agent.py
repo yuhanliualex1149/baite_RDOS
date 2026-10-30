@@ -233,6 +233,10 @@ class CentralAgentTest(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json=reply("不能完成"))
 
         agent = self.agent(slow)
+        # Load the full-context modules before testing the tiny HTTP/backoff
+        # deadline; every timed request still rebuilds the complete DB view.
+        from server.central_model_context import assemble
+        assemble(agent, [])
         agent.max_seconds = 0.06
         agent.request_timeout = 90
         with self.assertRaises(AgentError) as raised:

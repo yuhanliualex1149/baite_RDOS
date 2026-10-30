@@ -22,7 +22,7 @@ async def scenario():
     closed=view['tasks'][0]
     assert closed['business_status']=='closed' and not closed.get('decision')
     assert closed['result_status']=='completed' and closed['receipt_status']=='verified'
-    assert closed['quality_status']=='not_evaluated'
+    assert 'quality_status' not in closed
     assert closed['completion_evidence']['event_hash']==local.event_fingerprint(event['id'])
     await service.refresh(admin,'repeat')
     assert backend3.read_task(task['id'])['record_revision']==2
@@ -81,7 +81,7 @@ async def scenario():
     await service.refresh(admin,'actual-output')
     current=backend3.read_task(task['id'])
     assert current['business_status']=='closed' and current['result_refs'][0]['content_hash']==document['content_hash']
-    assert not current.get('decision') and current['quality_status']=='not_evaluated'
+    assert not current.get('decision') and 'quality_status' not in current
 asyncio.run(scenario())
 ''')
 
@@ -94,7 +94,7 @@ async def scenario():
     await service.refresh(admin,'partial-human')
     current=backend3.read_task(task['id'])
     assert current['business_status']=='active' and current['result_status']=='partial'
-    assert current['quality_status']=='not_evaluated'
+    assert 'quality_status' not in current
 asyncio.run(scenario())
 ''')
 
@@ -102,9 +102,8 @@ asyncio.run(scenario())
         self.check('''
 async def scenario():
     source=backend3.create_document('project','指定成果','具体版本正文','review-source')
-    task=await start(task_type='review',input_refs=[docref(source)],completion_rule=None)
-    await service.submit_event({'event_type':'submission','body':'错误的结果类型','task_refs':refs(task),
-                                'result_status':'completed'},node,'wrong-kind')
+    task=await start(task_type='action',input_refs=[docref(source)],completion_rule=None)
+    await service.submit_event({'event_type':'submission','body':'没有结构化完成状态','task_refs':refs(task)},node,'wrong-kind')
     await service.refresh(admin,'wrong-kind')
     assert backend3.read_task(task['id'])['business_status']=='active'
     event=await service.submit_event({'event_type':'review','body':'审阅指定版本：有一处术语需要澄清。',
@@ -112,8 +111,8 @@ async def scenario():
     await service.refresh(admin,'read-review')
     current=backend3.read_task(task['id'])
     assert current['business_status']=='closed' and not current.get('decision')
-    assert current['review_evidence']['event_id']==event['id']
-    assert current['quality_status']=='not_evaluated'
+    assert current['submission_evidence']['event_id']==event['id']
+    assert 'quality_status' not in current
 asyncio.run(scenario())
 ''')
 
@@ -168,46 +167,44 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
-    def test_two_task_migration_keeps_source_version_and_requires_exact_receipt(self):
+    def test_unpublished_legacy_draft_migration_preserves_original_and_revokes_pending(self):
         self.check('''
 async def scenario():
-    task_id='task_p3_cf53fbf0cd16681b732e'
-    task=await start('configuration',task_id=task_id,output_zone='agent')
-    event=await service.submit_event({'event_type':'submission','body':'原配置回执，定时任务已启用。',
-                                     'task_refs':refs(task)},node,'old-receipt')
-    await service.refresh(admin,'pending-configuration')
-    await failure('write_uncertain',service.migrate_receipt_completion(task_id,event['id'],admin,'bad-migration',2,1,
-        expected_event_hash='wrong'))
-    proof=backend3.read_task(task_id)['submission_evidence']
-    current=await service.migrate_receipt_completion(task_id,event['id'],admin,'migration',2,1,
-        fields={'title':'定时配置','goal':'保存日常检查和每周反馈配置','deliverable':'配置结果'},expected_event_hash=proof['event_hash'])
-    assert current['requirements_version']==2 and current['record_revision']==3
-    assert current['business_status']=='closed' and not current.get('decision')
-    assert current['completion_evidence']['source_requirements_version']==1
-    assert backend3._get('event',event['id'])['task_refs']==refs(task)
-    assert [entry['requirements_version'] for entry in local.history(task_id)]==[1,2]
-    again=await service.migrate_receipt_completion(task_id,event['id'],admin,'migration',2,1,
-        fields={'title':'定时配置','goal':'保存日常检查和每周反馈配置','deliverable':'配置结果'},expected_event_hash=proof['event_hash'])
-    assert again==current
-    await failure('not_allowed',service.migrate_receipt_completion('another-task',event['id'],admin,'not-whitelisted',1,1))
+    from server.draft_lifecycle import migrate_local_drafts
+    draft=await service.prepare_task({'title':'旧意见任务','goal':'提交意见','deliverable':'正文','executor_node_ids':[node['node_id']]},admin,'legacy-draft')
+    original={**draft,'payload':{**draft['payload'],'task_type':'review','completion_rule':{'kind':'human_review'}}}
+    original['draft_hash']=central.digest({key:original[key] for key in ('task_id','payload','base_revision','base_requirements_version','change_reason')})
+    local.put('draft',draft['id'],original)
+    central.put('central_pending_request','legacy-pending',{'id':'legacy-pending','status':'pending','task_actions':[{'payload':{'draft_id':draft['id']}}]})
+    result=migrate_local_drafts()
+    current=local.get('draft',draft['id'])
+    assert current['payload']['task_type']=='action' and current['payload']['completion_rule']=={'kind':'receipt_recorded'}
+    assert central.items('draft_workflow_history')[0]['before']==original
+    assert central.get('central_pending_request','legacy-pending')['status']=='invalidated'
+    assert not migrate_local_drafts()['changed'] and not backend3.list_tasks()
 asyncio.run(scenario())
 ''')
 
-    def test_migration_only_removes_old_inputs_and_keeps_version_one_history(self):
+    def test_legacy_task_migration_versions_requirements_and_keeps_original(self):
         self.check('''
 async def scenario():
-    source=backend3.create_document('agent','旧接入说明','旧版协议正文','old-guide')
-    task=await start('configuration-input',task_id='task_p3_cf53fbf0cd16681b732e',
-                     output_zone='agent',input_refs=[docref(source)])
-    event=await service.submit_event({'event_type':'submission','body':'原配置已保存。','task_refs':refs(task)},node,'old-config-input')
-    await service.refresh(admin,'old-config-input')
-    await failure('invalid_fields',service.migrate_receipt_completion(task['id'],event['id'],admin,'replace-input',2,1,
-        fields={'input_refs':[docref(source)]}))
-    current=await service.migrate_receipt_completion(task['id'],event['id'],admin,'clear-old-input',2,1,fields={'input_refs':[]})
-    assert current['business_status']=='closed' and current['input_refs']==[]
-    history=local.history(task['id'])
-    assert history[0]['input_refs']==[docref(source)] and history[1]['input_refs']==[]
-    assert backend3.read_document(source['id'])['content']=='旧版协议正文'
+    task=await start('legacy-task')
+    # Persisted prior-version fixture: establish the same authority/head facts
+    # imported by the migration tool, without replacing any validation function.
+    legacy={**task,'task_type':'review','completion_rule':{'kind':'human_review'},'business_status':'pending_review','quality_status':'pending_human'}
+    legacy['requirements_hash']=central.digest(service._requirements(legacy))
+    backend3._save('task',task['id'],legacy)
+    local.put('task_authority',service._authority_key(legacy),{'hash':central.digest(transport.payload(legacy)),'operation_id':'start-legacy-task'})
+    local.put('task_head',task['id'],{'task_id':task['id'],'record_revision':1,'requirements_version':1,**service.environment(),'content_hash':central.digest(transport.payload(legacy))})
+    with db.connection() as conn:conn.execute('DELETE FROM phase3_history WHERE task_id=?',(task['id'],))
+    local.remember_version(task['id'],1,service._requirements(legacy))
+    migrated=await service.migrate_legacy_quality_task(task['id'],admin,'migrate-legacy',1,1)
+    assert migrated['task_id']==task['id'] and migrated['requirements_version']==2 and migrated['record_revision']==2
+    assert migrated['business_status']=='active' and migrated['completion_rule']=={'kind':'receipt_recorded'}
+    assert migrated['task_type']=='action' and 'quality_status' not in migrated
+    assert local.get('task_workflow_history',task['id']+'@1')['task']==legacy
+    assert local.history(task['id'])[0]['completion_rule']=={'kind':'human_review'}
+    assert migrated==await service.migrate_legacy_quality_task(task['id'],admin,'migrate-legacy',1,1)
 asyncio.run(scenario())
 ''')
 
@@ -280,20 +277,20 @@ assert next(doc for doc in developer['documents'] if doc['title']=='已退役执
 async def scenario():
     source=backend3.create_document('project','指定成果','指定版本','current-review-input')
     unrelated=backend3.create_document('project','无关成果','另一个对象','other-review-input')
-    task=await start(task_type='review',input_refs=[docref(source)],completion_rule=None)
+    task=await start(task_type='action',input_refs=[docref(source)],completion_rule=None)
     await service.submit_event({'event_type':'review','body':'审阅了另一个对象','task_refs':refs(task),
         'result_status':'completed','review_of':docref(unrelated)},node,'wrong-review-target')
     await service.refresh(admin,'wrong-review-target')
     current=backend3.read_task(task['id'])
-    assert current['business_status']=='active' and current['quality_status']=='not_evaluated'
+    assert current['business_status']=='active' and 'quality_status' not in current
     await service.submit_event({'event_type':'review','body':'指定成果有一处可以改进','task_refs':refs(task),
         'result_status':'completed','review_of':docref(source)},node,'correct-review-target')
     await service.refresh(admin,'correct-review-target')
     current=backend3.read_task(task['id'])
     assert current['business_status']=='closed' and not current.get('decision')
-    assert current['completion_evidence']['reviewed_ref']==docref(source)
-    await failure('invalid_task',start('invalid-review-rule',task_type='review',input_refs=[docref(source)],
-        completion_rule={'kind':'artifact_present'}))
+    assert backend3._get('event',current['submission_event_id'])['review_of']==docref(source)
+    await failure('invalid_task',start('invalid-review-rule',task_type='action',input_refs=[docref(source)],
+        completion_rule={'kind':'human_review'}))
 asyncio.run(scenario())
 ''')
 
@@ -326,7 +323,7 @@ async def scenario():
     content='制作成果：保留一个实际场景，已补充适用对象和使用步骤。'
     event=await submit(creation,document,'professional-content',result_status='completed',body=content)
     await service.refresh(admin,'professional-content')
-    review=await start('professional-review',task_type='review',completion_rule=None,input_refs=[docref(document)])
+    review=await start('professional-review',task_type='action',completion_rule=None,input_refs=[docref(document)])
     review_body='审阅意见：该版本可读，但第三步需要补充边界条件。'
     review_event=await service.submit_event({'event_type':'review','body':review_body,'task_refs':refs(review),
         'review_of':docref(document),'result_status':'completed'},node,'professional-review')
@@ -336,7 +333,7 @@ async def scenario():
     creation_summary=by_id[creation['id']]['execution_result']['summary']
     review_summary=by_id[review['id']]['execution_result']['summary']
     assert '节点报告执行完成' in creation_summary and '成果' in creation_summary
-    assert '节点报告执行完成' in review_summary
+    assert review_summary=='已按当前要求完成执行，结果已独立核对。'
     assert next(item for item in business['events'] if item['id']==event['id'])['summary']==creation_summary
     assert next(item for item in business['events'] if item['id']==review_event['id'])['summary']==review_summary
     assert backend3._get('event',event['id'])['body']==content

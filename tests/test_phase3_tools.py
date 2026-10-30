@@ -16,7 +16,7 @@ async def chat(operation_id, script=None):
     original=backend._LocalModelTransport.handle_async_request
     async def model(self,request):
         payload=json.loads(request.content)
-        if any(m.get('role')=='system' and str(m.get('content','')).startswith('RDOS_REQUEST_INTERPRETER_V1') for m in payload.get('messages',[])):
+        if any(backend.model_stage_content(m).startswith('RDOS_REQUEST_INTERPRETER_V1') for m in payload.get('messages',[])):
             return httpx.Response(200,json={'model':'local-deterministic-mock','choices':[{'message':{
                 'role':'assistant','content':json.dumps({'purpose':'discuss','task_actions':[],'memory_changes':[]})},'finish_reason':'stop'}]})
         if self.index==0 and script is not None:self.script=list(script)

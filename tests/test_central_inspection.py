@@ -68,7 +68,7 @@ async def scenario():
  observed=result['evidence']['projects'][0]
  assert any(e['id']==event['id'] for e in observed['events'])
  assert observed['tasks'][0]['business_status']=='active'
- assert observed['tasks'][0]['quality_evaluation']=='not_evaluated'
+ assert 'quality_evaluation' not in observed['tasks'][0]
  assert authority.read_task(current['task_id'])['business_status']=='active'
  assert not local.event_fingerprint(event['id'])
  assert snapshot()==before
@@ -194,7 +194,7 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
-    def test_artifact_and_uncertain_verification_do_not_turn_into_quality_acceptance(self):
+    def test_artifact_and_uncertain_verification_remain_distinct_without_quality_workflow(self):
         self.check('''
 async def scenario():
  current=await task()
@@ -209,7 +209,7 @@ async def scenario():
  value=result['evidence']['projects'][0]['tasks'][0]
  assert value['execution_reported']=='completed'
  assert value['technical_verification']=='uncertain'
- assert value['quality_evaluation']=='not_evaluated'
+ assert 'quality_evaluation' not in value
  assert value['artifact_evidence'][0]['revision']==3
  assert value['business_status']=='active' and snapshot()==before
 asyncio.run(scenario())

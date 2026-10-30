@@ -139,7 +139,7 @@ async def check():
         assert 'PRIVATE-RAW-PROTOCOL' not in response.text and 'role_test' not in response.text and 'node_lab_' not in response.text
         current=next(t for t in value['tasks'] if t['task_id']==task['task_id'])
         assert current['completion_rule']=={'kind':'receipt_recorded'} and current['business_status']=='closed'
-        assert current['result_status']=='completed' and current['receipt_status']=='verified' and current['quality_status']=='not_evaluated'
+        assert current['result_status']=='completed' and current['receipt_status']=='verified' and 'quality_status' not in current
         assert not current.get('decision')
         assert current['executor_node_ids']==['node_codex']
         assert all('body' not in event and 'verified_actor' not in event for event in value['events'])

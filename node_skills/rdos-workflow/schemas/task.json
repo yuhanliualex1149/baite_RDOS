@@ -56,8 +56,7 @@
     "task_type": {
       "enum": [
         "action",
-        "deliverable",
-        "review"
+        "deliverable"
       ]
     },
     "deliverable_audience": {
@@ -79,8 +78,6 @@
         "kind": {
           "enum": [
             "receipt_recorded",
-            "human",
-            "human_review",
             "artifact_present",
             "source_versions_match"
           ]
@@ -90,7 +87,6 @@
     "business_status": {
       "enum": [
         "active",
-        "pending_review",
         "paused",
         "closed"
       ]

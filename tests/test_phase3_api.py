@@ -11,7 +11,7 @@ class Phase3APITest(unittest.TestCase):
         result = run_guarded(body, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def test_real_guarded_task_core_lifecycle_and_exact_artifact_acceptance(self):
+    def test_real_guarded_task_core_lifecycle_and_exact_artifact_readback(self):
         self.guarded('''
 from server.main import app
 from server import central_api, phase3_service
@@ -25,7 +25,7 @@ async def check():
         payload={'title':'API真实核心闭环','goal':'只保留一个场景','owner_id':admin['id'],
             'executor_node_ids':['node_lab_phase3_codex'],'input_refs':[],
             'deliverable':'一份介绍与版本证据','output_zone':'project','dispatch_to':['agent'],
-            'return_to':['agent','human'],'completion_rule':{'kind':'human'},'due_at':''}
+            'return_to':['agent','human'],'completion_rule':{'kind':'receipt_recorded'},'due_at':''}
         response=await client.post('/api/central/phase3/drafts',json={'operation_id':'core-draft','payload':payload})
         assert response.status_code==200,response.text
         draft=response.json()['item']
@@ -63,20 +63,17 @@ async def check():
         ref={'document_id':document['id'],'revision':document['revision'],'content_hash':document['content_hash']}
         await phase3_service.submit_event({'event_type':'submission','body':'已提交当前要求v2产物',
             'task_refs':[{'task_id':task['task_id'],'requirements_version':2}],
-            'artifact_refs':[ref]},node,'core-node-submission')
+            'artifact_refs':[ref],'result_status':'completed'},node,'core-node-submission')
         synced=await client.post('/api/central/phase3/sync',json={'operation_id':'core-sync'})
         assert synced.status_code==200,synced.text
         workspace=await client.get('/api/central/phase3/workspace')
         assert workspace.status_code==200,workspace.text
         submitted=next(t for t in workspace.json()['tasks'] if t['task_id']==task['task_id'])
-        assert submitted['business_status']=='pending_review',submitted
-        wrong=await client.post('/api/central/phase3/tasks/'+task['task_id']+'/actions/accept_close',json={
-            'operation_id':'core-wrong-artifact','expected_revision':submitted['record_revision'],'expected_requirements_version':2,
-            'payload':{'reason':'错误版本不得通过','artifact_id':ref['document_id'],'artifact_revision':99,'artifact_hash':ref['content_hash']}})
-        assert wrong.status_code==409,wrong.text
-        closed=await act(submitted,'accept_close','core-close',{'reason':'本人测试管理员明确验收此版本',
-            'artifact_id':ref['document_id'],'artifact_revision':ref['revision'],'artifact_hash':ref['content_hash']})
-        assert closed['business_status']=='closed',closed
+        assert submitted['business_status']=='closed' and 'quality_status' not in submitted,submitted
+        assert submitted['result_refs'][0]['content_hash']==ref['content_hash']
+        removed=await client.post('/api/central/phase3/tasks/'+task['task_id']+'/actions/accept_close',json={
+            'operation_id':'removed-quality','expected_revision':submitted['record_revision'],'expected_requirements_version':2,'payload':{}})
+        assert removed.status_code==503,removed.text
         history=await client.get('/api/central/phase3/tasks/'+task['task_id']+'/history')
         assert history.status_code==200 and 'requirements_version' in history.text,history.text
         workspace=await client.get('/api/central/phase3/workspace')

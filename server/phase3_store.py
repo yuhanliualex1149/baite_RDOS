@@ -168,10 +168,10 @@ def history(task_id: str) -> list:
     return [{'requirements_version': row[0], **json.loads(row[1])} for row in rows]
 
 
-def index_event(event: dict, content: dict) -> dict:
+def index_event(event: dict, content: dict, *, connection=None) -> dict:
+    """Index an immutable event, optionally inside its business transaction."""
     digest = central.digest(content)
-    with db.connection() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+    def write(conn):
         row = conn.execute('SELECT payload_hash,payload,sequence FROM phase3_event_index WHERE id=?', (event['id'],)).fetchone()
         if row:
             if row[0] != digest:
@@ -184,6 +184,11 @@ def index_event(event: dict, content: dict) -> dict:
         cursor = conn.execute('INSERT INTO phase3_event_index(id,payload_hash,payload) VALUES(?,?,?)',
                               (event['id'], digest, json.dumps(event, ensure_ascii=False)))
         return {**event, 'sequence': cursor.lastrowid}
+    if connection is not None:
+        return write(connection)
+    with db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        return write(conn)
 
 
 def events(after: int = 0, limit: int = 1000) -> list:

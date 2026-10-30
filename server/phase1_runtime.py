@@ -183,7 +183,8 @@ def initialize() -> None:
     """Idempotent migration; recovery is classification only, never execution."""
     from server import phase1_operations
     env = environment()
-    history_limit()
+    # Historical history_messages settings no longer limit model input. Keep
+    # the legacy accessor for older callers without rejecting startup here.
     version = store.get('state', 'phase1_schema') or {}
     if version.get('version', 0) < 1:
         # Preserve legacy messages without adding them to any new model context.

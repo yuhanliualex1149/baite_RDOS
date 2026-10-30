@@ -89,7 +89,7 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
-    def test_receipt_processing_and_readonly_second_stage_preserve_quality(self):
+    def test_receipt_processing_and_readonly_second_stage_have_no_quality_workflow(self):
         self.check('''
 node=service.make_node_actor('node_lab_phase3_workbuddy')
 async def scenario():
@@ -100,7 +100,7 @@ async def scenario():
  run=await m.wait(run['id'])
  current=backend3.read_task(task['id'])
  assert current['business_status']=='closed' and current['receipt_status']=='verified'
- assert current['quality_status']=='not_evaluated' and not current.get('decision')
+ assert 'quality_status' not in current and not current.get('decision')
  before=store.digest([backend3.list_tasks(),backend3.list_events(),store.items('memory')])
  report=m.inspect_evidence([local.PROJECT_ID],now=now)
  after=store.digest([backend3.list_tasks(),backend3.list_events(),store.items('memory')])

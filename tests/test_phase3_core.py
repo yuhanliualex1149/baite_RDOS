@@ -11,7 +11,7 @@ backend3=transport.get_backend()
 node=service.make_node_actor('node_lab_phase3_codex')
 other=service.make_node_actor('node_lab_phase3_workbuddy')
 async def start(op='one',**changes):
-    fields={'title':'合成介绍','goal':'一个场景','deliverable':'可读介绍','executor_node_ids':[node['node_id']],'completion_rule':{'kind':'human'}}
+    fields={'title':'合成介绍','goal':'一个场景','deliverable':'可读介绍','executor_node_ids':[node['node_id']],'completion_rule':{'kind':'receipt_recorded'}}
     fields.update(changes)
     draft=await service.prepare_task(fields,admin,'draft-'+op)
     return await service.apply_task_action(draft['task_id'],'start',{'draft_id':draft['id'],'expected_hash':draft['draft_hash']},admin,'start-'+op,0,0)
@@ -20,7 +20,7 @@ async def artifact(task,op='one'):
 def refs(task):return [{'task_id':task['task_id'],'requirements_version':task['requirements_version']}]
 def docref(document):return {'document_id':document['id'],'revision':document['revision'],'content_hash':document['content_hash']}
 async def submit(task,document,op='one',**extra):
-    return await service.submit_event({'event_type':'submission','body':'已提交初稿','task_refs':refs(task),'artifact_refs':[docref(document)],**extra},node,'submit-'+op)
+    return await service.submit_event({'event_type':'submission','body':'已提交初稿','task_refs':refs(task),'artifact_refs':[docref(document)],'result_status':'completed',**extra},node,'submit-'+op)
 async def failure(code,call):
     try:await call
     except ValueError as exc:assert getattr(exc,'code','')==code,(type(exc).__name__,getattr(exc,'code',''),str(exc))
@@ -32,74 +32,57 @@ class Phase3CoreTest(unittest.TestCase):
         result=run_guarded(SETUP+'\n'+body,restart_body=None if restart is None else SETUP+'\n'+restart)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
-    def test_real_lifecycle_submission_derives_review_and_exact_human_close(self):
+    def test_real_lifecycle_submission_closes_after_exact_readback(self):
         self.check('''
 async def scenario():
     task=await start()
     assert not service.get_task(task['id'],admin).get('result_refs')
     document=await artifact(task)
-    await submit(task,document)
+    event=await submit(task,document)
     view=await service.refresh(admin,'refresh')
     task=view['tasks'][0]
-    assert task['business_status']=='pending_review' and task['requirements_version']==1 and task['record_revision']==2
-    assert task['execution']['status']=='submission'
+    assert task['business_status']=='closed' and task['requirements_version']==1 and task['record_revision']==2
     derived=next(o for o in central.items('operation') if o.get('task_id')==task['id'] and o.get('action')=='phase3_task_execution' and o.get('prepared_task'))
     assert derived['authority_kind']=='task_execution_grant' and not derived.get('authorization')
-    await failure('version_conflict',service.apply_task_action(task['id'],'accept_close',{'artifact_id':document['id'],'artifact_revision':999,'artifact_hash':document['content_hash']},admin,'bad-close',2,1))
-    closed=await service.apply_task_action(task['id'],'accept_close',{'artifact_id':document['id'],'artifact_revision':document['revision'],'artifact_hash':document['content_hash']},admin,'good-close',2,1)
-    assert closed['business_status']=='closed' and closed['close_reason']=='completed'
-    assert closed['decision']['actor_id']==admin['id'] and '待节点确认' in closed['stop_receipt']
+    assert task['completion_evidence']['event_hash']==local.event_fingerprint(event['id'])
+    assert task['close_reason']=='completed' and not task.get('decision')
 asyncio.run(scenario())
 ''')
 
-    def test_review_body_stays_in_shared_table_and_human_confirmation_binds_it(self):
+    def test_opinions_are_ordinary_work_and_stay_in_shared_table(self):
         self.check('''
 async def scenario():
     source=backend3.create_document('project','待审阅成果','明确的成果版本','review-input')
-    task=await start('review',executor_node_ids=[other['node_id']],completion_rule={'kind':'human_review'},input_refs=[docref(source)])
-    message={'event_type':'review','body':'独立审阅：初稿有一个需核实的问题；此处保留完整意见。',
-             'task_refs':refs(task),'artifact_refs':[]}
-    event=await service.submit_event(message,other,'review-event')
-    assert backend3.list_events()[-1]['body']==message['body']
-    assert event==await service.submit_event(message,other,'review-event')
-    view=await service.refresh(admin,'read-review')
+    task=await start('opinions',executor_node_ids=[other['node_id']],task_type='action',input_refs=[docref(source)])
+    message={'event_type':'submission','body':'独立审阅：初稿有一个需核实的问题；此处保留完整意见。',
+             'task_refs':refs(task),'artifact_refs':[],'result_status':'completed'}
+    event=await service.submit_event(message,other,'opinion-event')
+    assert next(e for e in backend3.list_events() if e['id']==event['id'])['body']==message['body']
+    assert event==await service.submit_event(message,other,'opinion-event')
+    view=await service.refresh(admin,'read-opinions')
     current=next(t for t in view['tasks'] if t['task_id']==task['task_id'])
-    assert current['business_status']=='pending_review' and current['result_refs']==[]
-    proof=current['review_evidence']
-    assert proof['event_id']==event['id'] and proof['content_hash']==central.digest(message['body'])
-    await failure('version_conflict',service.apply_task_action(task['id'],'accept_close',
-        {'review_event_id':event['id'],'review_hash':'wrong'},admin,'wrong-review',2,1))
-    closed=await service.apply_task_action(task['id'],'accept_close',
-        {'review_event_id':event['id'],'review_hash':proof['content_hash']},admin,'approve-review',2,1)
-    assert closed['business_status']=='closed' and closed['decision']['review_hash']==proof['content_hash']
-    assert closed['decision']['actor_id']==admin['id']
+    assert current['business_status']=='closed' and current['result_refs']==[]
+    assert current['submission_evidence']['event_id']==event['id']
+    assert not current.get('decision') and 'quality_status' not in current
 asyncio.run(scenario())
 ''')
 
-    def test_table_only_submission_waits_for_human_review_of_exact_record(self):
+    def test_table_only_execution_requires_structured_completed_result(self):
         self.check('''
 async def scenario():
     task=await start('receipt',deliverable='配置回执只写入协作记录表',output_zone='agent')
     message={'event_type':'submission','body':'两个定时配置已保存；实际到点触发待核对。',
              'task_refs':refs(task),'artifact_refs':[]}
-    event=await service.submit_event(message,node,'receipt-event')
+    await service.submit_event(message,node,'prose-only')
+    await service.refresh(admin,'prose-only')
+    assert backend3.read_task(task['id'])['business_status']=='active'
+    event=await service.submit_event({**message,'result_status':'completed'},node,'receipt-event')
     view=await service.refresh(admin,'receipt-refresh')
     current=next(t for t in view['tasks'] if t['task_id']==task['task_id'])
-    assert current['business_status']=='pending_review' and current['result_refs']==[]
-    assert current['submission_event_id']==event['id']
+    assert current['business_status']=='closed' and current['result_refs']==[]
     proof=current['submission_evidence']
     assert proof['event_id']==event['id'] and proof['content_hash']==central.digest(message['body'])
-    await failure('version_conflict',service.apply_task_action(task['id'],'accept_close',
-        {'submission_event_id':event['id'],'submission_hash':'wrong'},admin,'wrong-receipt',2,1))
-    original=backend3._get('event',event['id'])
-    backend3._save('event',event['id'],{**original,'body':'远端原文已变化'})
-    await failure('write_uncertain',service.apply_task_action(task['id'],'accept_close',
-        {'submission_event_id':event['id'],'submission_hash':proof['content_hash']},admin,'altered-receipt',2,1))
-    backend3._save('event',event['id'],original)
-    closed=await service.apply_task_action(task['id'],'accept_close',
-        {'submission_event_id':event['id'],'submission_hash':proof['content_hash']},admin,'approve-receipt',2,1)
-    assert closed['business_status']=='closed' and closed['decision']['actor_id']==admin['id']
-    assert closed['decision']['submission_event_id']==event['id']
+    assert not current.get('decision')
 asyncio.run(scenario())
 ''')
 
@@ -322,7 +305,7 @@ async def scenario():
     for index,fields in enumerate(bads):
         backend3.append_event({**valid,**fields,'id':'bad-'+str(index),'operation_id':'bad-'+str(index)},'bad-'+str(index))
     result=await service.refresh(admin,'mixed')
-    assert result['tasks'][0]['business_status']=='pending_review'
+    assert result['tasks'][0]['business_status']=='closed'
     assert len([q for q in result['quarantine'] if q['source']=='event'])==4
     assert len([e for e in result['events'] if e['id']==valid['id']])==1
     fields={'title':'bad','goal':'bad','deliverable':'bad','executor_node_ids':[node['node_id']],
@@ -359,10 +342,10 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
-    def test_paused_review_updated_version_resumes_active_and_preserves_remote_history(self):
+    def test_paused_partial_result_updated_version_resumes_active_and_preserves_remote_history(self):
         self.check('''
 async def scenario():
-    old=await start();document=await artifact(old);await submit(old,document)
+    old=await start();document=await artifact(old);await submit(old,document,result_status='partial')
     await service.refresh(admin,'submitted')
     await service.apply_task_action(old['id'],'pause',{},admin,'pause-review',2,1)
     draft=await service.prepare_task({'task_id':old['id'],'goal':'新版要求','change_reason':'用户调整目标'},admin,'new-version')
@@ -483,7 +466,7 @@ async def scenario():
     assert proof['revision']==changed['revision'] and proof['content_hash']==changed['content_hash']
     await submit(current,changed,'patched-v2')
     await service.refresh(admin,'new-document')
-    assert backend3.read_task(task['id'])['business_status']=='pending_review'
+    assert backend3.read_task(task['id'])['business_status']=='closed'
 asyncio.run(scenario())
 ''')
 
@@ -497,7 +480,7 @@ async def scenario():
     assert not local.get('document_grant',document['id'])
     await submit(task,changed)
     await service.refresh(admin,'patched-seed')
-    assert backend3.read_task(task['id'])['business_status']=='pending_review'
+    assert backend3.read_task(task['id'])['business_status']=='closed'
     assert '保留人工意见' in backend3.read_document(document['id'])['content']
 asyncio.run(scenario())
 ''')

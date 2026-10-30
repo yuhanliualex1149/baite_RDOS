@@ -368,8 +368,11 @@ def workspace(project_id: str = store.PROJECT_ID, thread_id: Optional[str] = Non
         messages = sorted(messages, key=lambda item: item["created_at"])[-60:]
     return safe_display({"user": user, "project": project, "projects": projects.list_projects(user),
             "users": store.users() if is_admin else [user], "tasks": tasks, "feedback": feedback,
-            "proposals": proposals, "runs": [item for item in all_runs if projects.belongs(item, project_id)][:60],
-            "task_drafts": [item for item in store.items("task_draft") if projects.belongs(item, project_id)] if is_admin else [],
+            "proposals": [item for item in proposals if item.get("status") != "deleted"],
+            "deleted_proposals": [item for item in proposals if item.get("status") == "deleted"] if is_admin else [],
+            "runs": [item for item in all_runs if projects.belongs(item, project_id)][:60],
+            "task_drafts": [item for item in store.items("task_draft") if projects.belongs(item, project_id) and item.get("status") != "deleted"] if is_admin else [],
+            "deleted_task_drafts": [item for item in store.items("task_draft") if projects.belongs(item, project_id) and item.get("status") == "deleted"] if is_admin else [],
             "messages": messages,
             "sources": projects.sources(project_id), "runtime": runtime,
             "project_health": phase1_runtime.health(project_id),
@@ -706,7 +709,7 @@ async def edit_task_draft(draft_id: str, payload: TaskDraftEdit, user: dict = De
         old = store.get("task_draft", draft_id)
         if not old:
             raise HTTPException(404, "任务草稿不存在")
-        if old["status"] == "published" or old.get("publication_operation_id"):
+        if old["status"] in ("published", "deleted") or old.get("publication_operation_id"):
             raise HTTPException(409, "这份任务已确认发布；请先核对发布结果，再另建修改草稿")
         try:
             fields = {key: old[key] for key in ("instructions", "member_ids", "task_id", "task_kind", "stage", "nature", "related_task", "draft_action", "reason") if key in old}
@@ -769,3 +772,31 @@ async def reject_proposal(proposal_id: str, payload: Rejection, user: dict = Dep
             raise HTTPException(409, "建议已确认发布，请先核对原操作结果")
         item.update(status="rejected", rejection_reason=payload.reason, rejected_by=user["id"], rejected_at=db.utc_now())
         return {"item": store.put("proposal", proposal_id, item)}
+
+
+@router.post("/task-drafts/{draft_id}/delete")
+async def delete_task_draft(draft_id: str, payload: Publish, user: dict = Depends(admin)):
+    return await _draft_lifecycle('task_draft', draft_id, 'delete', payload, user)
+
+
+@router.post("/task-drafts/{draft_id}/restore")
+async def restore_task_draft(draft_id: str, payload: Publish, user: dict = Depends(admin)):
+    return await _draft_lifecycle('task_draft', draft_id, 'restore', payload, user)
+
+
+@router.post("/proposals/{proposal_id}/delete")
+async def delete_proposal(proposal_id: str, payload: Publish, user: dict = Depends(admin)):
+    return await _draft_lifecycle('proposal', proposal_id, 'delete', payload, user)
+
+
+@router.post("/proposals/{proposal_id}/restore")
+async def restore_proposal(proposal_id: str, payload: Publish, user: dict = Depends(admin)):
+    return await _draft_lifecycle('proposal', proposal_id, 'restore', payload, user)
+
+
+async def _draft_lifecycle(kind, identifier, action, payload, user):
+    try:
+        from server.draft_lifecycle import transition
+        return {"item": await transition(kind, identifier, action, user, payload.operation_id, payload.expected_hash)}
+    except Exception as exc:
+        raise failure(exc) from exc

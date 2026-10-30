@@ -1,6 +1,7 @@
 """Node-signed direct task creation, with pinned central identity registration.
 
-The private key delivered once to a node is never persisted by the server.
+Normal enrollment receives only a public key and its possession proof; private
+node keys stay on the node. One-time private delivery remains compatibility only.
 Signed strings deliberately survive public/internal ID representation mapping.
 """
 from __future__ import annotations
@@ -23,6 +24,8 @@ from lab import config
 VERSION = 1
 _CAPABILITY = object()
 _LOCK = threading.RLock()
+_AUTOMATIC_ACTIVE = set()
+AUTOMATIC_REGISTRAR = 'system:node_registration'
 HELPER = Path(__file__).resolve().parents[1] / 'node_skills/rdos-workflow/scripts/peer_crypto.cjs'
 BUNDLED_NODE = '/Users/alexliu/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node'
 
@@ -170,7 +173,14 @@ def node_status(actor):
     for node in local.node_registry():
         if 'admin' not in user.get('roles',[]) and node.get('member_id') != user['id']: continue
         identity = local.get('peer_identity',node['node_id']) or {}
-        values.append({'node_id':node.get('public_id',node['node_id']), 'label':node.get('display_name',node.get('label')), 'bound':identity.get('delivery_status') in ('delivered','registered'),'delivery_status':identity.get('delivery_status','unbound'),'ready':bool(identity.get('ready')) and state.get('enabled') is True,'runtime_available':state.get('enabled') is True, 'disabled_reason':state.get('message','') if not state.get('enabled') else '', 'runtime_error_code':state.get('error_code',''), 'binding_id':identity.get('binding_id'),'skill_version':identity.get('skill_version'),'pending_requests':[_pending_public(value) for value in local.items('peer_enrollment_request') if value.get('node_id')==node['node_id'] and value.get('status') in ('pending','registry_pending')]})
+        pending=[_pending_public(value) for value in local.items('peer_enrollment_request') if value.get('node_id')==node['node_id'] and value.get('status') in ('pending','registry_pending')]
+        problem=next((value for value in pending if value.get('automatic_status') in ('conflict','failed')),None)
+        bound=identity.get('delivery_status') in ('delivered','registered')
+        registration=('conflict' if problem and problem.get('automatic_status')=='conflict' else 'failed' if problem else
+                      'registered' if bound else 'registry_pending' if any(value.get('status')=='registry_pending' for value in pending) else 'pending' if pending else 'unbound')
+        values.append({'node_id':node.get('public_id',node['node_id']), 'label':node.get('display_name',node.get('label')), 'bound':bound,'delivery_status':identity.get('delivery_status','unbound'),'ready':bool(identity.get('ready')) and state.get('enabled') is True,'runtime_available':state.get('enabled') is True, 'disabled_reason':state.get('message','') if not state.get('enabled') else '', 'runtime_error_code':state.get('error_code',''), 'binding_id':identity.get('binding_id'),'skill_version':identity.get('skill_version'),'pending_requests':pending,
+            'registration_status':registration,'registration_error':problem.get('message','') if problem else '',
+            'registration_error_code':problem.get('error_code','') if problem else ''})
     return values
 
 def _registry_payload():
@@ -208,7 +218,9 @@ async def publish_registry(operation_id):
         except ValueError as exc:
             if getattr(exc,'code','') not in ('write_uncertain','read_failed','readback_mismatch'):raise
         matches=[v for v in await asyncio.to_thread(backends.get_backend().list_events) if v.get('id')==event['id']]
-    if not matches or any(backends.payload(v)!=backends.payload(event) for v in matches):
+    from server.peer_records import event_readback_payload
+    registry=backends.get_backend().registry()
+    if not matches or any(event_readback_payload(v,registry)!=event_readback_payload(event,registry) for v in matches):
         raise PeerError('write_uncertain','节点登记尚未完整独立读回')
     return event['id']
 
@@ -302,16 +314,25 @@ def ingest_system_event(raw,*,tasks=None):
         if not identity:raise PeerError('peer_not_bound','节点尚未绑定')
         claim=verified(raw.get('peer_ack'),identity['public_key'])
         public=rdos_contract.public_view(node['node_id'],backends.get_backend().registry())
-        if claim.get('skill_version') not in ('1.1.0','1.1.1','1.1.2','1.1.3') or claim != {'node_id':public,'binding_id':identity['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
+        if claim.get('skill_version') not in ('1.1.0','1.1.1','1.1.2','1.1.3','1.2.0') or claim != {'node_id':public,'binding_id':identity['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
             raise PeerError('invalid_ack','节点能力回执与当前绑定不一致')
-        identity.update(ready=True,skill_version=claim['skill_version'])
-        if identity.get('binding_source')=='approved_node_public_key':
-            identity['delivery_status']='registered'
-            pending=local.get('peer_enrollment_request',identity.get('enrollment_request_id',''))
-            if pending and pending.get('status')=='registry_pending':
-                local.put('peer_enrollment_request',pending['request_id'],{**pending,'status':'approved'})
-        local.put('peer_identity',node['node_id'],identity)
-        return local.index_event(raw,backends.payload(raw))
+        with _LOCK,db.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_identity' AND id=?",(node['node_id'],)).fetchone()
+            current=json.loads(row[0]) if row else {}
+            if current.get('binding_id')!=identity.get('binding_id') or current.get('public_key')!=identity.get('public_key'):
+                raise PeerError('identity_expired','节点绑定已变化，未用旧能力回执启用新身份')
+            indexed=local.index_event(raw,backends.payload(raw),connection=conn)
+            current.update(ready=True,skill_version=claim['skill_version'])
+            if current.get('binding_source')=='approved_node_public_key':
+                current['delivery_status']='registered'
+                request_id=current.get('enrollment_request_id','')
+                row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_enrollment_request' AND id=?",(request_id,)).fetchone()
+                pending=json.loads(row[0]) if row else None
+                if pending and pending.get('status')=='registry_pending':
+                    _transaction_put(conn,'peer_enrollment_request',request_id,{**pending,'status':'approved'})
+            _transaction_put(conn,'peer_identity',node['node_id'],current)
+            return indexed
     return None
 
 # Root includes this router; no unauthenticated node HTTP task channel.
@@ -370,12 +391,14 @@ def validate_result_origin(event,task):
 
 def _pending_public(value):
     return rdos_contract.public_view({key:value.get(key) for key in ('request_id','request_hash','node_id','task_id','requirements_version',
-        'public_key_fingerprint','confirmation_code','requested_at','status')},backends.get_backend().registry()) | {'resume_operation_id':value.get('approved_operation_id')}
+        'public_key_fingerprint','confirmation_code','requested_at','status','automatic_status','error_code','message')},backends.get_backend().registry()) | {'resume_operation_id':value.get('approved_operation_id')}
 
 
-def _enrollment_task(task,node_id,version):
+def _enrollment_task(task,node_id,version, *, allow_completed=False):
     from server.phase3_service import _validate_task
-    if (not isinstance(task,dict) or task.get('business_status')!='active' or task.get('requirements_version')!=version
+    completed = (isinstance(task,dict) and allow_completed and task.get('business_status')=='closed'
+        and task.get('close_reason') in ('completed','manual_completed'))
+    if (not isinstance(task,dict) or (task.get('business_status')!='active' and not completed) or task.get('requirements_version')!=version
             or node_id not in task.get('executor_node_ids',[]) or task.get('dispatch_source')=='peer'
             or rules.task_type(task)!='action'):
         raise PeerError('enrollment_not_authorized','接入申请需要当前有效、分配给本节点的中央 action 任务')
@@ -422,20 +445,42 @@ def _ingest_enrollment(raw,tasks):
     prior=local.get('peer_enrollment_request',request_id)
     if prior and (prior.get('request_hash')!=request_hash or prior.get('node_id')!=node['node_id']):
         raise PeerError('operation_conflict','相同接入申请标识出现不同内容')
+    if prior and raw.get('project_id')!=prior.get('project_id'):
+        raise PeerError('out_of_scope','接入申请不能借用其他项目任务')
+    admission=None
     if not prior:
         internal_ref=references[0]
         task=tasks.get(internal_ref['task_id']) or local.get('task_cache',internal_ref['task_id'])
         _enrollment_task(task,node['node_id'],internal_ref['requirements_version'])
         if raw['project_id']!=task['project_id']:
             raise PeerError('out_of_scope','接入申请不能借用其他项目任务')
+        admission={'requirements_version':task['requirements_version'],'record_revision':task['record_revision'],
+            'content_hash':central.digest(backends.payload(task))}
         fingerprint=hashlib.sha256(claim['public_key'].encode()).hexdigest()
         prior={'request_id':request_id,'request_hash':request_hash,'node_id':node['node_id'],'public_key':claim['public_key'],
             'task_id':task['task_id'],'requirements_version':internal_ref['requirements_version'],'project_id':task['project_id'],
             'public_key_fingerprint':fingerprint,'confirmation_code':'-'.join(fingerprint[index:index+4].upper() for index in (0,4,8)),
             'requested_at':claim['requested_at'],'status':'pending','source_event_id':raw['id'],
             'source_event_hash':central.digest(backends.payload(raw))}
-        local.immutable('peer_enrollment_request',request_id,prior)
-    return local.index_event(raw,backends.payload(raw))
+    with _LOCK,db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_enrollment_request' AND id=?",(request_id,)).fetchone()
+        current=json.loads(row[0]) if row else None
+        if current and (current.get('request_hash')!=request_hash or current.get('node_id')!=node['node_id']):
+            raise PeerError('operation_conflict','相同接入申请标识出现不同内容')
+        if current and raw.get('project_id')!=current.get('project_id'):
+            raise PeerError('out_of_scope','接入申请不能借用其他项目任务')
+        if not current:
+            # An active read before taking the database lock is insufficient:
+            # task completion or cancellation may have committed in between.
+            row=conn.execute("SELECT payload FROM phase3_local WHERE kind='task_head' AND id=?",(prior['task_id'],)).fetchone()
+            head=json.loads(row[0]) if row else {}
+            if admission is None or any(head.get(key)!=value for key,value in admission.items()):
+                raise PeerError('version_conflict','维护任务已变化，未用旧状态保存新的接入申请')
+        indexed=local.index_event(raw,backends.payload(raw),connection=conn)
+        if not current:
+            _transaction_put(conn,'peer_enrollment_request',request_id,prior)
+        return indexed
 
 
 def _transaction_put(conn,kind,identifier,value):
@@ -443,27 +488,113 @@ def _transaction_put(conn,kind,identifier,value):
         (kind,identifier,json.dumps(value,ensure_ascii=False),db.utc_now()))
 
 
+def _automatic_authority(pending,node,connection=None):
+    """Only published setup capabilities can bootstrap a node without review.
+
+    A title, ordinary action task or model-produced approval is not a setup
+    capability. Existing confirmed operations retain their original authority.
+    """
+    if pending.get('approved_operation_id'):
+        return 'saved_confirmation'
+    def value(table,kind,identifier):
+        if connection is None:
+            return (local if table=='phase3_local' else central).get(kind,identifier)
+        row=connection.execute('SELECT payload FROM '+table+' WHERE kind=? AND id=?',(kind,identifier)).fetchone()
+        return json.loads(row[0]) if row else None
+    plan=value('phase3_local','node_onboarding',node['node_id'])
+    if plan and (plan.get('node_id'),plan.get('task_id'),plan.get('project_id')) == (node['node_id'],pending.get('task_id'),pending.get('project_id')):
+        operation=value('central_records','operation',plan.get('operation_id','')) or {}
+        if operation.get('status')=='succeeded':return 'panel_node_onboarding'
+    # These already published setup tasks predate node_onboarding records.
+    # Keep the explicit bootstrap allowlist independent of deployment tooling.
+    fixed={'RDOS-2-UPGRADE-YUHAN':'node_yuhan',
+           'RDOS-2-UPGRADE-XIAOFEI':'node_xiaofei',
+           'RDOS-2-UPGRADE-DUODUO':'node_duoduo',
+           'task_p3_8ccef411212183445378':'node_yuhan',
+           'task_p3_d76092c54635179dff35':'node_499saukYcMK0PbxO',
+           'task_p3_4f77781acbfaeb64bbbd':'node_workbuddy'}
+    registry=backends.get_backend().registry()
+    public=rdos_contract.public_view({'node_id':node['node_id'],'project_id':pending.get('project_id')},registry)
+    if fixed.get(pending.get('task_id'))==public['node_id'] and public['project_id']=='project_rdos':
+        return 'registered_legacy_node_setup'
+    raise PeerError('setup_authority_missing','此任务没有节点接入配置授权，未自动登记')
+
+
+def _automatic_member(node,connection=None):
+    if connection is None:
+        member=central.user(node.get('member_id',''))
+        enabled=member and member.get('enabled') and set(member.get('roles',[])) & {'admin','researcher'}
+    else:
+        row=connection.execute('SELECT enabled,roles_json FROM central_users WHERE id=?',(node.get('member_id',''),)).fetchone()
+        enabled=row and row['enabled'] and set(json.loads(row['roles_json'])) & {'admin','researcher'}
+    if not enabled:raise PeerError('authorization_failed','节点所属账号未启用，未自动登记')
+
+
+def _automatic_competitors(connection,pending,node):
+    """Recheck competing admitted setup claims at the identity commit point."""
+    rows=connection.execute("SELECT payload FROM phase3_local WHERE kind='peer_enrollment_request'").fetchall()
+    for row in rows:
+        other=json.loads(row[0])
+        if (other.get('node_id')!=node['node_id'] or other.get('request_id')==pending['request_id']
+                or other.get('public_key')==pending['public_key'] or other.get('status') not in ('pending','registry_pending')):
+            continue
+        try:_automatic_authority(other,node,connection)
+        except PeerError:continue
+        project_row=connection.execute("SELECT payload FROM central_records WHERE kind='project' AND id=?",(other.get('project_id'),)).fetchone()
+        if not project_row or json.loads(project_row[0]).get('status')!='active':continue
+        head_row=connection.execute("SELECT payload FROM phase3_local WHERE kind='task_head' AND id=?",(other.get('task_id'),)).fetchone()
+        head=json.loads(head_row[0]) if head_row else {}
+        if head.get('requirements_version')!=other.get('requirements_version'):continue
+        cached_row=connection.execute("SELECT payload FROM phase3_local WHERE kind='task_cache' AND id=?",(other.get('task_id'),)).fetchone()
+        cached=json.loads(cached_row[0]) if cached_row else {}
+        if cached and (cached.get('business_status') not in ('active','closed') or
+                cached.get('business_status')=='closed' and cached.get('close_reason') not in ('completed','manual_completed')):
+            continue
+        raise PeerError('identity_already_bound','同一节点存在不同公钥的有效接入申请，未自动选择身份')
+
+
 async def approve_enrollment(node_id,actor,operation_id,request_id,expected_request_hash,rotate=False):
+    """Compatibility entry for old authenticated clients, not the normal flow."""
+    return await _confirm_enrollment(node_id,actor,operation_id,request_id,expected_request_hash,rotate)
+
+
+async def _confirm_enrollment(node_id,actor,operation_id,request_id,expected_request_hash,rotate=False,*,automatic=False):
     _require_runtime()
-    node=_node(node_id);user=_actor(actor,node)
+    node=_node(node_id)
+    user={'id':AUTOMATIC_REGISTRAR} if automatic else _actor(actor,node)
+    if automatic:_automatic_member(node)
     pending=local.get('peer_enrollment_request',request_id)
     if not pending or pending.get('node_id')!=node['node_id'] or pending.get('request_hash')!=expected_request_hash:
         raise PeerError('version_conflict','接入申请已变化，请重新核对当前申请')
+    authority=_automatic_authority(pending,node) if automatic else None
     request={'node_id':node['node_id'],'request_id':request_id,'request_hash':expected_request_hash,'actor_id':user['id'],'rotate':rotate}
+    if automatic:request.update(source='automatic_node_registration',authority=authority)
     requested_operation=local.get('peer_enrollment_operation',operation_id)
-    if requested_operation and requested_operation.get('request')!=request:
-        raise PeerError('operation_conflict','同一确认操作不能改用其他接入申请')
     canonical_id=pending.get('approved_operation_id')
     if canonical_id:
+        # A saved approval is being reconciled, not approved or rotated again.
+        # The current caller was authenticated above; retain the original
+        # approval's actor and rotation decision rather than deriving them from
+        # the now-changed card state. An operation belonging to any other
+        # application must still be rejected before following the canonical ID.
+        stable_keys=('node_id','request_id','request_hash')
+        if requested_operation and any((requested_operation.get('request') or {}).get(key)!=request.get(key)
+                                       for key in stable_keys):
+            raise PeerError('operation_conflict','同一确认操作不能改用其他接入申请')
         operation_id=canonical_id
         operation=local.get('peer_enrollment_operation',operation_id)
         original=(operation or {}).get('request',{})
-        if any(original.get(key)!=request.get(key) for key in ('node_id','request_id','request_hash')):
+        if any(original.get(key)!=request.get(key) for key in stable_keys):
             raise PeerError('operation_conflict','原归属确认依据不完整，未重新生成绑定')
         request=original
     else:
+        if requested_operation and requested_operation.get('request')!=request:
+            raise PeerError('operation_conflict','同一确认操作不能改用其他接入申请')
         operation=requested_operation
     if operation and operation.get('state')=='verified':
+        identity=local.get('peer_identity',node['node_id']) or {}
+        if identity.get('binding_id')!=operation.get('binding_id'):
+            raise PeerError('identity_expired','节点已被后续确认轮换，不重放旧绑定')
         return operation['result']
     if not operation:
         if pending.get('status') not in ('pending','registry_pending'):
@@ -474,41 +605,66 @@ async def approve_enrollment(node_id,actor,operation_id,request_id,expected_requ
             raise PeerError('invalid_enrollment','此申请不再等待确认')
         from server.phase3_service import _read_task
         current_task=await _read_task(pending['task_id'])
-        _enrollment_task(current_task,node['node_id'],pending['requirements_version'])
+        # This immutable, independently ingested request was authorized while the
+        # task was active. Finishing the node's setup must not revoke its
+        # already requested enrollment; cancellation still forbids new approval.
+        continuation = (current_task.get('business_status') == 'closed'
+            and current_task.get('close_reason') in ('completed', 'manual_completed')
+            and current_task.get('requirements_version') == pending['requirements_version'])
+        if continuation:
+            _enrollment_task(current_task,node['node_id'],pending['requirements_version'],allow_completed=True)
+        else:
+            _enrollment_task(current_task,node['node_id'],pending['requirements_version'])
         raw=[value for value in await asyncio.to_thread(backends.get_backend().list_events) if value.get('id')==pending['source_event_id']]
         if not raw or any(central.digest(backends.payload(value))!=pending['source_event_hash'] for value in raw):
             raise PeerError('version_conflict','接入申请原文尚未独立核对或已经变化')
         with _LOCK,db.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            user_row=conn.execute('SELECT enabled,roles_json FROM central_users WHERE id=?',(user['id'],)).fetchone()
-            if not user_row or not user_row['enabled'] or ('admin' not in json.loads(user_row['roles_json']) and node.get('member_id')!=user['id']):
-                raise PeerError('authorization_failed','当前账号不能确认此节点归属')
+            if not automatic:
+                user_row=conn.execute('SELECT enabled,roles_json FROM central_users WHERE id=?',(user['id'],)).fetchone()
+                if not user_row or not user_row['enabled'] or ('admin' not in json.loads(user_row['roles_json']) and node.get('member_id')!=user['id']):
+                    raise PeerError('authorization_failed','当前账号不能确认此节点归属')
             node_row=conn.execute("SELECT payload FROM phase3_local WHERE kind='node' AND id=?",(node['node_id'],)).fetchone()
-            if not node_row or not json.loads(node_row[0]).get('enabled',True):
+            current_node=json.loads(node_row[0]) if node_row else {}
+            if not current_node or not current_node.get('enabled',True):
                 raise PeerError('authorization_failed','节点已经停用，未确认新接入')
+            if automatic:
+                _automatic_member(current_node,conn)
             head_row=conn.execute("SELECT payload FROM phase3_local WHERE kind='task_head' AND id=?",(pending['task_id'],)).fetchone()
             head=json.loads(head_row[0]) if head_row else {}
-            if head.get('requirements_version')!=current_task['requirements_version'] or head.get('record_revision')!=current_task['record_revision']:
+            if (head.get('requirements_version')!=current_task['requirements_version'] or head.get('record_revision')!=current_task['record_revision']
+                    or head.get('content_hash')!=central.digest(backends.payload(current_task))):
                 raise PeerError('version_conflict','维护任务已变化，请重新核对接入申请')
             project_row=conn.execute("SELECT payload FROM central_records WHERE kind='project' AND id=?",(pending['project_id'],)).fetchone()
-            if not project_row or json.loads(project_row[0]).get('status')!='active':
+            current_project=json.loads(project_row[0]) if project_row else {}
+            if not current_project or current_project.get('status')!='active':
                 raise PeerError('out_of_scope','任务项目已经停用，未确认新接入')
+            if automatic and node['node_id'] not in current_project.get('node_ids',[]):
+                raise PeerError('out_of_scope','节点已不在配置任务的项目中，未自动登记')
             latest_row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_enrollment_request' AND id=?",(request_id,)).fetchone()
             latest=json.loads(latest_row[0]) if latest_row else {}
             if latest.get('approved_operation_id') and latest['approved_operation_id']!=operation_id:
                 raise PeerError('enrollment_confirmation_in_progress','另一归属确认已保存，请刷新后继续核对原申请')
             if latest.get('request_hash')!=expected_request_hash or latest.get('status') not in ('pending','registry_pending'):
                 raise PeerError('version_conflict','接入申请已由另一操作处理')
+            if automatic:_automatic_authority(latest,current_node,conn)
             prior_row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_identity' AND id=?",(node['node_id'],)).fetchone()
             previous=json.loads(prior_row[0]) if prior_row else None
             if previous and previous.get('public_key')!=pending['public_key'] and not rotate:
                 raise PeerError('identity_already_bound','节点已有其他绑定；请确认是否轮换')
-            identity={'node_id':node['node_id'],'binding_id':'binding_'+central.digest([node['node_id'],request_id,operation_id])[:24],
-                'public_key':pending['public_key'],'ready':False,'binding_source':'approved_node_public_key','enrollment_request_id':request_id,
-                'delivery_status':'registry_pending','issued_by':user['id'],'issued_at':db.utc_now()}
+            if automatic and not previous:_automatic_competitors(conn,pending,node)
+            if automatic and previous:
+                identity=copy.deepcopy(previous)
+            else:
+                identity={'node_id':node['node_id'],'binding_id':'binding_'+central.digest([node['node_id'],request_id,operation_id])[:24],
+                    'public_key':pending['public_key'],'ready':False,'binding_source':'approved_node_public_key','enrollment_request_id':request_id,
+                    'delivery_status':'registry_pending','issued_by':user['id'],'issued_at':db.utc_now()}
+                if automatic:identity['registration_source']='automatic_node_registration'
             operation={'request':request,'binding_id':identity['binding_id'],'state':'registry_pending'}
             _transaction_put(conn,'peer_identity',node['node_id'],identity)
-            _transaction_put(conn,'peer_enrollment_request',request_id,{**latest,'status':'registry_pending','approved_by':user['id'],'approved_operation_id':operation_id})
+            saved={**latest,'status':'registry_pending','approved_by':user['id'],'approved_operation_id':operation_id}
+            if automatic:saved.update(confirmation_source='automatic_node_registration',automatic_status='registry_pending',error_code='',message='正在自动完成登记。')
+            _transaction_put(conn,'peer_enrollment_request',request_id,saved)
             _transaction_put(conn,'peer_enrollment_operation',operation_id,operation)
     else:
         identity=local.get('peer_identity',node['node_id']) or {}
@@ -519,16 +675,111 @@ async def approve_enrollment(node_id,actor,operation_id,request_id,expected_requ
         return {'node_id':node.get('public_id',node['node_id']),'binding_id':operation['binding_id'],'status':'registry_pending',
             'readback_verified':False,'resume_operation_id':operation_id,'error_code':getattr(exc,'code','registry_unavailable'),
             'message':'归属确认已保存，登记尚未核对完成；稍后核对原申请，不需要重新生成身份。'}
-    identity=local.get('peer_identity',node['node_id']) or {}
-    if identity.get('binding_id')!=operation['binding_id']:
-        raise PeerError('identity_expired','节点绑定已变化，未覆盖新绑定')
-    identity['delivery_status']='registered';local.put('peer_identity',node['node_id'],identity)
-    latest=local.get('peer_enrollment_request',request_id)
-    local.put('peer_enrollment_request',request_id,{**latest,'status':'approved','registry_event_id':identifier})
-    result={'node_id':node.get('public_id',node['node_id']),'binding_id':identity['binding_id'],'status':'registered',
-        'registry_event_id':identifier,'readback_verified':True,'resume_operation_id':operation_id,'message':'节点归属已确认，等待节点自动回执。'}
-    local.put('peer_enrollment_operation',operation_id,{**operation,'state':'verified','result':result})
+    # A remote publication is not a license to overwrite a newer binding. Its
+    # local settlement is atomic even if another thread rotates or storage fails.
+    with _LOCK,db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_identity' AND id=?",(node['node_id'],)).fetchone()
+        identity=json.loads(row[0]) if row else {}
+        if identity.get('binding_id')!=operation['binding_id']:
+            raise PeerError('identity_expired','节点绑定已变化，未覆盖新绑定')
+        row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_enrollment_request' AND id=?",(request_id,)).fetchone()
+        latest=json.loads(row[0]) if row else {}
+        if (latest.get('request_hash')!=expected_request_hash or latest.get('node_id')!=node['node_id']
+                or latest.get('approved_operation_id')!=operation_id):
+            raise PeerError('operation_conflict','原登记申请已经变化，未覆盖其处理结果')
+        row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_enrollment_operation' AND id=?",(operation_id,)).fetchone()
+        current_operation=json.loads(row[0]) if row else {}
+        if (current_operation.get('binding_id')!=operation['binding_id']
+                or current_operation.get('request')!=operation.get('request')):
+            raise PeerError('operation_conflict','原登记操作已经变化，未覆盖其处理结果')
+        identity['delivery_status']='registered'
+        completed={**latest,'status':'approved','registry_event_id':identifier}
+        if automatic:completed.update(automatic_status='registered',error_code='',message='登记完成，互派就绪由节点回执确认。')
+        result={'node_id':node.get('public_id',node['node_id']),'binding_id':identity['binding_id'],'status':'registered',
+            'registry_event_id':identifier,'readback_verified':True,'resume_operation_id':operation_id,'message':'节点归属已确认，等待节点自动回执。'}
+        _transaction_put(conn,'peer_identity',node['node_id'],identity)
+        _transaction_put(conn,'peer_enrollment_request',request_id,completed)
+        _transaction_put(conn,'peer_enrollment_operation',operation_id,{**current_operation,'state':'verified','result':result})
     return result
+
+
+def _automatic_observation(request_id,status,code='',message=''):
+    with _LOCK,db.connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row=conn.execute("SELECT payload FROM phase3_local WHERE kind='peer_enrollment_request' AND id=?",(request_id,)).fetchone()
+        if not row:return
+        value=json.loads(row[0])
+        _transaction_put(conn,'peer_enrollment_request',request_id,{**value,'automatic_status':status,
+            'error_code':code,'message':message,'automatic_checked_at':db.utc_now()})
+
+
+def _automatic_error(exc):
+    code=getattr(exc,'code','registration_unavailable')
+    messages={'setup_authority_missing':'此任务不属于已登记的接入配置，未自动登记。',
+        'authorization_failed':'节点所属账号或节点已停用，登记未执行。',
+        'enrollment_not_authorized':'配置任务当前不允许登记，已保留原申请。',
+        'version_conflict':'配置任务或申请已变化，登记未执行。',
+        'identity_already_bound':'出现不同公钥的申请，原节点身份保持不变。',
+        'identity_expired':'原节点身份已经更换，未恢复旧身份。',
+        'out_of_scope':'节点项目当前不允许登记，已保留原申请。',
+        'operation_conflict':'登记申请或原操作存在冲突，未覆盖。'}
+    return code,messages.get(code,'自动登记尚未完成，下次同步将继续核对。')
+
+
+async def register_enrollments(project_id):
+    """Trusted sync stage; no model/HTTP argument can supply its authority.
+
+    Full table ingestion occurs first. Only configured setup capabilities are
+    eligible, so a batch never lets the first of competing keys win by order.
+    """
+    from server.phase3_service import _read_task
+    candidates=[];results=[];issues=0
+    for pending in local.items('peer_enrollment_request'):
+        if pending.get('project_id')!=project_id:continue
+        operation=local.get('peer_enrollment_operation',pending.get('approved_operation_id','')) or {}
+        if pending.get('status') not in ('pending','registry_pending') and not (
+                pending.get('status')=='approved' and operation and operation.get('state')!='verified'):
+            continue
+        try:
+            node=_node(pending['node_id']);_automatic_member(node)
+            _automatic_authority(pending,node)
+            if not pending.get('approved_operation_id'):
+                task=await _read_task(pending['task_id'])
+                continuation=(task.get('business_status')=='closed' and task.get('close_reason') in ('completed','manual_completed'))
+                _enrollment_task(task,node['node_id'],pending['requirements_version'],allow_completed=continuation)
+            candidates.append((pending,node))
+        except (ValueError,KeyError,TypeError) as exc:
+            code,message=_automatic_error(exc);_automatic_observation(pending['request_id'],'failed',code,message)
+            results.append({'request_id':pending['request_id'],'status':'failed','error_code':code});issues+=1
+    grouped={}
+    for pending,node in candidates:grouped.setdefault(node['node_id'],[]).append(pending)
+    for pending,node in candidates:
+        key=node['node_id']
+        with _LOCK:
+            if key in _AUTOMATIC_ACTIVE:
+                results.append({'request_id':pending['request_id'],'status':'in_progress'});continue
+            _AUTOMATIC_ACTIVE.add(key)
+        try:
+            identity=local.get('peer_identity',key)
+            keys={value['public_key'] for value in grouped[key]}
+            if (not identity and len(keys)>1) or (identity and identity.get('public_key')!=pending['public_key']):
+                raise PeerError('identity_already_bound','不同公钥的登记申请冲突')
+            opid=pending.get('approved_operation_id') or 'auto-enrollment:'+central.digest([key,pending['request_id'],pending['request_hash']])[:32]
+            result=await _confirm_enrollment(key,None,opid,pending['request_id'],pending['request_hash'],automatic=True)
+            state='registered' if result['readback_verified'] else 'registry_pending'
+            _automatic_observation(pending['request_id'],state,result.get('error_code',''),
+                '登记完成，互派就绪由节点回执确认。' if result['readback_verified'] else '正在核对自动登记结果，无需人工审核。')
+            results.append({'request_id':pending['request_id'],'status':state,'readback_verified':result['readback_verified']})
+            if not result['readback_verified']:issues+=1
+        except (ValueError,KeyError,TypeError) as exc:
+            code,message=_automatic_error(exc)
+            state='conflict' if code in ('identity_already_bound','operation_conflict','identity_expired') else 'failed'
+            _automatic_observation(pending['request_id'],state,code,message)
+            results.append({'request_id':pending['request_id'],'status':state,'error_code':code});issues+=1
+        finally:
+            with _LOCK:_AUTOMATIC_ACTIVE.discard(key)
+    return {'items':results,'issue_count':issues}
 
 
 class EnrollmentApproval(IdentityRequest):

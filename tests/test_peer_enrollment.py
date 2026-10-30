@@ -24,10 +24,8 @@ class EnrollmentSkillTest(unittest.TestCase):
         self.transport.lose_response=True
         first=self.workflow.enroll_peer(ordinary['task_id'])
         self.assertEqual(first['status'],'pending_confirmation')
-        self.assertFalse(first['task_completion_allowed'])
-        with self.assertRaises(node.WorkflowError) as waiting:
-            self.workflow.submit(ordinary['task_id'],'completed','已提交公钥申请','premature-completion')
-        self.assertEqual(waiting.exception.code,'enrollment_pending')
+        self.assertTrue(first['task_completion_allowed'])
+        self.workflow.ensure_peer_enrollment_completion(ordinary['task_id'])
         self.assertTrue(first['readback_verified'])
         self.assertNotIn('private',json.dumps(first))
         pointer=self.workflow.state.get('operations','peer_enrollment_current')
@@ -54,7 +52,7 @@ class EnrollmentSkillTest(unittest.TestCase):
         self.assertEqual(installed['private_key'],operation['private_key'])
         self.assertEqual(installed['binding_id'],'binding_approved')
         ack=[json.loads(item['fields']['记录数据']) for item in self.transport.events if item['fields']['类型']=='peer_capability_ack'][0]
-        self.assertEqual(json.loads(ack['peer_ack']['payload_json'])['skill_version'],'1.1.3')
+        self.assertEqual(json.loads(ack['peer_ack']['payload_json'])['skill_version'],'1.2.0')
         self.workflow.check();self.assertEqual(self.transport.append_count,2)
 
     def test_invalid_task_cannot_generate_a_new_key(self):

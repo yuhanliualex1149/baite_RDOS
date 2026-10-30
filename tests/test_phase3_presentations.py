@@ -42,24 +42,23 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
-    def test_agent_only_check_has_no_human_note_and_human_close_has_summary(self):
+    def test_agent_only_check_has_no_human_note_and_manual_complete_has_summary(self):
         self.check('''
 async def scenario():
     task=await start()
     assert not local.items('presentation')
     document=await artifact(task)
-    await submit(task,document)
+    await submit(task,document,result_status='partial')
     await service.refresh(admin,'summary-refresh')
     current=backend3.read_task(task['id'])
-    closed=await service.apply_task_action(task['id'],'accept_close',{
-        'artifact_id':document['id'],'artifact_revision':document['revision'],'artifact_hash':document['content_hash']},
+    closed=await service.apply_task_action(task['id'],'manual_complete',{},
         admin,'summary-close',current['record_revision'],1)
     summary=local.get('presentation',task['id']+'@1:closed')
     assert summary and summary['status']=='verified',summary
     actual=backend3.read_document(summary['document_id'])
-    assert closed['quality_status']=='accepted'
-    assert '管理员已确认当前提交' in actual['content']
-    assert document['content_hash'] not in actual['content'] and closed['decision']['actor_id'] not in actual['content']
+    assert 'quality_status' not in closed and closed['close_reason']=='manual_completed'
+    assert '管理员已标记工作完成' in actual['content']
+    assert document['content_hash'] not in actual['content'] and closed['manual_completion']['actor_id'] not in actual['content']
     assert actual['title'].startswith('工作总结｜') and 'role_test' not in actual['title']
 asyncio.run(scenario())
 ''')

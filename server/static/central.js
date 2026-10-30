@@ -89,7 +89,7 @@
     const workspaces=Object.values(state.workspaces);
     if(!workspaces.length)return null;
     const unique=name=>[...new Map(workspaces.flatMap(w=>list(w?.[name])).map(item=>[String(item.id||item.task_id||item.feedback_id),item])).values()];
-    return {tasks:unique('tasks'),task_drafts:unique('task_drafts'),feedback:unique('feedback'),proposals:unique('proposals')};
+    return {tasks:unique('tasks'),task_drafts:unique('task_drafts'),deleted_task_drafts:unique('deleted_task_drafts'),feedback:unique('feedback'),proposals:unique('proposals'),deleted_proposals:unique('deleted_proposals')};
   }
   const workError = () => state.projectId ? state.errors.workspace : state.errors.overview;
   const feedbackVersion = f => String(f.id||f.feedback_id||'')+':'+String(f.content_hash||'')+':'+String(f.record_version||f.revision||'');
@@ -268,7 +268,7 @@
     document.querySelectorAll('[aria-busy]').forEach(b=>{b.removeAttribute('aria-busy');if(b.tagName==='BUTTON')b.disabled=false;});state.session++;clearProject(true);state.user=null;state.projectId=null;state.projects=[];state.nodes=[];state.defaultFolderUrl="";state.projectInitialized=false;state.projectActionOps={};state.syncResults={};state.phase3SyncOperations={};phase3.syncing=false;state.showInactive=false;$('show-inactive-projects').checked=false;state.sources=[];state.overview=null;state.workspaces={};state.chatDrafts={};state.chatPending={};state.chatComposing=false;state.threadSelections={};state.runItems=[];state.runNext=null;state.runTotal=0;state.page=developerMode?'work':'projects';state.forms.clear();state.task=null;state.proposal=null;state.editProject=null;state.editUser=null;
     state.sourceOperation=null;state.proposalSourceChanged=null;state.diagnostics=null;state.diagnosticsLoading=false;state.diagnosticsError='';state.diagnosticsSeq++;$('diagnostics-details').open=false;put('diagnostics-result','');setText('diagnostics-status','');errorAt('diagnostics-error','');$('source-form').reset();show('source-form',false);errorAt('source-form-error','');setText('source-form-status','');
     clearInterval(state.refreshTimer);document.querySelectorAll('dialog[open]').forEach(d=>d.close());
-    for(const id of ['rodos-policy-conflict','rodos-policy-meta','rodos-policy-status','rodos-policy-error','rodos-memory-items','rodos-memory-preview','rodos-memory-status','rodos-memory-error','rodos-settings-error','rodos-schedules','rodos-active-maintenance','rodos-latest-inspection','rodos-inspection-history','people-list','knowledge-categories','knowledge-source','knowledge-list','knowledge-content','run-list','chosen-run-detail','source-list','runtime-state','project-health-list','project-list','thread-select','active-run','chat-status','chat-error','task-list','task-draft-list','feedback-list','proposal-list','diagnostics-result','diagnostics-status','diagnostics-error','onboarding-check-report','onboarding-prompt','project-prompt','project-instruction-link','phase3-history','proposal-review','phase3-action-preview','phase3-acceptance-artifact','phase3-acceptance-version','phase3-task-input','phase3-task-editable','phase3-task-node','project-members','task-members','task-project','task-current-project','password-target','confirm-message','confirm-error','chat-project','phase3-project']){const node=$(id);if(node){node.replaceChildren();delete node.dataset.rendered;}}for(const id of ['user-form','project-form','task-form','phase3-task-form','phase3-action-form','password-form']){$(id).reset();$(id).querySelectorAll('input,textarea,select').forEach(node=>node.disabled=false);}$('credential-username').value='';clearTimeout(state.toastTimer);setText('toast','');show('toast',false);
+    for(const id of ['rodos-policy-conflict','rodos-policy-meta','rodos-policy-status','rodos-policy-error','rodos-memory-items','rodos-memory-preview','rodos-memory-status','rodos-memory-error','rodos-settings-error','rodos-schedules','rodos-active-maintenance','rodos-latest-inspection','rodos-inspection-history','people-list','knowledge-categories','knowledge-source','knowledge-list','knowledge-content','run-list','chosen-run-detail','source-list','runtime-state','project-health-list','project-list','thread-select','active-run','chat-status','chat-error','task-list','task-draft-list','feedback-list','proposal-list','diagnostics-result','diagnostics-status','diagnostics-error','onboarding-check-report','onboarding-prompt','project-prompt','project-instruction-link','phase3-history','proposal-review','phase3-action-preview','phase3-task-input','phase3-task-editable','phase3-task-node','project-members','task-members','task-project','task-current-project','password-target','confirm-message','confirm-error','chat-project','phase3-project']){const node=$(id);if(node){node.replaceChildren();delete node.dataset.rendered;}}for(const id of ['user-form','project-form','task-form','phase3-task-form','phase3-action-form','password-form']){$(id).reset();$(id).querySelectorAll('input,textarea,select').forEach(node=>node.disabled=false);}$('credential-username').value='';clearTimeout(state.toastTimer);setText('toast','');show('toast',false);
     show('app-view',false);show('login-view');$('messages').replaceChildren();delete $('messages').dataset.rendered;$('chat-message').value='';$('credential-password').value='';$('user-password').value='';$('password-form').reset();if($('account-menu'))$('account-menu').open=false;setText('login-error',message);
   }
   function beginSession(user){resetSession();if(state.loginRecovery&&state.loginRecovery.userId!==user.id)state.loginRecovery=null;state.user=user;state.projectId=developerMode?(labInfo?.project_id||null):null;show('login-view',false);show('app-view');render();state.refreshTimer=setInterval(()=>{if(!document.hidden&&state.user){refresh();maybeCheck();}},30000);}
@@ -481,9 +481,26 @@
     const data=workData(),tasks=list(data?.tasks);setText('task-count',tasks.filter(t=>!withdrawn(t)).length+' 项有效');
     put('task-list',!data?unavailable():tasks.length?tasks.map(t=>'<article class="item-card '+(withdrawn(t)?'withdrawn':'')+'" data-key="task:'+esc(t.task_id)+'"><div class="row"><h3>'+esc(taskTitle(t))+'</h3>'+(withdrawn(t)?pill('已撤回'):['已发布','published','active'].includes(t.status)?'':pill(t.status))+'</div><div class="item-meta">'+(!state.projectId?'<span>'+esc(projectName(t.project_id))+'</span>':'')+'<span>适用：'+esc(list(t.member_ids).map(memberName).join('、')||'组织共享接入要求')+'</span>'+(t.updated_at||t.created_at?'<span>'+date(t.updated_at||t.created_at)+'</span>':'')+'</div><details><summary>查看任务要求</summary><div class="markdown-content">'+markdown(t.instructions)+'</div><p>版本 '+esc(t.version||1)+(t.task_kind==='onboarding'?' · '+esc(t.stage):'')+' · '+esc(t.nature||'一次性')+'</p><details><summary>任务标识与关联</summary><p class="mono">'+esc(t.task_id)+(t.related_task?' · '+esc(t.related_task):'')+'</p></details></details><div class="item-actions">'+link(t.source_url,'查看测试任务来源')+(!withdrawn(t)&&t.project_id?'<button class="quiet" data-edit-task="'+esc(t.task_id)+'" type="button">编辑任务</button><button class="quiet danger" data-withdraw-task="'+esc(t.task_id)+'" type="button">撤回任务</button>':'')+'</div></article>').join(''):empty('暂无已发布任务','可以新建任务，或请中央 Agent 起草。'));
   }
+  function draftControls(kind,item){
+    if(!admin()||item.status==='published'||item.publication_operation_id)return '';
+    return '<button class="quiet'+(item.status==='deleted'?'':' danger')+'" data-draft-kind="'+esc(kind)+'" data-draft-lifecycle="'+(item.status==='deleted'?'restore':'delete')+'" data-draft-id="'+esc(item.id)+'" type="button">'+(item.status==='deleted'?'恢复草稿':'删除草稿')+'</button>';
+  }
+  function deletedDrafts(kind,items){
+    const values=[...new Map(list(items).filter(item=>item.status==='deleted').map(item=>[item.id,item])).values()];
+    return values.length?'<details class="deleted-drafts"><summary>已删除草稿（'+values.length+'）</summary>'+values.map(item=>'<article class="item-card"><h3>'+esc(item.payload?.title||item.title||item.instructions||'草稿')+'</h3>'+draftControls(kind,item)+'</article>').join('')+'</details>':'';
+  }
+  async function changeDraftLifecycle(kind,id,action,button){
+    const data=workData(),pool=kind==='phase3'?[...phase3Drafts(),...list(phase3.data?.deleted_drafts)]:kind==='task-drafts'?[...list(data?.task_drafts),...list(data?.deleted_task_drafts)]:[...list(data?.proposals),...list(data?.deleted_proposals)];
+    const item=pool.find(item=>item.id===id);if(!item||!admin())return;
+    const c=context(),operationId=uid();confirm(action==='delete'?'删除这份草稿？':'恢复这份草稿？',action==='delete'?'草稿会移入已删除列表，历史保留；此前对话确认将失效。':'恢复后需要重新确认，旧授权不会恢复。',action==='delete'?'删除草稿':'恢复草稿',async()=>{
+      await api((kind==='phase3'?'/phase3/drafts/':'/'+kind+'/')+encodeURIComponent(id)+'/'+action+(kind==='phase3'?phase3Query():''),{method:'POST',body:{operation_id:operationId,expected_hash:item.draft_hash},timeout_ms:180000});
+      if(!current(c))return;if(kind==='phase3')await loadPhase3();else await refresh();toast(action==='delete'?'草稿已删除，可以恢复。':'草稿已恢复，请重新确认。');
+    });
+  }
   function renderTaskDrafts(){
-    const data=workData(),items=list(data?.task_drafts);setText('draft-count',items.filter(x=>x.status==='draft').length+' 待审阅');
-    put('task-draft-list',!data?unavailable():items.length?items.map(t=>'<article class="item-card" data-key="draft:'+esc(t.id)+'"><div class="row"><h3>'+esc(taskTitle(t))+'</h3>'+pill(t.publication_operation_id&&t.status!=='published'?'发布待核对':t.status==='draft'?'待审阅':t.status,t.status==='draft'?'warn':'')+'</div><p>'+esc(draftActionLabel(t))+' · '+(!state.projectId?esc(projectName(t.project_id))+' · ':'')+'适用：'+esc(list(t.member_ids).map(memberName).join('、')||'待确认')+'</p>'+(t.reason?'<p>理由：'+esc(t.reason)+'</p>':'')+(t.rejection_reason?'<p>退回说明：'+esc(t.rejection_reason)+'</p>':'')+'<details><summary>查看原任务与版本</summary><p>'+esc(t.task_id||'新任务')+(t.base_task_version?' · 原版本 '+esc(t.base_task_version):'')+'</p></details><div class="item-actions">'+(t.status!=='published'?'<button class="secondary" data-task-draft="'+esc(t.id)+'" type="button">'+(t.publication_operation_id?'检查发布结果':'审阅任务草稿')+'</button>'+(!t.publication_operation_id?'<button class="quiet danger" data-reject-task="'+esc(t.id)+'" type="button">退回修改</button>':''):link(t.source_url,'查看已发布任务'))+'</div></article>').join(''):empty('暂无任务草稿','可请中央 Agent 起草任务。'));
+    const data=workData(),items=list(data?.task_drafts).filter(item=>item.status!=='deleted');setText('draft-count',items.filter(x=>x.status==='draft').length+' 待审阅');
+    put('task-draft-list',!data?unavailable():items.length?items.map(t=>'<article class="item-card" data-key="draft:'+esc(t.id)+'"><div class="row"><h3>'+esc(taskTitle(t))+'</h3>'+pill(t.publication_operation_id&&t.status!=='published'?'发布待核对':t.status==='draft'?'待审阅':t.status,t.status==='draft'?'warn':'')+'</div><p>'+esc(draftActionLabel(t))+' · '+(!state.projectId?esc(projectName(t.project_id))+' · ':'')+'适用：'+esc(list(t.member_ids).map(memberName).join('、')||'待确认')+'</p>'+(t.reason?'<p>理由：'+esc(t.reason)+'</p>':'')+(t.rejection_reason?'<p>退回说明：'+esc(t.rejection_reason)+'</p>':'')+'<details><summary>查看原任务与版本</summary><p>'+esc(t.task_id||'新任务')+(t.base_task_version?' · 原版本 '+esc(t.base_task_version):'')+'</p></details><div class="item-actions">'+(t.status!=='published'?'<button class="secondary" data-task-draft="'+esc(t.id)+'" type="button">'+(t.publication_operation_id?'检查发布结果':'审阅任务草稿')+'</button>'+(!t.publication_operation_id?'<button class="quiet danger" data-reject-task="'+esc(t.id)+'" type="button">退回修改</button>':''):link(t.source_url,'查看已发布任务'))+draftControls('task-drafts',t)+'</div></article>').join(''):empty('暂无任务草稿','可请中央 Agent 起草任务。'));
+    put('task-draft-list',$('task-draft-list').innerHTML+deletedDrafts('task-drafts',[...list(data?.task_drafts),...list(data?.deleted_task_drafts)]));
   }
   function draftActionLabel(t){return ({create:'新建任务',update:'修改任务',withdraw:'停用任务'})[t?.draft_action]||'任务草稿';}
   const feedbackSectionLabels={progress:'当前进度',outputs:'本期成果',blockers:'需要协作',human_gate:'评审与确认线索',skill_rag:'Skill／RAG 使用',local_skill:'本地 Skill 更新'};
@@ -518,8 +535,9 @@
   }
   function proposalTargetDisplay(p){return p.target_kind==='template'?esc(proposalTarget(p))+'（本地模板）':link(p.source_url,proposalTarget(p))||esc(proposalTarget(p));}
   function renderProposals(){
-    const data=workData(),items=list(data?.proposals);setText('proposal-count',items.filter(p=>p.status==='draft').length+' 待审阅');
-    put('proposal-list',!data?unavailable():items.length?items.map(p=>'<article class="item-card" data-key="proposal:'+esc(p.id)+'"><div class="row"><h3>'+esc(p.title||proposalTarget(p))+'</h3>'+pill(p.publication_operation_id&&p.status!=='published'?'发布待核对':p.status==='draft'?'待审阅':p.target_kind==='template'&&p.status==='published'?'已生效':p.status,p.status==='draft'?'warn':'')+'</div><p>'+(!state.projectId?'<span class="small-note">'+(p.target_kind==='template'?'组织共用指令':esc(projectName(p.project_id)))+' · </span>':'')+proposalTargetDisplay(p)+'</p><div class="markdown-content">'+markdown(summary(p.summary,200))+'</div><details><summary>查看修改依据</summary>'+evidenceContent(p.evidence)+'</details>'+(p.rejection_reason?'<p>退回说明：'+esc(p.rejection_reason)+'</p>':'')+(p.status==='published'?'<p>'+(p.target_kind==='template'?'后续使用：':'采用效果：')+esc(p.adoption_status||'尚待后续反馈核对')+'</p>':'')+'<div class="item-actions"><button class="secondary" data-proposal="'+esc(p.id)+'" type="button">'+(p.status==='published'?'查看修改':'审阅草稿')+'</button></div></article>').join(''):empty('暂无方法建议','可与中央 Agent 讨论改进。'));
+    const data=workData(),items=list(data?.proposals).filter(item=>item.status!=='deleted');setText('proposal-count',items.filter(p=>p.status==='draft').length+' 待审阅');
+    put('proposal-list',!data?unavailable():items.length?items.map(p=>'<article class="item-card" data-key="proposal:'+esc(p.id)+'"><div class="row"><h3>'+esc(p.title||proposalTarget(p))+'</h3>'+pill(p.publication_operation_id&&p.status!=='published'?'发布待核对':p.status==='draft'?'待审阅':p.target_kind==='template'&&p.status==='published'?'已生效':p.status,p.status==='draft'?'warn':'')+'</div><p>'+(!state.projectId?'<span class="small-note">'+(p.target_kind==='template'?'组织共用指令':esc(projectName(p.project_id)))+' · </span>':'')+proposalTargetDisplay(p)+'</p><div class="markdown-content">'+markdown(summary(p.summary,200))+'</div><details><summary>查看修改依据</summary>'+evidenceContent(p.evidence)+'</details>'+(p.rejection_reason?'<p>退回说明：'+esc(p.rejection_reason)+'</p>':'')+(p.status==='published'?'<p>'+(p.target_kind==='template'?'后续使用：':'采用效果：')+esc(p.adoption_status||'尚待后续反馈核对')+'</p>':'')+'<div class="item-actions"><button class="secondary" data-proposal="'+esc(p.id)+'" type="button">'+(p.status==='published'?'查看修改':'审阅草稿')+'</button>'+draftControls('proposals',p)+'</div></article>').join(''):empty('暂无方法建议','可与中央 Agent 讨论改进。'));
+    put('proposal-list',$('proposal-list').innerHTML+deletedDrafts('proposals',[...list(data?.proposals),...list(data?.deleted_proposals)]));
   }
   function memberNodes(user){
     const linked=[...list(user.nodes),...registeredNodes().filter(node=>node.member_id===user.id)];
@@ -633,7 +651,7 @@
   function maintenanceCard(run,details=false){
     if(!run)return empty('尚无检查简报');
     const report=run.inspection||{},issues=list(report.issues),isActive=['queued','running','draining'].includes(run.status);
-    return '<article class="item-card" data-key="maintenance:'+esc(run.id)+'"><div class="row"><b>'+esc(run.kind==='inspection'?'系统检查':'飞书全量刷新')+'</b>'+pill(run.status==='partial'?'部分完成':run.status,isActive?'warn':'')+'</div><p>'+esc(run.summary||(isActive?'已启动，尚未完成。':'结果待核对。'))+'</p><p class="small-note">'+date(run.completed_at||run.created_at)+(run.missed?' · 恢复后补跑':'')+'</p>'+issues.map(i=>'<p class="form-error">'+esc(i.summary)+'</p>').join('')+(report.projects?'<p>已查看 '+esc(report.projects.length)+' 个项目。</p>':'')+(details?'<details><summary>同步与检查详情</summary><p>同步阶段处理有效回执；诊断阶段只读。</p><pre>'+esc(safeJSON({sources:run.results,inspection:run.inspection,stage:run.stage}))+'</pre></details>':'<button class="quiet" data-rodos-run="'+esc(run.id)+'" type="button">查看详情</button>')+'</article>';
+    return '<article class="item-card" data-key="maintenance:'+esc(run.id)+'"><div class="row"><b>'+esc(run.kind==='inspection'?'系统检查':'飞书全量刷新')+'</b>'+pill(run.status==='partial'?'部分完成':run.status,isActive?'warn':'')+'</div><p>'+esc(run.summary||(isActive?'已启动，尚未完成。':'结果待核对。'))+'</p><p class="small-note">'+date(run.completed_at||run.created_at)+(run.missed?' · 恢复后补跑':'')+'</p>'+issues.map(i=>'<p class="form-error">'+esc(i.summary)+'</p>').join('')+(report.projects?'<p>已查看 '+esc(report.projects.length)+' 个项目。</p>':'')+(run.kind!=='inspection'?'':details?'<details><summary>同步与检查详情</summary><p>同步阶段处理有效回执；诊断阶段只读。</p><pre>'+esc(safeJSON({sources:run.results,inspection:run.inspection,stage:run.stage}))+'</pre></details>':'<button class="quiet" data-rodos-run="'+esc(run.id)+'" type="button">查看详情</button>')+'</article>';
   }
   function renderRodos(){
     const data=rodos.maintenance;
@@ -694,7 +712,9 @@
     const pending=request.status==='registry_pending';
     confirm(pending?'核对节点登记？':node.bound?'更换这个节点的身份？':'确认这个节点的接入申请？',pending?'只核对原确认结果，不重新生成节点身份。':'请核对节点对话中的登记码 '+request.confirmation_code+'。私钥始终留在节点，不需要传递文件。'+(node.bound?'原身份将失效。':''),pending?'核对登记':'确认绑定',async()=>{
       const c=context(),key='peer:'+requestId,op=request.resume_operation_id||rodos.maintenanceOps[key]||(rodos.maintenanceOps[key]=uid());
-      const result=await api('/peer/nodes/'+encodeURIComponent(nodeId)+'/approve-enrollment',{method:'POST',body:{operation_id:op,request_id:requestId,expected_request_hash:request.request_hash,rotate:!!node.bound}});if(!sameSession(c))return;
+      const body={operation_id:op,request_id:requestId,expected_request_hash:request.request_hash};
+      if(!pending)body.rotate=!!node.bound;
+      const result=await api('/peer/nodes/'+encodeURIComponent(nodeId)+'/approve-enrollment',{method:'POST',body});if(!sameSession(c))return;
       if(result.readback_verified)delete rodos.maintenanceOps[key];
       toast(result.readback_verified?'节点归属已确认。中央已发布登记，节点下次检查会自动完成核对。':'归属确认已保存，登记结果仍待核对；不需要重新生成身份。');await loadRodos();
     });
@@ -704,7 +724,11 @@
     if(!record)return '';
     if(record.runtime_available===false)return '<span class="small-note">'+esc(record.disabled_reason||'互派暂未启用')+'</span>';
     const pending=list(record.pending_requests).filter(r=>['pending','registry_pending'].includes(r.status));
-    return '<span class="small-note">'+(record.ready?'互派已启用':record.bound?'已确认，待节点核对':pending.some(r=>r.status==='registry_pending')?'登记结果待核对':pending.length?'节点申请待确认':'等待节点自动登记')+'</span>'+pending.map(r=>'<span class="small-note">登记码 '+esc(r.confirmation_code)+' · '+date(r.requested_at)+'</span><button class="quiet" data-peer-approve="'+esc(nodeId)+'" data-peer-request="'+esc(r.request_id)+'" type="button">'+(r.status==='registry_pending'?'核对登记结果':record.bound?'确认更换身份':'确认节点归属')+'</button>').join('');
+    const failure=pending.find(r=>['conflict','failed'].includes(r.automatic_status)),abnormal=['conflict','failed'].includes(record.registration_status)||!!record.registration_error||!!failure;
+    const error=record.registration_error||failure?.message||'';
+    const registering=record.registration_status==='registry_pending'||pending.some(r=>r.status==='registry_pending');
+    const label=record.ready?'互派已启用':record.bound?'登记完成（互派待就绪）':abnormal?'登记异常':registering?'正在登记':pending.length?'待自动登记':'互派未启用';
+    return '<span class="small-note">'+esc(label)+'</span>'+(abnormal&&error?'<span class="small-note">'+(label==='登记异常'?'':'登记异常：')+esc(error)+'</span>':'');
   }
   function renderPeople(){
     put('people-list',!state.loaded.users&&!state.overview?unavailable():allUsers().map(u=>'<article class="item-card member-card'+(u.enabled===false?' member-inactive':'')+'" data-key="user:'+esc(u.id)+'"><div class="member-identity"><h3>'+esc(displayName(u))+'</h3><small>'+esc(u.username)+'</small><div class="badge-row">'+list(u.roles).map(r=>pill(r)).join('')+(u.enabled===false?pill('已停用'):'')+(developerMode&&u.identity_mode==='role_test'?pill('角色测试','warn'):'')+'</div></div><div class="member-actions" role="group" aria-label="'+esc(displayName(u))+'的账号操作"><button class="quiet" data-edit-user="'+esc(u.id)+'" type="button">编辑资料</button>'+(u.id!==state.user?.id&&u.enabled!==false?'<button class="quiet" data-reset-password="'+esc(u.id)+'" type="button">重置密码</button>':'')+'<button class="quiet'+(u.enabled===false?'':' danger')+'" data-user-enabled="'+esc(u.id)+'" type="button">'+(u.enabled===false?'重新启用':'停用账号')+'</button></div>'+memberNodes(u).map(node=>'<div class="member-node"><div class="member-node-heading"><b>'+esc(node.display_name||node.label||'Local Agent')+'</b><small>'+esc(phase3NodeId(node))+'</small></div><div class="member-node-actions"><button class="secondary" data-phase3-copy="'+esc(phase3NodeId(node))+'" type="button">复制接入短指令</button>'+peerBindingButton(phase3NodeId(node))+'</div></div>').join('')+'</article>').join('')||empty('暂无成员记录'));
@@ -1034,7 +1058,7 @@
   }
   // Phase 3 keeps business state and node receipts separate. Reads below use
   // cached Panel data; only the explicit sync action reads Feishu.
-  const phase3Status = task => task?.business_status==='pending_review'&&!humanQuality(task)?'结果待核对':({draft:'草稿',active:'已启动',pending_review:'待质量审阅',paused:'已暂停',closed:'已结束'})[task?.business_status]||'待核对';
+  const phase3Status = task => ({draft:'草稿',active:'已启动',pending_review:'结果待核对',paused:'已暂停',closed:'已结束'})[task?.business_status]||'待核对';
   const phase3TaskId = task => task?.task_id||task?.id||'';
   const phase3Tasks = () => list(phase3.data?.tasks);
   const phase3Drafts = () => list(phase3.data?.drafts);
@@ -1051,8 +1075,7 @@
   const phase3Nodes = () => {const ids=state.projects.find(p=>p.id===state.projectId)?.node_ids;return registeredNodes().filter(n=>!Array.isArray(ids)||ids.includes(phase3NodeId(n)));};
   const phase3NodeId = node => node?.public_id||node?.node_id||node?.id||'';
   const phase3NodeName = id => {const node=registeredNodes().find(n=>[n.public_id,n.node_id,n.id].includes(id));return node?.display_name||node?.label||id||'未指定节点';};
-  const humanQuality = task => ['human','human_review'].includes(task?.completion_rule?.kind);
-  const taskTypeName = value => ({action:'执行动作',deliverable:'制作成果',review:'Agent Review'})[value]||'执行动作';
+  const taskTypeName = value => ({action:'执行动作',deliverable:'制作成果',review:'执行动作'})[value]||'执行动作';
   const audienceName = value => ({admin:'管理员',project_members:'项目成员',researcher:'对应研发人员'})[value]||value;
   function phase3Links(){
     const found=new Set();
@@ -1077,7 +1100,7 @@
 
   function phase3Requirements(task){
     const refs=list(task.input_refs).map(ref=>{const d=phase3Documents().find(d=>d.id===ref.document_id||d.object_id===ref.document_id);return '<li>'+esc(d?.title||'已登记资料')+' · 版本 '+esc(ref.revision)+' '+phase3Link(d?.source_url)+'</li>';}).join('');
-    const completion={receipt_recorded:'有效完成结果写回并核对后结束',human_review:'需要管理员审阅质量后验收',human:'需要管理员审阅成果质量后验收',artifact_present:'指定产物与版本核验后结束',source_versions_match:'指定输入资料版本核验后结束'}[task.completion_rule?.kind]||'有效完成结果写回并核对后结束';
+    const completion={receipt_recorded:'有效完成结果写回并核对后结束',artifact_present:'指定产物与版本核验后结束',source_versions_match:'指定输入资料版本核验后结束'}[task.completion_rule?.kind]||'有效完成结果写回并核对后结束';
     return '<dl class="phase3-meta"><dt>负责人</dt><dd>'+esc(task.owner_name||memberName(task.owner_id))+'</dd><dt>执行节点</dt><dd>'+list(task.executor_node_ids).map(id=>esc(phase3NodeName(id))).join('、')+'</dd><dt>任务类别</dt><dd>'+esc(taskTypeName(task.task_type))+'</dd><dt>目标与要求</dt><dd class="phase3-text">'+esc(task.goal)+'</dd><dt>交付要求</dt><dd class="phase3-text">'+esc(task.deliverable)+'</dd><dt>成果面向</dt><dd>'+list(task.deliverable_audience||['admin','project_members']).map(x=>esc(audienceName(x))).join('、')+'</dd><dt>下发／回传</dt><dd>'+list(task.dispatch_to).map(x=>x==='human'?'研发人员':'Agent').join('＋')+' ／ '+list(task.return_to).map(x=>x==='human'?'研发人员':'Agent').join('＋')+'</dd><dt>产物位置</dt><dd>'+(task.output_zone==='agent'?'Agent 协作区':'项目协作区')+'</dd><dt>完成方式</dt><dd>'+esc(completion)+'</dd></dl>'+(refs?'<h4>输入依据</h4><ul>'+refs+'</ul>':'')+(list(task.editable_document_ids).length?'<p class="small-note">允许局部修改：'+list(task.editable_document_ids).map(id=>esc(phase3Documents().find(d=>d.id===id||d.object_id===id)?.title||'已登记文档')).join('、')+'</p>':'')+(task.change_reason?'<p class="small-note">调整说明：'+esc(task.change_reason)+'</p>':'');
   }
   function phase3Receipts(task){
@@ -1089,13 +1112,13 @@
     return latest?'<p class="small-note">最近节点动态：'+esc(receiptNames[latest.event_type||latest.type])+' · '+esc(phase3NodeName(latest.node_id||latest.claimed_node_id))+(latest.created_at||latest.at?' · '+date(latest.created_at||latest.at):task.execution_result?.verified_at?' · 核对时间 '+date(task.execution_result.verified_at):' · 时间未提供')+'</p>':'<p class="small-note">'+(task.receipt_status==='verified'?'执行回执已核对':'等待读取与执行结果')+'</p>';
   }
   function phase3Execution(task){
+    if(task.business_status==='closed'&&task.close_reason==='manual_completed')return '<p class="small-note">管理员已标记完成。节点执行与回执保留实际记录。</p>';
     if(task.business_status==='closed'&&task.close_reason==='cancelled')return '<p class="small-note">已取消，停止派发。未将本任务标记为执行完成。</p>';
     const result=task.result_status||task.execution_result?.result_status;
     const status={completed:'动作完成',partial:'部分完成',blocked:'受阻'}[result]||'等待执行';
     const receipt=task.receipt_status==='verified'?'已写回并核对':task.submission_event_id?'已收到，待核对':'等待结果';
-    const quality={not_evaluated:'未作质量判断',pending_human:'等待管理员质量审阅',accepted:'已通过管理员质量验收'}[task.quality_status]||(humanQuality(task)?'按完成方式审阅':'未作质量判断');
     const text=task.execution_result?.summary||task.summary||'';
-    return '<div class="business-outcomes"><span>执行：'+esc(status)+'</span><span>回执：'+esc(receipt)+'</span><span>质量：'+esc(quality)+'</span></div>'+(text?'<p>'+esc(summary(text,220))+'</p>':'');
+    return '<div class="business-outcomes"><span>执行：'+esc(status)+'</span><span>回执：'+esc(receipt)+'</span></div>'+(text?'<p>'+esc(summary(text,220))+'</p>':'');
   }
   function renderCollaborationEvents(){
     const names={read:'读取回执',read_receipt:'读取回执',start:'开始工作',started:'开始工作',submission:'提交结果',review:'Agent 审阅',blocker:'问题反馈',blocked:'问题反馈',question:'澄清问题',clarification:'澄清记录',progress:'工作进展',correction:'更正记录',project_feedback:'项目反馈',paused_ack:'暂停回执',closed_ack:'结束回执',stop_ack:'停止回执',task_change:'任务更新',check_result:'核对结果'};
@@ -1120,21 +1143,22 @@
     setText('phase3-sync-last',(lastSuccess?'上次成功同步：'+date(lastSuccess):'尚无成功同步记录。')+(syncError?' 最近一次同步未完成：'+syncError:'')+(syncIssue?' '+syncIssue:''));
     $('phase3-sync-last').classList.toggle('sync-warning',!!syncIssue||!!syncError);
     if(!data){put('phase3-summary','<span class="small-note">'+(phase3.loading?'正在读取协作记录':'协作记录尚未读取')+'</span>');renderCollaborationEvents();renderSidebar();return;}
-    const tasks=phase3Tasks(),active=tasks.filter(t=>t.business_status!=='closed'),pending=tasks.filter(t=>t.business_status==='pending_review'&&humanQuality(t));
+    const tasks=phase3Tasks(),active=tasks.filter(t=>t.business_status!=='closed');
     const visibleTasks=navigation.showClosed?tasks:active;
-    put('phase3-summary','<b>'+esc(data.project?.name||data.project?.title||'项目协作')+'</b><p>'+active.length+' 项当前任务 · '+pending.length+' 项待质量审阅</p>');
+    put('phase3-summary','<b>'+esc(data.project?.name||data.project?.title||'项目协作')+'</b><p>'+active.length+' 项当前任务</p>');
     const zones=data.scope?.zones||{};
     put('phase3-zones',[['project','项目协作','项目依据与成果'],['agent','Agent 协作','任务登记与协作记录']].map(([key,title,description])=>'<article class="panel"><h2>'+title+'</h2><p>'+description+'</p>'+phase3Link(zones[key]?.source_url,'打开协作文件夹 ↗')+(key==='agent'?'<div class="project-links">'+phase3Link(data.scope?.task_table_url,'任务登记 ↗')+' '+phase3Link(data.scope?.event_table_url,'协作记录 ↗')+'</div>':'')+'</article>').join(''));
     put('phase3-tasks',visibleTasks.map(task=>{
       const id=phase3TaskId(task),status=task.business_status,closed=status==='closed';
       const projectInactive=!projectAllowsWork();
-      const buttons=!admin()||closed||task.integrity_error||projectInactive?'':(status==='paused'?'<button class="secondary" data-phase3-action="resume" data-phase3-id="'+esc(id)+'" type="button">恢复</button>':'<button class="quiet" data-phase3-action="pause" data-phase3-id="'+esc(id)+'" type="button">暂停</button>')+'<button class="quiet" data-phase3-edit="'+esc(id)+'" type="button">调整要求</button>'+(status==='pending_review'&&humanQuality(task)?'<button class="primary" data-phase3-action="accept_close" data-phase3-id="'+esc(id)+'" type="button">审阅质量并验收</button>':'')+'<button class="quiet danger" data-phase3-action="cancel" data-phase3-id="'+esc(id)+'" type="button">取消任务</button>';
+      const buttons=!admin()||closed||task.integrity_error||projectInactive?'':(status==='paused'?'<button class="secondary" data-phase3-action="resume" data-phase3-id="'+esc(id)+'" type="button">恢复</button>':'<button class="quiet" data-phase3-action="pause" data-phase3-id="'+esc(id)+'" type="button">暂停</button>')+'<button class="quiet" data-phase3-edit="'+esc(id)+'" type="button">调整要求</button>'+'<button class="secondary" data-phase3-action="manual_complete" data-phase3-id="'+esc(id)+'" type="button">标记完成</button>'+'<button class="quiet danger" data-phase3-action="cancel" data-phase3-id="'+esc(id)+'" type="button">取消任务</button>';
       const results=list(task.result_refs).map(ref=>{const d=phase3Documents().find(d=>d.id===ref.document_id||d.object_id===ref.document_id);return '<p>成果：'+esc(d?.title||'已提交成果')+' · v'+esc(ref.revision)+' '+phase3Link(ref.source_url||d?.source_url)+'</p>';}).join('');
-      return '<article class="item-card" data-key="phase3-task:'+esc(id)+'"><div class="row"><h3>'+esc(task.title)+'</h3>'+pill(phase3Status(task),status==='pending_review'&&humanQuality(task)?'warn':'')+'</div><div class="badge-row">'+pill('要求 v'+task.requirements_version)+pill(taskTypeName(task.task_type))+'</div>'+(task.integrity_error?'<p class="form-error" role="alert">任务记录存在冲突，已暂时停用操作。请联系管理员核对。</p>':'')+(task.input_refs_stale?'<p class="notice" role="status">输入资料已有变化，请核对是否需要调整任务。</p>':'')+phase3Execution(task)+results+'<details><summary>当前要求与依据</summary>'+phase3Requirements(task)+'</details>'+phase3Receipts(task)+(closed?'<p class="small-note">结束原因：'+esc(({completed:'完成',cancelled:'取消',replaced:'被替代',superseded:'被替代'})[task.close_reason]||task.closure_reason||'已结束')+'</p>':'')+(task.summary_stale?'<p class="form-error">执行说明或摘要需要刷新。</p>':'')+'<div class="item-actions">'+buttons+'<button class="quiet" data-phase3-history="'+esc(id)+'" type="button">版本与历史</button></div></article>';
+      return '<article class="item-card" data-key="phase3-task:'+esc(id)+'"><div class="row"><h3>'+esc(task.title)+'</h3>'+pill(phase3Status(task),status==='pending_review'?'warn':'')+'</div><div class="badge-row">'+pill('要求 v'+task.requirements_version)+pill(taskTypeName(task.task_type))+'</div>'+(task.integrity_error?'<p class="form-error" role="alert">任务记录存在冲突，已暂时停用操作。请联系管理员核对。</p>':'')+(task.input_refs_stale?'<p class="notice" role="status">输入资料已有变化，请核对是否需要调整任务。</p>':'')+phase3Execution(task)+results+'<details><summary>当前要求与依据</summary>'+phase3Requirements(task)+'</details>'+phase3Receipts(task)+(closed?'<p class="small-note">结束原因：'+esc(({completed:'完成',manual_completed:'管理员标记完成',cancelled:'取消',replaced:'被替代',superseded:'被替代'})[task.close_reason]||task.closure_reason||'已结束')+'</p>':'')+(task.summary_stale?'<p class="form-error">执行说明或摘要需要刷新。</p>':'')+'<div class="item-actions">'+buttons+'<button class="quiet" data-phase3-history="'+esc(id)+'" type="button">版本与历史</button></div></article>';
     }).join('')||empty(navigation.showClosed?'暂无已生效任务':'暂无进行中的任务',!navigation.showClosed&&tasks.length?'勾选“显示已关闭任务”可查看历史任务。':''));
-    put('phase3-drafts',phase3Drafts().filter(d=>d.status==='draft').map(d=>'<article class="item-card" data-key="phase3-draft:'+esc(d.id)+'"><div class="row"><h3>'+esc(d.payload?.title||d.title||'任务草稿')+'</h3>'+pill('尚未生效','warn')+'</div>'+phase3Requirements(d.payload||d)+'<p class="small-note">'+(d.base_requirements_version?'基于要求 v'+esc(d.base_requirements_version):'新任务草稿')+'</p><div class="item-actions"><button class="quiet" data-phase3-edit-draft="'+esc(d.id)+'" type="button"'+(!projectAllowsWork()?' disabled':'')+'>编辑草稿</button><button class="primary" data-phase3-draft="'+esc(d.id)+'" type="button"'+(!projectAllowsWork()?' disabled':'')+'>'+(d.base_requirements_version?'确认调整':'确认并开始')+'</button></div></article>').join('')||empty('暂无待确认草稿'));
+    put('phase3-drafts',phase3Drafts().filter(d=>d.status==='draft').map(d=>'<article class="item-card" data-key="phase3-draft:'+esc(d.id)+'"><div class="row"><h3>'+esc(d.payload?.title||d.title||'任务草稿')+'</h3>'+pill('尚未生效','warn')+'</div>'+phase3Requirements(d.payload||d)+'<p class="small-note">'+(d.base_requirements_version?'基于要求 v'+esc(d.base_requirements_version):'新任务草稿')+'</p><div class="item-actions"><button class="quiet" data-phase3-edit-draft="'+esc(d.id)+'" type="button"'+(!projectAllowsWork()?' disabled':'')+'>编辑草稿</button><button class="primary" data-phase3-draft="'+esc(d.id)+'" type="button"'+(!projectAllowsWork()?' disabled':'')+'>'+(d.base_requirements_version?'确认调整':'确认并开始')+'</button>'+draftControls('phase3',d)+'</div></article>').join('')||empty('暂无待确认草稿'));
+    put('phase3-drafts',$('phase3-drafts').innerHTML+deletedDrafts('phase3',[...phase3Drafts(),...list(data.deleted_drafts)]));
     put('phase3-documents',phase3ArtifactDocuments().map(d=>'<article class="item-card"><h3>'+esc(d.title||'项目文档')+'</h3><p class="small-note">版本 '+esc(d.revision??'待核对')+'</p>'+phase3Link(d.source_url)+'</article>').join('')||empty('尚无项目成果'));
-    const decisions=pending.map(t=>'<article class="item-card"><h3>'+esc(t.title)+'</h3><p>成果已提交，需要你审阅指定版本的质量。</p><button class="primary" data-phase3-action="accept_close" data-phase3-id="'+esc(phase3TaskId(t))+'" type="button">打开质量审阅</button></article>');
+    const decisions=[];
     tasks.filter(t=>t.result_status==='blocked'||t.result_status==='partial').forEach(t=>decisions.push('<p>「'+esc(t.title)+'」'+(t.result_status==='blocked'?'执行受阻':'部分完成')+'：'+esc(summary(t.execution_result?.summary||'请查看任务中的当前结果。',160))+'</p>'));
     list(data.operations).filter(o=>['failed','partial','uncertain','pending'].includes(o.status)).forEach(o=>decisions.push('<p class="form-error">'+esc(o.summary||'有一项操作尚未核对完成，请先检查已有结果。')+'</p>'));
     if(developerMode)decisions.push('<details><summary>开发原始记录</summary><pre>'+esc(safeJSON({quarantine:data.quarantine,operations:data.operations,events:data.events}))+'</pre></details>');
@@ -1157,52 +1181,30 @@
     const assigned=phase3Nodes().find(node=>list(p.executor_node_ids).some(id=>[node.public_id,node.node_id,node.id].includes(id)));
     $('phase3-task-node').value=phase3NodeId(assigned||phase3Nodes()[0]);$('phase3-task-zone').value=p.output_zone||'project';
     $('phase3-task-dispatch').value=list(p.dispatch_to).includes('human')?'both':'agent';$('phase3-task-return').value=list(p.return_to).length>1?'both':list(p.return_to)[0]||'both';
-    $('phase3-task-completion').value=p.completion_rule?.kind==='human_review'?'human':p.completion_rule?.kind||'receipt_recorded';
-    $('phase3-task-type').value=p.task_type||'action';$('phase3-task-audience').value=list(p.deliverable_audience||['admin','project_members']).join(',');
+    $('phase3-task-completion').value=['artifact_present','source_versions_match'].includes(p.completion_rule?.kind)?p.completion_rule.kind:'receipt_recorded';
+    $('phase3-task-type').value=p.task_type==='deliverable'?'deliverable':'action';$('phase3-task-audience').value=list(p.deliverable_audience||['admin','project_members']).join(',');
     put('phase3-task-input',phase3TaskDocuments().map(d=>'<option value="'+esc(d.id||d.object_id)+'">'+esc(d.title||d.id)+' · v'+esc(d.revision)+'</option>').join(''));
     [...$('phase3-task-input').options].forEach(o=>o.selected=list(p.input_refs).some(ref=>ref.document_id===o.value));$('phase3-task-change').value=p.change_reason||'';
     put('phase3-task-editable',phase3TaskDocuments().map(d=>'<option value="'+esc(d.id||d.object_id)+'">'+esc(d.title||d.id)+'</option>').join(''));
     [...$('phase3-task-editable').options].forEach(o=>o.selected=list(p.editable_document_ids).includes(o.value));
     show('phase3-task-change-label',!!task);errorAt('phase3-task-form-error','');rememberForm('phase3-task-dialog');open('phase3-task-dialog');
   }
-  function phase3Artifacts(task,action=phase3.action?.action){
-    const refs=action==='submit'?phase3Documents().filter(d=>d.zone===task?.output_zone||!d.zone).map(d=>({document_id:d.id||d.object_id,revision:d.revision,content_hash:d.content_hash,source_url:d.source_url})):list(task?.result_refs);
-    return refs.map(ref=>({...ref,id:ref.document_id,artifact_revision:ref.revision,artifact_hash:ref.content_hash}));
-  }
-  function phase3AcceptanceVersion(){
-    const recordReview=phase3.action?.action==='accept_close'&&(phase3.action?.task?.completion_rule?.kind==='human_review'||!!phase3.action?.task?.submission_evidence);
-    if(recordReview){
-      const review=phase3.action.task.completion_rule?.kind==='human_review';
-      const proof=(review?phase3.action.task.review_evidence:phase3.action.task.submission_evidence)||{};
-      const event=list(phase3.data?.events).find(e=>e.id===proof.event_id);
-      put('phase3-acceptance-version',event?'<b>已提交的'+(review?' Agent Review':'执行结果')+'</b><p>'+esc(summary(event.summary||event.execution_result?.summary||'请通过成果入口审阅本次提交。',300))+'</p>'+phase3Link(phase3.data?.scope?.event_table_url,'打开协作记录 ↗'):'结果尚未同步，请先核对协作记录。');
-      $('phase3-acceptance-reviewed').checked=false;return;
-    }
-    const a=phase3Artifacts(phase3.action?.task).find(a=>a.id===$('phase3-acceptance-artifact').value);
-    const d=phase3Documents().find(d=>d.id===a?.id||d.object_id===a?.id);
-    put('phase3-acceptance-version',a?'成果版本 '+esc(a.artifact_revision)+' '+phase3Link(a.source_url||d?.source_url):'尚无可绑定的已提交产物。请先核对飞书结果。');
-    $('phase3-acceptance-reviewed').checked=false;
-  }
   function showPhase3Action(task,action,draft=null){
-    if(!admin())return;
-    if(!task)return;
-    if(!projectAllowsWork()){errorAt('phase3-error','项目已停用或正在停用，任务暂时不能变更。历史记录仍可查看。');return;}
-    if(draft?.display_redacted){errorAt('phase3-error','草稿含已隐藏内容，无法完整审阅。请先清理敏感内容并重新保存草稿，再确认生效。');return;}
+    if(!admin()||!task)return;
+    if(!projectAllowsWork()){errorAt('phase3-error','项目已停用或正在停用，任务暂时不能变更。');return;}
+    if(draft?.display_redacted){errorAt('phase3-error','草稿含已隐藏内容，请清理后重新保存。');return;}
     phase3.action={task,action,draft,operation_id:uid()};$('phase3-action-form').reset();
-    const title={start:'审阅并开始任务',update:'审阅并应用调整',pause:'暂停任务',resume:'恢复当前版本',submit:'核对产物并提交验收',accept_close:'审阅指定版本并验收',cancel:'取消任务'}[action]||'核对任务动作';
+    const title={start:'确认并开始任务',update:'确认任务调整',pause:'暂停任务',resume:'恢复当前版本',manual_complete:'标记完成',cancel:'取消任务'}[action]||'核对任务动作';
     setText('phase3-action-heading',title);setText('phase3-action-submit',title);
     const payload=draft?.payload||task;
-    put('phase3-action-preview','<h3>'+esc(payload.title)+'</h3><p class="small-note">'+(draft?'草稿基于要求 v'+esc(draft.base_requirements_version||0)+'／记录修订 '+esc(draft.base_revision||0):'要求 v'+esc(task.requirements_version)+'／记录修订 '+esc(task.record_revision))+'</p>'+(['start','update'].includes(action)?phase3Requirements(payload):'<p>'+esc(action==='cancel'?'取消保留产物和历史，停止新增派发；客户端本地停止情况仍待回执。':action==='pause'?'暂停不代表已远程停止客户端；等待节点回执确认。':action==='resume'?'按当前有效要求恢复，旧版要求不会重新生效。':'验收只适用于以下已登记的具体产物版本。')+'</p>'));
-    show('phase3-action-reason-label',!['start','update'].includes(action));$('phase3-action-reason').required=action==='cancel';show('phase3-acceptance-fields',['submit','accept_close'].includes(action));
-    const tableReview=action==='accept_close'&&(task.completion_rule?.kind==='human_review'||!!task.submission_evidence);
-    $('phase3-acceptance-fields').querySelector('legend').textContent=tableReview?'审阅本次提交的成果':action==='submit'?'核对实际提交的产物版本':'质量验收对应的成果版本';
-    $('phase3-acceptance-reviewed').closest('label').classList.toggle('hidden',action!=='accept_close');
-    put('phase3-acceptance-artifact',phase3Artifacts(task).map(a=>{const d=phase3Documents().find(d=>d.id===a.id||d.object_id===a.id);return '<option value="'+esc(a.id)+'">'+esc(d?.title||a.id)+' · v'+esc(a.artifact_revision)+'</option>';}).join(''));
-    show('phase3-acceptance-artifact',!tableReview);
-    phase3AcceptanceVersion();errorAt('phase3-action-error','');rememberForm('phase3-action-dialog');open('phase3-action-dialog');
+    const periodic=!!task.periodicity||task.nature==='周期';
+    const impact=action==='manual_complete'?'将以管理员操作结束'+(periodic?'整个周期任务，后续不再产生本任务的新周期。':'这项任务。')+'节点执行和回执保留实际记录；共用定时安排不变。':action==='cancel'?'取消后保留产物和历史，停止新增派发；节点本地停止情况按实际回执记录。':action==='pause'?'暂停后等待节点下次检查；不代表节点已经停止。':'按当前有效要求恢复。';
+    put('phase3-action-preview','<h3>'+esc(payload.title)+'</h3><p class="small-note">'+(draft?'草稿基于要求 v'+esc(draft.base_requirements_version||0)+'／记录修订 '+esc(draft.base_revision||0):'要求 v'+esc(task.requirements_version)+'／记录修订 '+esc(task.record_revision))+'</p>'+(['start','update'].includes(action)?phase3Requirements(payload):'<p>'+esc(impact)+'</p>'));
+    show('phase3-action-reason-label',!['start','update'].includes(action));$('phase3-action-reason').required=action==='cancel';
+    errorAt('phase3-action-error','');rememberForm('phase3-action-dialog');open('phase3-action-dialog');
   }
   async function showPhase3History(id,button){
-    await busy(button,async()=>{const c=context();const data=await api('/phase3/tasks/'+encodeURIComponent(id)+'/history'+phase3Query());if(!current(c))return;const items=Array.isArray(data.items)?data.items:[...list(data.versions),...list(data.events),...(developerMode?list(data.operations):[])];put('phase3-history',items.length?items.map(item=>'<article class="item-card"><h3>'+esc(item.title||({submission:'执行结果',review:'Agent Review',task_change:'要求调整',read_receipt:'已读取',progress:'进展',blocker:'受阻',correction:'更正'}[item.event_type])||'历史记录')+'</h3><p class="small-note">要求 v'+esc(item.requirements_version??item.version??'—')+' · '+date(item.created_at||item.at||item.updated_at)+'</p>'+(item.payload?.goal?'<p class="phase3-text">'+esc(item.payload.goal)+'</p>':'')+(item.summary||item.execution_result?.summary?'<p>'+esc(summary(item.summary||item.execution_result.summary,240))+'</p>':'')+(item.change_reason?'<p>'+esc(item.change_reason)+'</p>':'')+(developerMode?'<details><summary>原始记录</summary><pre>'+esc(safeJSON(item))+'</pre></details>':'')+'</article>').join(''):empty('暂无历史记录'));open('phase3-history-dialog');},'phase3-error');
+    await busy(button,async()=>{const c=context();const data=await api('/phase3/tasks/'+encodeURIComponent(id)+'/history'+phase3Query());if(!current(c))return;const items=Array.isArray(data.items)?data.items:[...list(data.versions),...list(data.events),...(developerMode?list(data.operations):[])];put('phase3-history',items.length?items.map(item=>'<article class="item-card"><h3>'+esc(item.title||({submission:'执行结果',review:'执行动作',task_change:'要求调整',read_receipt:'已读取',progress:'进展',blocker:'受阻',correction:'更正'}[item.event_type])||'历史记录')+'</h3><p class="small-note">要求 v'+esc(item.requirements_version??item.version??'—')+' · '+date(item.created_at||item.at||item.updated_at)+'</p>'+(item.payload?.goal?'<p class="phase3-text">'+esc(item.payload.goal)+'</p>':'')+(item.summary||item.execution_result?.summary?'<p>'+esc(summary(item.summary||item.execution_result.summary,240))+'</p>':'')+(item.change_reason?'<p>'+esc(item.change_reason)+'</p>':'')+(developerMode?'<details><summary>原始记录</summary><pre>'+esc(safeJSON(item))+'</pre></details>':'')+'</article>').join(''):empty('暂无历史记录'));open('phase3-history-dialog');},'phase3-error');
   }
 
   $('phase3-project').addEventListener('change',()=>selectProject($('phase3-project').value,'collaboration'));
@@ -1231,30 +1233,10 @@
   $('phase3-action-form').addEventListener('submit',e=>{e.preventDefault();formAction('phase3-action-dialog','phase3-action-error',async c=>{
     const {task,action,draft,operation_id}=phase3.action;
     const payload=draft?{draft_id:draft.id,expected_hash:draft.draft_hash}:{reason:$('phase3-action-reason').value.trim()};
-    if(action==='submit'){
-      const artifact=phase3Artifacts(task).find(a=>a.id===$('phase3-acceptance-artifact').value);
-      if(!artifact)throw new APIError('尚无可核对的已登记产物，请先核对飞书原始记录。');
-      payload.result_refs=[{document_id:artifact.id,revision:artifact.artifact_revision,content_hash:artifact.artifact_hash}];
-    }
-    if(action==='accept_close'){
-      if(task.completion_rule?.kind==='human_review'){
-        const proof=task.review_evidence||{};
-        if(!proof.event_id||!list(phase3.data?.events).some(e=>e.id===proof.event_id)||!$('phase3-acceptance-reviewed').checked)throw new APIError('请先核对并审阅指定 Review，再确认质量验收。');
-        Object.assign(payload,{review_event_id:proof.event_id,review_hash:proof.content_hash});
-      }else if(task.submission_evidence){
-        const proof=task.submission_evidence||{};
-        if(!proof.event_id||!list(phase3.data?.events).some(e=>e.id===proof.event_id)||!$('phase3-acceptance-reviewed').checked)throw new APIError('请先核对本次成果，再确认质量验收。');
-        Object.assign(payload,{submission_event_id:proof.event_id,submission_hash:proof.content_hash});
-      }else{
-        const artifact=phase3Artifacts(task).find(a=>a.id===$('phase3-acceptance-artifact').value);
-        if(!artifact||!$('phase3-acceptance-reviewed').checked)throw new APIError('请先打开原文并审阅具体版本，再勾选本人验收。');
-        Object.assign(payload,{artifact_id:artifact.id,artifact_revision:artifact.artifact_revision,artifact_hash:artifact.artifact_hash});
-      }
-    }
+    if(action==='manual_complete'){payload.note=payload.reason;delete payload.reason;}
     await api('/phase3/tasks/'+encodeURIComponent(draft?.task_id||phase3TaskId(task))+'/actions/'+action+phase3Query(),{method:'POST',body:{operation_id,expected_revision:draft?Number(draft.base_revision||0):task.record_revision,expected_requirements_version:draft?Number(draft.base_requirements_version||0):task.requirements_version,payload},timeout_ms:180000});
     if(!sameSession(c))return;close('phase3-action-dialog',true);await loadPhase3();toast(action==='start'?'任务已生效；节点是否读取与执行等待真实回执。':action==='update'?'新要求已生效；节点是否改用新版等待读取回执。':action==='cancel'?'任务已取消；本地停止情况仍按实际节点回执核对。':'任务动作已记录并核对。');
   });});
-  $('phase3-acceptance-artifact').addEventListener('change',phase3AcceptanceVersion);
 
   $('login-form').addEventListener('submit',async e=>{
     e.preventDefault();const b=e.submitter;if(b.disabled)return;b.disabled=true;b.setAttribute('aria-busy','true');b.textContent='正在登录…';setText('login-error','');
@@ -1468,6 +1450,7 @@
     if(b.dataset.deactivateProject)deactivateProject(b.dataset.deactivateProject,b);
     if(b.dataset.reactivateProject)reactivateProject(b.dataset.reactivateProject);
     if(b.dataset.editTask)showTask(list(workData()?.tasks).find(t=>String(t.task_id)===b.dataset.editTask));
+    if(b.dataset.draftLifecycle)changeDraftLifecycle(b.dataset.draftKind,b.dataset.draftId,b.dataset.draftLifecycle,b);
     if(b.dataset.taskDraft)showTask(list(workData()?.task_drafts).find(t=>String(t.id)===b.dataset.taskDraft),'draft');
     if(b.dataset.withdrawTask){const t=list(workData()?.tasks).find(t=>String(t.task_id)===b.dataset.withdrawTask),op=uid(),c=context();if(!t?.project_id){errorAt('sync-feedback-error','无法确认这项任务所属项目，请刷新后重试。');return;}confirm('撤回这项任务？','任务将标记为已撤回，历史要求与反馈保留。','撤回任务',async()=>{await api('/tasks/'+encodeURIComponent(t.task_id)+'/withdraw',{method:'POST',body:{operation_id:op,project_id:t.project_id}});if(sameSession(c)){await refresh();toast('任务已撤回，历史记录保留。');}});}
     if(b.dataset.rejectTask)rejectTask(list(workData()?.task_drafts).find(t=>t.id===b.dataset.rejectTask));

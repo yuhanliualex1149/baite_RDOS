@@ -80,6 +80,11 @@ class CentralAgent:
         self.request_timeout = self._setting("BAITE_LLM_REQUEST_TIMEOUT", self.request_timeout, 1, 180, float)
         self.transport = transport
         self._policy_snapshot = None
+        self._context_binding = None
+
+    def bind_context(self, run: dict, actor: dict) -> None:
+        """Bind the real run, not model-supplied identity or conversation IDs."""
+        self._context_binding = (run, actor)
 
     def bind_policy(self, snapshot: dict[str, Any]) -> None:
         """Freeze the server-created run policy; edits affect the next run only."""
@@ -128,10 +133,9 @@ class CentralAgent:
                                 stage='request_interpretation') -> dict:
         """One tool-free interpretation response, charged to this run's budget.
 
-        This deliberately does not inject the business policy, memory, external
-        materials or assistant history. The caller supplies trusted request
-        metadata and a narrow parsing instruction; the result is not a tool
-        model's assertion that it has approved its own proposed write.
+        Duties, effective memory and full current-thread history use the same
+        input projection as the tool loop. They clarify intent but never grant
+        execution authority; the caller still validates the current request.
         """
         if not (self._local_mode() or self._live_mode()):
             deny('real_central_request_interpretation')
@@ -228,14 +232,8 @@ class CentralAgent:
     ) -> dict[str, Any]:
         if not (self._local_mode() or self._live_mode()):
             deny("real_central_model_run")
-        if self._policy_snapshot is None:
-            from server.central_settings import policy_snapshot
-            self.bind_policy(policy_snapshot())
-        policy = self._policy_snapshot
         started = time.monotonic()
         conversation = self._redact(copy.deepcopy(messages))
-        if not any(message.get("role") == "system" and message.get("content") == policy['content'] for message in conversation):
-            conversation.insert(0, {"role": "system", "content": policy['content']})
         allowed_tools = {
             tool["function"]["name"] for tool in tools
             if tool.get("type") == "function" and isinstance(tool.get("function"), dict)
@@ -284,7 +282,7 @@ class CentralAgent:
                         "usage": usage,
                         "messages": conversation,
                         "elapsed_seconds": round(time.monotonic() - started, 3),
-                        "agent_policy": {key: policy[key] for key in ('version', 'hash')},
+                        "agent_policy": {key: self._policy_snapshot[key] for key in ('version', 'hash')},
                     }
                 for call in calls:
                     await check_pause()
@@ -332,6 +330,10 @@ class CentralAgent:
         provider = "local_mock 模拟模型" if self._local_mode() else "真实模型"
         for attempt in range(2):
             await check_pause()
+            # Reproject immediately before every actual HTTP attempt, so a
+            # correction/forget cannot survive in an old retry/tool payload.
+            from server.central_model_context import assemble
+            request_payload = {**payload, 'messages': self._redact(assemble(self, payload['messages']))}
             remaining = self._remaining(deadline)
             if usage["model_calls"] >= self.max_model_calls:
                 raise AgentError("model_limit", "中央 Agent 已达到本次模型调用上限；请查看已完成步骤后再继续")
@@ -347,17 +349,19 @@ class CentralAgent:
                     from lab.guard import model_permit
                     with model_permit(self):
                         response = await asyncio.wait_for(
-                            client.post(f"{self.base_url}/chat/completions", json=payload, timeout=timeout),
+                            client.post(f"{self.base_url}/chat/completions", json=request_payload, timeout=timeout),
                             timeout=timeout,
                         )
                 else:
                     response = await asyncio.wait_for(
-                        client.post(f"{self.base_url}/chat/completions", json=payload, timeout=timeout),
+                        client.post(f"{self.base_url}/chat/completions", json=request_payload, timeout=timeout),
                         timeout=timeout,
                     )
                 if response.status_code in {401, 403}:
                     raise AgentError("model_auth", f"{provider}授权失败（HTTP {response.status_code}），请核对本机模型配置")
                 if not response.is_success:
+                    if self._context_capacity_error(response):
+                        raise AgentError('context_capacity', '完整对话与记忆超过模型接口容量；本次未裁剪历史，已有记录保留。请新建对话或调整模型容量后再试。')
                     retry = response.status_code in {429, 500, 502, 503, 504}
                     error = AgentError("model_http", f"{provider}请求失败（HTTP {response.status_code}）")
                 else:
@@ -382,6 +386,21 @@ class CentralAgent:
                         "stage_elapsed_seconds": round(time.monotonic() - request_started, 3)})
             await asyncio.sleep(min(0.25, self._remaining(deadline)))
         raise AgentError("model_network", "真实模型请求未完成")
+
+    @staticmethod
+    def _context_capacity_error(response) -> bool:
+        if response.status_code not in {400, 413, 422}:
+            return False
+        try:
+            data = response.json()
+        except ValueError:
+            return response.status_code == 413
+        error = data.get('error', data) if isinstance(data, dict) else {}
+        text = json.dumps(error, ensure_ascii=False).casefold()
+        return response.status_code == 413 or any(term in text for term in (
+            'context_length_exceeded', 'context_window_exceeded', 'maximum context length',
+            'context length', 'context window', 'input tokens exceed', 'input length exceeds',
+            'prompt is too long', '上下文长度', '上下文窗口'))
 
     @staticmethod
     def _message(payload: dict[str, Any]) -> tuple[dict[str, Any], Any]:

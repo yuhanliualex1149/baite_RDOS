@@ -626,6 +626,40 @@ def recall(actor, project_ids, query, limit=8):
     return [_public(item, user, model=True) for item in values[:limit]]
 
 
+def _render_memory(values):
+    """The complete current Markdown projection; no relevance or size cutoff."""
+    values = sorted(values, key=lambda item: (item['topic_key'], item['id']))
+    lines = ['# 中央共享记忆', '', '本文件由数据库自动生成，不是可独立修改的记忆来源。',
+             '管理员共用中央记忆；项目标记说明适用工作，不表示个人私有记忆。',
+             '本文件仅保存在受限运行目录，不进入公开下载或节点材料。', '']
+    for item in values:
+        applicability = item.get('applicability') or {}
+        label = ('[账号 ' + applicability.get('account_id', '') + ' 的约定] '
+                 if applicability.get('kind') == 'account' else
+                 '[项目 ' + item.get('project_id', '') + '] ' if item.get('scope') == 'project' else '[机构约定] ')
+        lines.extend(['## ' + label + item['topic'], '', item['content'], ''])
+    return '\n'.join(lines) + '\n'
+
+
+def model_snapshot(actor=None):
+    """Read the full effective DB view even if the generated file is stale.
+
+    An authenticated chat receives all memory readable by its account, rather
+    than only the selected project or query matches. Internal no-chat checks do
+    not borrow another person's conversation history.
+    """
+    if actor is None or actor.get('id') == runtime.SYSTEM_ID:
+        values = store.items(_MEMORY)
+    else:
+        _, _, values = _eligible(actor)
+    values = [item for item in values if item.get('status') == 'active']
+    values.sort(key=lambda item: (item['topic_key'], item['id']))
+    content = _render_memory(values)
+    return {'content': content, 'hash': store.digest(content),
+            'versions': {item['id']: item['version'] for item in values},
+            'items': [{'id': item['id'], 'version': item['version']} for item in values]}
+
+
 def search(actor, query='', project_id=None, include_history=False, *, allowed_projects=None):
     if not isinstance(query, str) or len(query) > 2000 or type(include_history) is not bool:
         _fail('invalid_memory', '记忆查询条件无效', 422)
@@ -864,28 +898,13 @@ def _write_summary():
         path.parent.mkdir(mode=0o700, exist_ok=True)
         path.parent.chmod(0o700)
         values = [item for item in store.items(_MEMORY) if item.get('status') == 'active']
-        values.sort(key=lambda item: (item['topic_key'], item['id']))
-        lines = ['# 中央共享记忆摘要', '', '本文件由数据库自动生成，不是可独立修改的记忆来源。',
-                 '管理员共用中央记忆；项目标记说明适用工作，不表示个人私有记忆。',
-                 '本文件仅保存在受限运行目录，不进入公开下载或节点材料。', '']
-        size = sum(len(line) for line in lines)
-        for item in values:
-            applicability = item.get('applicability') or {}
-            label = ('[账号 ' + applicability.get('account_id', '') + ' 的约定] '
-                     if applicability.get('kind') == 'account' else
-                     '[项目 ' + item.get('project_id', '') + '] ' if item.get('scope') == 'project' else '[机构约定] ')
-            row = '- ' + label + item['topic'].replace('\n', ' ') + '：' + item['content'].replace('\n', ' ')
-            if size + len(row) > 12000:
-                lines.append('- 其余有效记忆请按主题查询数据库。')
-                break
-            lines.append(row)
-            size += len(row)
+        content = _render_memory(values)
         temporary = path.with_name('memory.md.tmp')
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
             os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
-                output.write('\n'.join(lines) + '\n')
+                output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, path)

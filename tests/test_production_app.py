@@ -13,7 +13,7 @@ import unittest
 
 
 class FormalAppStartupTests(unittest.TestCase):
-    def test_existing_accounts_and_subpath_boot_without_lab_guard(self):
+    def _run_formal_fixture(self, *, migration_only=False):
         source = textwrap.dedent(r'''
             import hashlib, os, sqlite3, tempfile, subprocess, json
             from pathlib import Path
@@ -37,6 +37,23 @@ class FormalAppStartupTests(unittest.TestCase):
                         ('mem_g3nKLUxRovywCSTk', 'duoduo', 'Duoduo', '["researcher"]', 'placeholder', 'actual', 1, '2026-01-01'),
                     ])
                     conn.execute('CREATE TABLE central_records(kind TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(kind,id))')
+                    old_rule = '执行完成、回执已读回和质量评价分别记录；只有发布时明确要求人工质量验收的任务才交管理员判断。'
+                    old_policy = {'id':'central_agent_policy', 'version':7,
+                                  'content':'保留本人在线编辑的职责。\n'+old_rule,
+                                  'hash':'fixture-old-policy','source_kind':'panel_settings',
+                                  'updated_at':'2026-01-01','updated_by':'actual-admin'}
+                    custom_memory = {'id':'custom_memory','version':3,'topic':'持续偏好',
+                        'topic_key':'持续偏好','scope':'organization','status':'active',
+                        'content':'保留本人自己的表达与项目经验。','sources':[],
+                        'account_id':'','project_id':'','created_at':'2026-01-01','updated_at':'2026-01-01'}
+                    old_memory = {**custom_memory,'id':'old_rule_memory','topic':'任务完成规则',
+                                  'topic_key':'任务完成规则','content':old_rule,'version':2}
+                    for kind, identifier, value in (
+                        ('state','central_agent_policy',old_policy),
+                        ('central_memory',custom_memory['id'],custom_memory),
+                        ('central_memory',old_memory['id'],old_memory)):
+                        conn.execute('INSERT INTO central_records VALUES(?,?,?,?)',
+                                     (kind,identifier,json.dumps(value,ensure_ascii=False),'2026-01-01'))
                     finance = {'id': FINANCE_PROJECT, 'name': '原财赋项目', 'status': 'active',
                                'folder_id': FINANCE_FOLDER, 'member_ids': ['mem_x_rLn9VBAe_z8xol']}
                     conn.execute('INSERT INTO central_records VALUES(?,?,?,?)',
@@ -110,6 +127,26 @@ class FormalAppStartupTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 0, json.dumps(value), '')
                 with patch.object(phase3_feishu._CLIExecutor, 'identity', return_value={'account_fingerprint': fingerprint}), patch.object(phase3_feishu.subprocess, 'run', side_effect=transport):
                     with TestClient(app, root_path='/baite-rdos', base_url='https://yjmt.cn') as client:
+                        if os.environ.get('RDOS_TEST_FORMAL_MIGRATION') == '1':
+                            from server import central_store, central_settings, next_release_migration as migration
+                            current = central_settings.policy_snapshot()
+                            assert current['version']==8 and current['source_kind']=='release_migration'
+                            assert '保留本人在线编辑的职责。' in current['content']
+                            assert old_rule not in current['content']
+                            assert migration.RULE in current['content'] and migration.CONTEXT_RULE in current['content']
+                            assert central_store.get('central_agent_policy_history','7')==old_policy
+                            assert central_store.get('central_memory','custom_memory')==custom_memory
+                            changed = central_store.get('central_memory','old_rule_memory')
+                            assert changed['version']==3 and old_rule not in changed['content']
+                            assert any(x['content']==old_rule for x in central_store.items('central_memory_history'))
+                            assert policy.read_text().strip()==current['content']
+                            summary = (root/'central/memory.md').read_text()
+                            assert custom_memory['content'] in summary and old_rule not in summary
+                            assert central_store.get('state',migration.MIGRATION)
+                            assert migration.initialize()['reused']
+                            assert central_settings.policy_snapshot()==current
+                            assert not records[TASK_TABLE] and not records['tblFormalEvents123'] and not task_writes
+                            raise SystemExit(0)
                         page = client.get('/baite-rdos/')
                         assert page.status_code == 200, page.text[:300]
                         assert '<base href="/baite-rdos/" />' in page.text
@@ -223,7 +260,7 @@ class FormalAppStartupTests(unittest.TestCase):
                         assert synchronized.status_code == 200, synchronized.text[:500]
                         task = phase3_backend.get_backend().read_task(item['task_id'])
                         assert task['business_status']=='closed' and task['receipt_status']=='verified', phase3_store.items('quarantine')
-                        assert task['quality_status']=='not_evaluated'
+                        assert all(name not in task for name in ('quality_status','decision','review_evidence'))
                         assert all(o['status']=='succeeded' for o in central_store.items('operation')
                                    if o.get('prepared_event'))
                         settled = next(e for e in phase3_backend.get_backend().list_events()
@@ -250,9 +287,16 @@ class FormalAppStartupTests(unittest.TestCase):
         ''')
         env = dict(os.environ)
         env.pop('RDOS_LAB_RUNTIME', None)
+        env['RDOS_TEST_FORMAL_MIGRATION'] = '1' if migration_only else '0'
         result = subprocess.run([sys.executable, '-B', '-c', source], cwd=os.getcwd(),
                                 env=env, capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_existing_accounts_and_subpath_boot_without_lab_guard(self):
+        self._run_formal_fixture()
+
+    def test_formal_startup_migrates_existing_duties_and_memory_without_external_writes(self):
+        self._run_formal_fixture(migration_only=True)
 
 
 if __name__ == '__main__':

@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 
 try:
     import rdos_rules as rules
@@ -23,8 +24,10 @@ except ImportError:  # source checkout; released packages include this same file
 
 
 class WorkflowError(ValueError):
-    def __init__(self, code, message):
+    def __init__(self, code, message, *, write_outcome=None, details=None):
         self.code = code
+        self.write_outcome = write_outcome
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -65,6 +68,10 @@ def manifest_value(value):
         fail("invalid_manifest", "任务登记和协作记录必须是不同的表")
     value.setdefault("registered_resources", value.get("documents", []))
     value.setdefault("zones", {})
+    shared=value.get("shared_skills")
+    if shared is not None:
+        if not isinstance(shared,dict) or set(shared)!={"root_folder_id"}:fail("invalid_manifest","Shared Skills 来源格式无效")
+        identifier(shared.get("root_folder_id"))
     if not isinstance(value["registered_resources"], list) or not isinstance(value["zones"], dict):
         fail("invalid_manifest", "登记资料与产物位置格式无效")
     projects = project_entries(value)
@@ -116,19 +123,39 @@ class Feishu:
         try:
             completed = subprocess.run([self.binary, *args], input=content, text=True,
                 capture_output=True, timeout=60, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            fail("connection_failed", "飞书操作未完成；写入操作须先核对，不直接重发")
-        if completed.returncode:
-            fail("connection_failed", "飞书 CLI 失败；请检查当前用户授权和登记对象访问权限")
+        except (FileNotFoundError, PermissionError) as exc:
+            raise WorkflowError("connection_failed", "飞书 CLI 未能启动；修复现有连接后可恢复原操作",
+                write_outcome="not_sent", details={"category":"cli_not_started", "errno":exc.errno}) from None
+        except subprocess.TimeoutExpired:
+            raise WorkflowError("connection_failed", "飞书操作超时；先核对原操作，不直接重发",
+                write_outcome="unknown", details={"category":"timeout"}) from None
+        except OSError:
+            raise WorkflowError("connection_failed", "飞书操作中断；先核对原操作，不直接重发",
+                write_outcome="unknown", details={"category":"process_io_error"}) from None
         try:
             response = json.loads(completed.stdout)
         except ValueError:
-            fail("invalid_response", "飞书 CLI 未返回可核对的 JSON")
-        if not isinstance(response, dict): fail("invalid_response", "飞书 CLI 返回格式无效")
-        if response.get("ok") is False or response.get("code", 0) not in (0, None):
-            fail("connection_failed", "飞书拒绝操作；请检查授权，不扩大访问范围")
+            raise WorkflowError("connection_failed" if completed.returncode else "invalid_response",
+                "飞书 CLI 未返回可核对的结果；先核对原操作",
+                write_outcome="unknown", details={"category":"cli_failed" if completed.returncode else "invalid_response",
+                    "exit_code":completed.returncode}) from None
+        if not isinstance(response, dict):
+            raise WorkflowError("invalid_response", "飞书 CLI 返回格式无效", write_outcome="unknown",
+                details={"category":"invalid_response", "exit_code":completed.returncode})
+        if completed.returncode or response.get("ok") is False or response.get("code", 0) not in (0, None):
+            details={"category":"cli_failed" if completed.returncode else "remote_error", "exit_code":completed.returncode}
+            remote=response.get("code")
+            if remote is None and isinstance(response.get('error'),dict):remote=response['error'].get('code')
+            if type(remote) is int or isinstance(remote,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}',remote):
+                details['remote_code']=remote
+            # A generic CLI error can follow a committed write. Only explicit
+            # launch failures above establish that no request was dispatched.
+            raise WorkflowError("connection_failed", "飞书操作返回错误；请核对原操作及当前授权",
+                write_outcome="unknown", details=details)
         data = response.get("data", response)
-        if not isinstance(data, dict): fail("invalid_response", "飞书操作缺少可核对的对象正文")
+        if not isinstance(data, dict):
+            raise WorkflowError("invalid_response", "飞书操作缺少可核对的对象正文", write_outcome="unknown",
+                details={"category":"invalid_response"})
         return data
 
     def table_args(self, table):
@@ -138,14 +165,25 @@ class Feishu:
 
     @staticmethod
     def rows(data):
-        items = data.get("items", data.get("records"))
-        if items is not None:
-            if not isinstance(items, list): fail("invalid_response", "记录格式无效")
-            return items
+        if not isinstance(data,dict):fail("incomplete_read", "记录响应缺少可识别的完整结构")
+        for key in ("items", "records"):
+            if key in data:
+                items=data[key]
+                if not isinstance(items,list):fail("incomplete_read", "记录列表格式无效，未视为空表")
+                if any(not isinstance(item,dict) or not item.get('record_id') or not isinstance(item.get('fields'),dict)
+                       for item in items):fail("incomplete_read", "记录列表存在缺失的标识或字段，未视为空表")
+                return items
+        if (not all(key in data for key in ("fields", "record_id_list", "data"))
+                or not all(isinstance(data[key],list) for key in ("fields", "record_id_list", "data"))):
+            fail("incomplete_read", "记录响应结构不完整，未视为空表")
         fields = [f.get("name", f.get("field_name", f.get("id"))) if isinstance(f, dict) else f
-                  for f in data.get("fields", [])]
-        ids, values = data.get("record_id_list", []), data.get("data", [])
-        if len(ids) != len(values): fail("incomplete_read", "记录标识与正文数量不一致")
+                  for f in data["fields"]]
+        ids, values = data["record_id_list"], data["data"]
+        if (any(not isinstance(field,str) or not field for field in fields) or len(set(fields))!=len(fields)
+                or len(ids)!=len(values) or any(not isinstance(rid,str) or not rid for rid in ids)
+                or len(set(ids))!=len(ids) or bool(ids) and not fields
+                or any(not isinstance(cells,list) or len(cells)!=len(fields) for cells in values)):
+            fail("incomplete_read", "记录标识、字段或正文列数不一致")
         return [{"record_id": rid, "fields": dict(zip(fields, cells))} for rid, cells in zip(ids, values)]
 
     def records(self, table):
@@ -207,6 +245,55 @@ class Feishu:
         return {"document_id": document_id, "revision": revision, "content_hash": sha(content),
                 "content": content, "title": doc.get("title", "")}
 
+    def _skill_children(self, folder):
+        result, page = [], ""
+        for _ in range(100):
+            params={"folder_token":identifier(folder),"page_size":200}
+            if page:params["page_token"]=page
+            data=self.run(["drive","files","list","--as","user","--format","json","--params",canonical(params)])
+            items=data.get("files",data.get("items"))
+            if not isinstance(items,list):fail("incomplete_read","Shared Skills 目录未完整返回")
+            result.extend(items)
+            if not data.get("has_more"):return result
+            new=data.get("next_page_token") or data.get("page_token")
+            if not new or new==page:fail("incomplete_read","Shared Skills 分页未前进")
+            page=new
+        fail("incomplete_read","Shared Skills 分页未结束")
+
+    def skill_package(self, root, folder):
+        from rdos_shared_skills import _safe_name
+        if root!=(self.manifest.get("shared_skills") or {}).get("root_folder_id"):
+            fail("out_of_scope","Shared Skills 来源未登记")
+        root=identifier(root);folder=identifier(folder)
+        package=next((item for item in self._skill_children(root) if item.get("token")==folder and item.get("type")=="folder"),None)
+        if package is None:fail("skill_source_missing","Skill 已移出机构 Shared Skills 根目录")
+        files,seen,names={},set(),set()
+        def visit(token,prefix):
+            if token in seen or len(seen)>2000:fail("incomplete_read","Skill 包目录循环或过大")
+            seen.add(token)
+            for item in self._skill_children(token):
+                name=_safe_name(item.get("name"));current=identifier(item.get("token"));kind=item.get("type")
+                path=prefix+name
+                folded=path.casefold()
+                if folded in names:fail("incomplete_skill_package","Skill 包文件路径重复")
+                names.add(folded)
+                if kind=="folder":visit(current,path+"/")
+                elif kind=="file":
+                    with tempfile.TemporaryDirectory(prefix="rdos-skill-download-") as temporary:
+                        destination=Path(temporary)/"content"
+                        try:
+                            result=subprocess.run([self.binary,"drive","+download","--as","user","--file-token",current,
+                                "--output",str(destination),"--overwrite"],capture_output=True,text=True,timeout=60,check=False)
+                        except (OSError,subprocess.TimeoutExpired):fail("connection_failed","Skill 文件下载未完成")
+                        if result.returncode or destination.is_symlink() or not destination.is_file() or destination.stat().st_size>8_000_000:
+                            fail("incomplete_skill_package","Skill 文件未完整下载")
+                        files[path]=destination.read_bytes()
+                elif kind=="docx":files[path if path.casefold().endswith('.md') else path+'.md']=self.fetch(current)["content"].encode()
+                else:fail("unsupported_skill_member","Skill 包有无法完整读取的文件，保留本地版本")
+                if len(files)>2000 or sum(map(len,files.values()))>32_000_000:fail("skill_package_too_large","Skill 包超过检查容量")
+        visit(folder,"")
+        return {"name":package["name"],"files":files}
+
     def create(self, folder, title, content):
         self.registered_folder(folder)
         body = "<title>" + html.escape(title, quote=False) + "</title>\n\n" + content
@@ -218,6 +305,7 @@ class State:
     def __init__(self, path):
         path = Path(path).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.path = path.resolve()
         self.db = sqlite3.connect(path, timeout=70)
         os.chmod(path, 0o600)
         self.db.execute("CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
@@ -253,7 +341,10 @@ except ImportError:
     from rdos_peer import PeerMixin
 
 
-class Workflow(PeerMixin):
+from rdos_shared_skills import SharedSkillsMixin
+
+
+class Workflow(PeerMixin, SharedSkillsMixin):
     error_type = WorkflowError
     def __init__(self, manifest, transport, state):
         self.manifest, self.transport, self.state = manifest_value(manifest), transport, state
@@ -416,7 +507,10 @@ class Workflow(PeerMixin):
             return {"task": task, "plan": plan, "materials": materials, "quarantined_records": invalid}
 
     def check(self):
-        enrollment=self.continue_peer_enrollment()
+        try:enrollment=self.continue_peer_enrollment()
+        except ValueError as exc:
+            enrollment={"status":"recovery_pending","error_code":getattr(exc,"code","peer_recovery_failed"),
+                        "message":"节点登记尚待核对，普通工作检查继续。"}
         rows, invalid = self.read_rows("task")
         events, event_invalid = self.read_rows("event")  # fail incomplete reads before processing any task
         unique = {}
@@ -428,6 +522,7 @@ class Workflow(PeerMixin):
         for task_id, task in unique.items():
             if self.manifest["node_id"] in task.get("executor_node_ids", []): results.append(self.prepare(task_id, False))
         return {"node_id": self.manifest["node_id"], "tasks": results,"peer_enrollment":enrollment,
+                "shared_skills":self.check_shared_skills(),
                 "quarantined_records": invalid + event_invalid, "complete_read": True,
                 "state": "attention_required" if invalid + event_invalid else "work_available" if results else "no_work"}
 
@@ -490,6 +585,9 @@ class Workflow(PeerMixin):
         return project
 
     def verify(self, operation_id):
+        saved=self.state.get("operations", operation_id)
+        if saved and saved.get('desired',{}).get('event_type') in ('peer_enrollment_request','peer_capability_ack'):
+            return self.recover_peer(operation_id)
         with self.state.locked():
             op = self.state.get("operations", operation_id)
             if not op: fail("operation_missing", "本节点没有该操作检查点；请按原任务检查记录，不创建替代操作")
@@ -515,13 +613,13 @@ class Workflow(PeerMixin):
         self.state.put("checkpoints", task_id, point)
 
     def submit(self, task_id, status, summary, key, artifact_refs=None, event_type=None, review_of=None, correction_of=None):
-        if status=="completed":self.ensure_peer_enrollment_completion(task_id)
         with self.state.locked():
             task = self.task(task_id)
+            if status=="completed":self.ensure_peer_enrollment_completion(task_id,task)
             point, invalid = self.checkpoint(task)
             plan = self.plan(task, point)
             if not plan["assigned"]: fail("not_assigned", "此任务未分配给当前节点")
-            kind = event_type or ("review" if rules.task_type(task) == "review" else "submission")
+            kind = event_type or "submission"
             required = ("report_paused_ack" if kind == "paused_ack" else "report_closed_ack" if kind == "closed_ack"
                 else "correct_previous_record" if kind == "correction"
                 else "report_blocker" if kind in ("blocker", "clarification") else "report_progress" if kind == "progress"
@@ -541,10 +639,6 @@ class Workflow(PeerMixin):
             period = rules.period_key(task)
             if period is not None:
                 event['period_key'] = period
-            if kind == "review" and status == "completed" and review_of is None:
-                if len(task.get("input_refs", [])) != 1:
-                    fail("invalid_review", "请明确被审阅的成果版本，不能将多份输入笼统作为审阅对象")
-                review_of = task["input_refs"][0]
             if review_of is not None:
                 if review_of not in task.get("input_refs", []): fail("invalid_review", "Review 必须引用当前任务的确切输入版本")
                 event["review_of"] = review_of
@@ -765,9 +859,16 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("connection")
     sub.add_parser("check")
+    link=sub.add_parser("skills-link");link.add_argument("folder_id");link.add_argument("directory")
+    sub.add_parser("skills-check")
+    decide=sub.add_parser("skills-decide");decide.add_argument("folder_id");decide.add_argument("content_hash");decide.add_argument("--decision",choices=("approve","decline"),required=True)
+    update=sub.add_parser("skills-update");update.add_argument("folder_id");update.add_argument("content_hash")
     bind=sub.add_parser("bind-peer");bind.add_argument("identity_file")
     sub.add_parser("peer-ack")
     enroll=sub.add_parser("enroll-peer");enroll.add_argument("task_id")
+    recover=sub.add_parser("recover-peer");recover.add_argument("operation_id")
+    recover.add_argument("--confirm-retry",action="store_true")
+    recover.add_argument("--expected-hash",help="先预览恢复计划，再明确确认原操作及该计划哈希")
     dispatch=sub.add_parser("dispatch");dispatch.add_argument("--request",required=True);dispatch.add_argument("--operation-key",required=True)
     progress=sub.add_parser("peer-progress");progress.add_argument("task_id")
     prepare = sub.add_parser("prepare"); prepare.add_argument("task_id")
@@ -790,9 +891,14 @@ def main(argv=None):
         if args.command in ("connection", "check"):
             if args.command == "connection": workflow.transport.run(["auth", "status"])
             result = workflow.check()
+        elif args.command == "skills-link":result=workflow.link_shared_skill(args.folder_id,args.directory)
+        elif args.command == "skills-check":result=workflow.check_shared_skills()
+        elif args.command == "skills-decide":result=workflow.decide_shared_skill(args.folder_id,args.content_hash,args.decision)
+        elif args.command == "skills-update":result=workflow.apply_shared_skill(args.folder_id,args.content_hash)
         elif args.command == "bind-peer": result=workflow.bind_peer_identity(args.identity_file)
         elif args.command == "peer-ack": result=workflow.peer_ack()
         elif args.command == "enroll-peer": result=workflow.enroll_peer(args.task_id)
+        elif args.command == "recover-peer": result=workflow.recover_peer(args.operation_id,args.expected_hash,args.confirm_retry)
         elif args.command == "dispatch": result=workflow.dispatch_peer(json.loads(Path(args.request).read_text()),args.operation_key)
         elif args.command == "peer-progress": result=workflow.peer_progress(args.task_id)
         elif args.command == "prepare": result = workflow.prepare(args.task_id)
@@ -809,7 +915,10 @@ def main(argv=None):
         print(canonical({"ok": True, "data": result}))
         return 0
     except (WorkflowError, rules.RuleViolation, OSError, ValueError) as exc:
-        print(canonical({"ok": False, "code": getattr(exc, "code", "invalid_input"), "message": str(exc)}))
+        output={"ok": False, "code": getattr(exc, "code", "invalid_input"), "message": str(exc)}
+        if getattr(exc,'write_outcome',None):output['write_outcome']=exc.write_outcome
+        if getattr(exc,'details',None):output['details']=exc.details
+        print(canonical(output))
         return 1
 
 

@@ -425,16 +425,16 @@ class NodeBusinessTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 'version_conflict')
         self.assertNotIn('reconciliation', self.workflow.state.get('operations', opid))
 
-    def test_review_and_deliverable_use_distinct_business_conditions(self):
+    def test_opinion_is_ordinary_submission_while_deliverable_requires_artifact(self):
         self.transport.task_value = task(task_type='deliverable')
         with self.assertRaises(rdos_rules.RuleViolation): self.workflow.submit('task_example', 'completed', '没有成果', 'complete')
         ref = {'document_id': 'doc_input', 'revision': 3, 'content_hash': node.sha('指定稿')}
         self.transport.documents['doc_input'] = {**ref, 'title': '指定稿', 'content': '指定稿'}
-        self.transport.task_value = task(task_type='review', input_refs=[ref])
+        self.transport.task_value = task(task_type='action', input_refs=[ref])
         result = self.workflow.submit('task_example', 'completed', '已审阅指定版本，建议补充对象说明', 'review', review_of=ref)
         self.assertTrue(result['readback_verified'])
         event = json.loads(self.transport.events[0]['fields']['记录数据'])
-        self.assertEqual(event['event_type'], 'review')
+        self.assertEqual(event['event_type'], 'submission')
         self.assertEqual(event['artifact_refs'], [])
         self.assertEqual(event['review_of'], ref)
 
@@ -507,18 +507,19 @@ class NodeBusinessTests(unittest.TestCase):
 
     def test_review_blocked_by_unreadable_material_can_report_blocker(self):
         ref = {'document_id': 'unavailable_input', 'revision': 3, 'content_hash': 'unavailable'}
-        self.transport.task_value = task(task_type='review', input_refs=[ref])
+        self.transport.task_value = task(task_type='action', input_refs=[ref])
         result = self.workflow.submit('task_example', 'blocked', '指定资料无访问权限', 'blocked')
         self.assertTrue(result['readback_verified'])
         self.assertEqual(self.transport.fetches, [])
 
-    def test_single_review_input_is_explicitly_attached_when_omitted(self):
+    def test_ordinary_opinion_does_not_invent_review_target(self):
         ref = {'document_id': 'doc_input', 'revision': 3, 'content_hash': node.sha('指定稿')}
         self.transport.documents['doc_input'] = {**ref, 'title': '指定稿', 'content': '指定稿'}
-        self.transport.task_value = task(task_type='review', input_refs=[ref])
+        self.transport.task_value = task(task_type='action', input_refs=[ref])
         self.workflow.submit('task_example', 'completed', '审阅意见', 'review')
         event = json.loads(self.transport.events[-1]['fields']['记录数据'])
-        self.assertEqual(event['review_of'], ref)
+        self.assertNotIn('review_of', event)
+        self.assertEqual(event['event_type'], 'submission')
 
     def test_necessary_revision_requires_known_version_and_reason(self):
         first = self.workflow.create_artifact('task_example', '工作说明', '首稿', 'draft')
@@ -540,8 +541,7 @@ class NodeBusinessTests(unittest.TestCase):
         second = {'document_id': 'doc_context', 'revision': 2, 'content_hash': node.sha('背景资料')}
         self.transport.documents['doc_first'] = {**first, 'title': '指定稿', 'content': '指定稿'}
         self.transport.documents['doc_context'] = {**second, 'title': '背景资料', 'content': '背景资料'}
-        self.transport.task_value = task(task_type='review', input_refs=[first, second])
-        with self.assertRaises(node.WorkflowError): self.workflow.submit('task_example', 'completed', '意见', 'review')
+        self.transport.task_value = task(task_type='action', input_refs=[first, second])
         result = self.workflow.submit('task_example', 'completed', '指定稿审阅意见', 'review', review_of=first)
         self.assertTrue(result['readback_verified'])
         event = json.loads(self.transport.events[-1]['fields']['记录数据'])

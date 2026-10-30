@@ -87,7 +87,7 @@ POST_PATHS = frozenset({"/api/central/auth/login", "/api/central/auth/logout",
 OBJECT_ID = r"[A-Za-z0-9_.:-]{1,150}"
 READ_OBJECTS = re.compile(r"/api/central/runs/" + OBJECT_ID)
 POST_OBJECTS = re.compile(r"/api/central/(?:runs/" + OBJECT_ID + r"/retry|(?:task-drafts|proposals)/" +
-                          OBJECT_ID + r"/(?:edit|publish|reject)|projects/" + OBJECT_ID +
+                          OBJECT_ID + r"/(?:edit|publish|reject|delete|restore)|projects/" + OBJECT_ID +
                           r"/(?:deactivate|reactivate)|users/" + OBJECT_ID + r"/reset-password)")
 PROJECT_READ = re.compile(r"/api/central/projects/" + OBJECT_ID + r"/deactivation-preview")
 PROJECT_EDIT = re.compile(r"/api/central/projects/" + OBJECT_ID)
@@ -99,7 +99,7 @@ PEER_APPROVE = re.compile(r"/api/central/peer/nodes/" + OBJECT_ID + r"/approve-e
 PHASE3_READ = re.compile(r"(?:/api/central/phase3/(?:workspace|developer|tasks/" + OBJECT_ID +
     r"/history)|/lab/onboard/(?:node_lab_phase3_codex|node_lab_phase3_workbuddy)|/nodes/"+OBJECT_ID+r"/(?:start|manifest|skill\.zip))")
 PHASE3_POST = re.compile(r"/api/central/phase3/(?:drafts|sync|migrate-workflow|drafts/" + OBJECT_ID +
-    r"/edit|nodes/" + OBJECT_ID + r"/onboarding|tasks/" + OBJECT_ID + r"/actions/(?:start|update|pause|resume|submit|accept_close|cancel))")
+    r"/(?:edit|delete|restore)|tasks/" + OBJECT_ID + r"/migrate-completion|nodes/" + OBJECT_ID + r"/onboarding|tasks/" + OBJECT_ID + r"/actions/(?:start|update|pause|resume|submit|manual_complete|cancel))")
 
 
 async def boundary(request: Request, call_next):

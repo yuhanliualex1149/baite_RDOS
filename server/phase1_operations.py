@@ -151,6 +151,8 @@ def require_confirmation(operation_id: str, *, actor_id: str, project_id: str,
     """Recheck trusted scope before ensure-fields, transport, or local mutation."""
     try:
         env, generation = _environment()
+        if store.get("draft_revoked_operation", operation_id):
+            raise OperationError("authorization_failed", "原草稿授权已撤销，请重新确认")
         item = store.get("operation", operation_id)
         binding = (item or {}).get("authorization")
         if not isinstance(binding, dict) or item.get("authorization_hash") != store.digest(binding):

@@ -131,7 +131,7 @@ class LabGuardTest(unittest.TestCase):
         module = ast.parse((CODE / "server/main.py").read_text())
         lifespan = next(node for node in module.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan")
         calls = {ast.unparse(node.func) for node in ast.walk(lifespan) if isinstance(node, ast.Call)}
-        self.assertEqual(calls, {"require_active", "db.init_db", "central_store.init", "phase1_runtime.initialize", "phase3_service.initialize", "_sync_registered_projects", "central_memory.initialize", "central_settings.initialize", "peer_tasks.initialize", "central_maintenance.start", "central_maintenance.stop", "central_service.shutdown"})
+        self.assertEqual(calls, {"require_active", "db.init_db", "central_store.init", "phase1_runtime.initialize", "phase3_service.initialize", "_sync_registered_projects", "central_memory.initialize", "central_settings.initialize", "next_release_migration.initialize", "peer_tasks.initialize", "central_maintenance.start", "central_maintenance.stop", "central_service.shutdown"})
         self.assertEqual(sum(isinstance(node, ast.Yield) for node in ast.walk(lifespan)), 1)
         self.assertFalse(any(isinstance(node, (ast.For, ast.While, ast.AsyncFor)) for node in ast.walk(lifespan)))
         self.assertEqual([ast.unparse(node.value.func) for node in ast.walk(lifespan) if isinstance(node, ast.Await)], ["central_maintenance.start", "central_maintenance.stop", "central_service.shutdown"])

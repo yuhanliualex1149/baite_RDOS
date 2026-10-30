@@ -23,3 +23,18 @@ def select_task_rows(values):
     if any(backends.payload(value)!=backends.payload(values[0]) for value in values[1:]):
         raise PeerRecordError('task_conflict','相同互派任务ID出现不同内容')
     return [min(values,key=lambda value:value.get('record_id',''))]
+
+
+def event_readback_payload(value, registry):
+    """Normalize only the public peer event decoder's top-level identity default.
+
+    The wire decoder enriches these public records with a runtime identity mode.
+    Keep scope, proof, and nested verified actors intact; a conflicting explicit
+    mode is a genuine mismatch rather than metadata to discard.
+    """
+    import copy
+    meta = {'record_id', 'source_url', 'readback_verified', 'source_environment', 'remote_actor'}
+    result = {k: copy.deepcopy(v) for k, v in value.items() if k not in meta and not k.startswith('_')}
+    if result.get('event_type') in {'node_registry_snapshot', 'peer_enrollment_request', 'peer_capability_ack'}:
+        result.setdefault('identity_mode', registry.get('identity_mode', 'role_test'))
+    return result

@@ -17,7 +17,7 @@ def _instruction(node, task=None):
     url = os.environ['BAITE_PUBLIC_URL'].rstrip('/') + '/nodes/' + public + '/start'
     text = f'请按 RDOS 接入说明持久安装并启用执行 Skill，再检查当前飞书任务：{url}\n本节点：{public}。'
     if task:
-        text += f'接入配置任务：{task["task_id"]}，包含每日检查、每周反馈及接入回执；已有定时安排原位更新，不重复创建。'
+        text += f'接入配置任务：{task["task_id"]}，包含节点登记、每日检查、每周反馈及接入回执；已有定时安排原位更新，不重复创建。'
     return text
 
 
@@ -50,13 +50,17 @@ async def prepare(node_id, actor):
             task_id = 'RDOS-ONBOARD-' + central.digest(operation)[:16].upper()
             payload = {'task_id': task_id, 'title': '完成 RDOS 工作接入',
                 'goal': '按本节点当前接入说明校验并持久安装 RDOS 执行 Skill，确认后续会话可调用。'
-                    '使用客户端原生定时能力配置每日 09:00 检查任务、周五 16:30 汇总真实工作反馈，时区 Asia/Shanghai。'
+                    '复用飞书连接并读取有效任务，运行 enroll-peer 为本任务提交节点互派申请并独立读回；私钥只留本节点。'
+                    '公钥与持钥证明写回后，中央随既有同步自动核验并完成登记，不需要人工审核；节点后续检查自动核对中央签名并回执。'
+                    '登记与互派就绪单独跟踪，申请步骤完成后不必等待它们才能提交本次配置完成。'
+                    '使用客户端原生定时能力配置每日 09:00 检查任务及已安装机构 Shared Skills 更新、周五 16:30 按所属项目有效任务汇总真实工作周报，时区 Asia/Shanghai。'
+                    'Shared Skills 有更新先在本节点对话询问用户，同意具体版本后再更新；未同意不安装，同版不反复询问。'
                     '两条安排都调用已安装的当前 Skill，并绑定当前会话和获准工区；已有对应 RDOS 安排只原位更新，保留 ID、时间、时区、启停状态及绑定，不新建平行安排。'
                     '未具备原生定时能力或需要本人授权时如实报告受阻，不用外部后台服务替代。'
                     '完成后核对持久安装和两条安排，将简短配置结果写入统一协作记录表并独立读回。'
                     '无实际工作时不发布空周报，不扩大资料、项目或读者范围。',
                 'executor_node_ids': [key], 'task_type': 'action',
-                'deliverable': 'Skill 持久启用，两条定时安排已保存并核对，接入配置回执已独立读回。',
+                'deliverable': 'Skill 持久启用，节点互派申请已提交并读回，两条定时安排已保存并核对，接入配置回执已独立读回。',
                 'output_zone': 'agent', 'dispatch_to': ['agent'], 'return_to': ['agent'],
                 'deliverable_audience': ['researcher'], 'completion_rule': {'kind': 'receipt_recorded'}}
             draft = await service.prepare_task(payload, user, operation + ':draft', project['id'])

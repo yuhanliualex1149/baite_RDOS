@@ -65,6 +65,8 @@ async def lifespan(_: FastAPI):
     central_memory.initialize()
     from server import central_settings, central_maintenance
     central_settings.initialize()
+    from server import next_release_migration
+    next_release_migration.initialize()
     await central_maintenance.start(enabled=True)
     # Recovery records interruptions; it never replays tools or starts a scheduler.
     try:

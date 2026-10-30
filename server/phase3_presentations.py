@@ -8,8 +8,7 @@ import asyncio
 from server import central_store as central, phase3_store as local, phase3_backend as backends, db
 
 
-_RULE_LABELS = {'receipt_recorded': '核对执行结果与回执后完成', 'human': '提交后由管理员判断质量',
-                'human_review': '提交审阅意见后由管理员判断质量', 'artifact_present': '核对约定成果后完成',
+_RULE_LABELS = {'receipt_recorded': '核对执行结果与回执后完成', 'artifact_present': '核对约定成果后完成',
                 'source_versions_match': '核对指定资料版本后完成'}
 _AUDIENCE_LABELS = {'admin': '管理员', 'project_members': '项目成员', 'researcher': '研发人员'}
 
@@ -38,12 +37,12 @@ def _execution_names(task):
 
 async def after_task_action(task: dict, operation_id: str) -> dict | None:
     operation = central.get('operation', operation_id) or {}
-    is_summary = operation.get('action') == 'phase3_task:accept_close' and task.get('close_reason') == 'completed'
+    is_summary = operation.get('action') == 'phase3_task:manual_complete' and task.get('close_reason') == 'manual_completed'
     if not is_summary and 'human' not in task.get('dispatch_to', []):
         return None
     authorization = operation.get('authorization') or {}
     planned = operation.get('planned_task') or {}
-    if (operation.get('action') not in ('phase3_task:start', 'phase3_task:update', 'phase3_task:accept_close')
+    if (operation.get('action') not in ('phase3_task:start', 'phase3_task:update', 'phase3_task:manual_complete')
             or authorization.get('source') not in ('authenticated_confirmation', 'authenticated_user_request')
             or authorization.get('target_id') != task.get('task_id')
             or planned.get('requirements_hash') != task.get('requirements_hash')):
@@ -68,9 +67,9 @@ async def after_task_action(task: dict, operation_id: str) -> dict | None:
     if is_summary:
         body = '\n'.join(['# 工作总结', '任务：' + task['title'],
             '要求版本：' + str(task['requirements_version']), '标题：' + task['title'],
-            '结论：管理员已确认当前提交并结束任务。',
+            '结论：管理员已标记工作完成并结束任务。',
             '成果：' + _sources(task.get('result_refs', [])),
-            '旧版成果和 Agent 审阅意见保留，可供后续查阅。'])
+            '旧版成果和协作意见保留，可供后续查阅。'])
     old = local.get('presentation', key)
     # Existing published notes are historical originals, including human edits.
     # A presentation renderer update must not silently rewrite them.

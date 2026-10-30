@@ -55,7 +55,7 @@ class RulesTest(unittest.TestCase):
         event['result_status']='completed'
         self.assertEqual(rules.validate_result(event,self.task()),'completed')
         with self.assertRaises(rules.RuleViolation):rules.validate_result(event,self.task(task_type='deliverable'))
-        with self.assertRaises(rules.RuleViolation):rules.validate_result(event,self.task(task_type='review'))
+        self.assertEqual(rules.validate_result(event,self.task(task_type='review')),'completed')
         review={**event,'event_type':'review'}
         self.assertEqual(rules.validate_result(review,self.task(task_type='review',input_refs=[{'document_id':'input'}])),'completed')
 
@@ -67,15 +67,16 @@ class RulesTest(unittest.TestCase):
         changed=copy.deepcopy(current);changed['deliverable_audience']=['project_members']
         self.assertNotEqual(rules.digest(rules.requirements(current)),rules.digest(rules.requirements(changed)))
 
-    def test_review_result_targets_the_declared_version_and_multiple_inputs_are_explicit(self):
+    def test_opinions_use_ordinary_results_and_legacy_review_is_readable(self):
         first={'document_id':'first','revision':1,'content_hash':'a'}
         second={'document_id':'second','revision':2,'content_hash':'b'}
-        task=self.task(task_type='review',input_refs=[first,second])
-        event={'event_type':'review','body':'审阅结果','result_status':'completed'}
-        with self.assertRaises(rules.RuleViolation):rules.validate_result(event,task)
-        with self.assertRaises(rules.RuleViolation):rules.validate_result({**event,'review_of':{**first,'revision':2}},task)
-        self.assertEqual(rules.validate_result({**event,'review_of':second},task),'completed')
-        self.assertEqual(rules.review_target(event,self.task(task_type='review',input_refs=[first])),first)
+        task=self.task(task_type='action',input_refs=[first,second])
+        event={'event_type':'submission','body':'审阅意见','result_status':'completed'}
+        self.assertEqual(rules.validate_result(event,task),'completed')
+        self.assertEqual(rules.task_type(self.task(task_type='review')),'action')
+        self.assertEqual(rules.completion_kind(self.task(completion_rule={'kind':'human_review'})),'receipt_recorded')
+        self.assertNotIn('review',rules.TASK_TYPES)
+        self.assertFalse({'human','human_review'} & set(rules.COMPLETION_KINDS))
 
 
 if __name__=='__main__':unittest.main()

@@ -310,17 +310,16 @@ def inspect_evidence(project_ids, *, now=None):
         records = workspace.get('last_refresh') or {}
         observations.append({'project_id': pid, 'name': workspace['project']['name'], 'status': workspace['project'].get('status'),
             'task_count': len(tasks), 'active_count': sum(t.get('business_status') == 'active' for t in tasks),
-            'pending_review_count': sum(t.get('business_status') == 'pending_review' for t in tasks),
+            'pending_result_count': sum(t.get('business_status') == 'pending_review' for t in tasks),
             'integrity_issue_count': sum(bool(t.get('integrity_error')) for t in tasks),
             'verified_receipt_count': sum(t.get('receipt_status') == 'verified' for t in tasks),
-            'quality_pending_count': sum(t.get('quality_status') == 'pending_human' for t in tasks),
             'nodes': [{'node_id': node.get('node_id'),
                        'last_observed_record_at': max((event.get('created_at', '') for event in workspace.get('events', [])
                            if event.get('claimed_node_id') == node.get('node_id')), default=None),
                        'evidence_kind': 'service_records_only'} for node in workspace.get('nodes', [])],
             'last_refresh': {key: records[key] for key in ('at', 'complete', 'error_code', 'issue_count') if key in records},
             'health': {key: health(pid).get(key) for key in ('status', 'consecutive_failures', 'next_due', 'uncertain_operations')},
-            'evidence_boundary': '已知回执及缓存不证明节点本次在线；质量评价保持原状态。'})
+            'evidence_boundary': '已知回执及缓存不证明节点本次在线。'})
     pending = [row for row in store.items('operation') if row.get('status') in {'uncertain', 'pending_reconciliation', 'running', 'interrupted'}
                and row.get('project_id') in project_ids]
     runs = [row for row in store.items('run') if row.get('project_id') in project_ids or not row.get('project_id')]
@@ -392,7 +391,7 @@ def inspect_evidence(project_ids, *, now=None):
     return {'observed_at': _iso(now), 'project_ids': list(project_ids), 'projects': observations,
             'sources': sources, 'pending_operation_ids': [row['id'] for row in pending],
             'accounts': {'enabled_admin_count': enabled_admins}, 'model_evidence': model, 'tool_boundary': boundary, 'issues': issues,
-            'read_only': True, 'changes': [], 'quality_decisions': [],
+            'read_only': True, 'changes': [],
             'code_evidence': {'files': code_versions, 'kind': 'current_file_hashes_not_test_execution'},
             'not_checked': ['本轮未对每个出口执行负向探测。', '未检查Local Agent私有状态、系统级隔离或定时真实触发。',
                             '未额外调用真实模型验证当前连通性。'],

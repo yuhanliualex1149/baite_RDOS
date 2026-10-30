@@ -60,7 +60,7 @@ async def scenario():
  task=backend3.list_tasks()[0];op=central.get('operation',p['task_actions'][0]['operation_id'])
  assert op['authorization']['source']=='authenticated_user_request'
  assert op['authorization']['source_message_id']==run['id']+':user'
- assert op['status']=='succeeded' and not task['decision']
+ assert op['status']=='succeeded' and not task.get('decision')
  assert any(e['origin']=='central_user_request' for e in backend3.list_events())
  note=local.get('presentation',task['id']+'@1')
  assert note['status']=='verified',note
@@ -159,10 +159,10 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
-    def test_update_pause_resume_cancel_keep_identity_and_original_quality_rule(self):
+    def test_update_pause_resume_cancel_keep_identity_and_receipt_rule(self):
         self.check('''
 async def scenario():
- task=await start(completion_rule={'kind':'human'})
+ task=await start()
  for index,(action,fields) in enumerate([('update',{'goal':'只保留一个场景'}),('pause',{}),('resume',{}),('cancel',{'reason':'方向变化'})]):
   message='请'+action+'这项任务。'
   data=proposal(message,action=action,task_id=task['id'],payload=fields)
@@ -171,9 +171,9 @@ async def scenario():
   assert result['ok'],result
   finished(run)
   current=backend3.read_task(task['id'])
-  assert current['task_id']==task['id'] and current['completion_rule']=={'kind':'human'}
+  assert current['task_id']==task['id'] and current['completion_rule']=={'kind':'receipt_recorded'}
  assert current['requirements_version']==2 and current['business_status']=='closed' and current['close_reason']=='cancelled'
- assert current['quality_status']!='accepted' and not current['decision']
+ assert 'quality_status' not in current and not current.get('decision')
 asyncio.run(scenario())
 ''')
 

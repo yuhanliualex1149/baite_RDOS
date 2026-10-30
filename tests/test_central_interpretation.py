@@ -38,7 +38,11 @@ async def main():
  result=await agent.run([{'role':'user','content':'业务问答'}],[],lambda *_:None)
  assert result['usage']['model_calls']==2
  assert len(seen)==2 and 'tools' not in seen[0]
- assert seen[0]['messages']==[{'role':'system','content':'独立请求解析'}, {'role':'user','content':'当前真实请求'}]
+ assert seen[0]['messages'][0]['content'].startswith(SYSTEM_PROMPT)
+ assert '<current_stage>\\n独立请求解析\\n</current_stage>' in seen[0]['messages'][0]['content']
+ assert sum(m['role']=='system' for m in seen[0]['messages'])==1
+ assert seen[0]['messages'][-1]=={'role':'user','content':'当前真实请求'}
+ assert any('<central_memory>' in str(m.get('content','')) for m in seen[0]['messages'])
  assert seen[1]['messages'][0]['content']==SYSTEM_PROMPT
 asyncio.run(main())
 ''')

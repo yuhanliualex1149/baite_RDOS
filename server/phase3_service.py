@@ -46,6 +46,8 @@ def initialize():
     project=central.get('project',PROJECT_ID)
     project['source_environment']=backends.get_backend().registry().get('mode','unknown')
     central.put('project',PROJECT_ID,project)
+    from server.draft_lifecycle import migrate_local_drafts
+    migrate_local_drafts()
 
 
 def node_registry():
@@ -167,7 +169,7 @@ def _normalize_fields(payload, previous=None, project_id=PROJECT_ID):
         _error('out_of_scope', '产物只能位于已登记的项目区或 Agent 区')
     fields['task_type'] = fields.get('task_type') or rules.task_type(fields)
     if fields['task_type'] not in rules.TASK_TYPES:
-        _error('invalid_task', '任务类别必须为 action、deliverable 或 review')
+        _error('invalid_task', '任务类别必须为 action 或 deliverable')
     audience = fields.get('deliverable_audience') or ['admin', 'project_members']
     if not isinstance(audience, list) or not audience or any(item not in rules.AUDIENCES for item in audience):
         _error('invalid_task', '请明确交付受众')
@@ -183,18 +185,13 @@ def _normalize_fields(payload, previous=None, project_id=PROJECT_ID):
             _error('invalid_task', '周期回执首版只适用于执行类任务')
     rule = fields.get('completion_rule') or {'kind': 'receipt_recorded'}
     if not isinstance(rule, dict) or set(rule) != {'kind'} or rule['kind'] not in rules.COMPLETION_KINDS:
-        _error('invalid_task', '完成规则必须为执行回执核对、明确的人工验收或固定程序核验')
-    if ((fields['task_type']=='review' and rule['kind'] not in ('receipt_recorded','human','human_review'))
-            or (rule['kind']=='human_review' and fields['task_type']!='review')):
-        _error('invalid_task','Review 类别与完成规则不匹配；请选执行回执核对或明确的人工质量验收')
+        _error('invalid_task', '完成规则必须为执行回执核对或固定程序核验')
     fields['completion_rule'] = rule
     fields['input_refs'] = fields.get('input_refs') or []
     fields['editable_document_ids'] = fields.get('editable_document_ids') or []
     if not isinstance(fields['input_refs'], list) or not isinstance(fields['editable_document_ids'], list):
         _error('invalid_task', '资料引用与允许修改文档须为列表')
     _document_refs(fields['input_refs'], 'invalid_task')
-    if fields['task_type'] == 'review' and not fields['input_refs']:
-        _error('invalid_task', 'Review 任务须明确被审阅成果及其版本')
     if rule['kind']=='source_versions_match' and not fields['input_refs']:
         _error('invalid_task','资料版本核对任务须预先指定版本依据')
     if any(not isinstance(value, str) or not value for value in fields['editable_document_ids']):
@@ -447,7 +444,7 @@ def _publish_verified_draft(task, opid, action):
 
 async def _presentation(task, opid, action):
     _publish_verified_draft(task, opid, action)
-    if action not in ('start','update','accept_close'):
+    if action not in ('start','update','manual_complete'):
         return task
     try:
         import inspect
@@ -457,7 +454,7 @@ async def _presentation(task, opid, action):
     except ModuleNotFoundError as exc:
         if exc.name != 'server.phase3_presentations':raise
     except Exception as exc:
-        key=task['task_id']+'@'+str(task['requirements_version'])+(':closed' if action=='accept_close' else '')
+        key=task['task_id']+'@'+str(task['requirements_version'])+(':closed' if action=='manual_complete' else '')
         local.put('presentation',key,{'task_id':task['task_id'],'requirements_version':task['requirements_version'],
             'status':'needs_attention','error':str(exc)[:400],'operation_id':opid})
     return task
@@ -468,8 +465,7 @@ async def apply_task_action(task_id, action, payload, actor, operation_id,
                             request_authorization=None):
     from server.central_service import WRITE_LOCK
     user = _admin(actor)
-    if action == 'close': action = 'accept_close'
-    if action not in ('start','update','pause','resume','submit','accept_close','cancel'):
+    if action not in ('start','update','pause','resume','submit','manual_complete','cancel'):
         _error('invalid_action', '任务动作不支持')
     request = {'task_id':task_id, 'action':action, 'payload':payload, 'actor_id':user['id'],
                'expected_revision':expected_revision, 'expected_requirements_version':expected_requirements_version}
@@ -484,6 +480,10 @@ async def apply_task_action(task_id, action, payload, actor, operation_id,
                 projects.require_active(bound_project)
             live=await _read_task(task_id,False)
             _check_expected(live,expected_revision,expected_requirements_version)
+            if action in ('start','update') and not op.get('dispatched_at'):
+                latest = local.get('draft', payload.get('draft_id',''))
+                if not latest or latest.get('status') != 'draft' or latest.get('draft_hash') != payload.get('expected_hash'):
+                    _error('version_conflict', '草稿已变化或删除，未发布')
             return await _commit_task(op['planned_task'],op['planned_event'],operation_id,lambda:ops.mark_dispatched(operation_id))
         result = await ops.run_write(operation_id, WRITE_LOCK, replay,reconcile=lambda:_reconcile_task(operation_id))
         return await _presentation(result,operation_id,action)
@@ -510,7 +510,7 @@ async def apply_task_action(task_id, action, payload, actor, operation_id,
         task.update(draft['payload'], requirements_version=expected_requirements_version+1, requirements_hash=central.digest(draft['payload']),
                     business_status='paused' if current and current['business_status']=='paused' else 'active',
                     grant_operation_id=operation_id, result_refs=[], review_evidence=None, submission_evidence=None,
-                    execution_result=None, result_status='', receipt_status='', quality_status='not_evaluated',
+                    execution_result=None, result_status='', receipt_status='',
                     decision=None, completion_evidence=None, submission_event_id='', close_reason='', change_reason=draft.get('change_reason',''))
         if current and current['business_status']=='paused':task['resume_status']='active'
     else:
@@ -528,51 +528,25 @@ async def apply_task_action(task_id, action, payload, actor, operation_id,
             if state != 'active': _error('invalid_transition','仅当前已启动要求可提交')
             if task['completion_rule']['kind']=='receipt_recorded':
                 _error('invalid_action','此任务以结构化执行结果和独立读回收尾，请提交协作记录')
-            if task['completion_rule']['kind']=='human_review' or (rules.task_type(task)=='review' and task.get('review_evidence')):
-                _error('invalid_action','Agent Review 必须作为完整协作记录事件提交')
             refs = await _verify_refs(payload.get('result_refs',[]),task,True)
             if not refs: _error('invalid_artifact','提交需要可独立读取的实际产物')
-            task.update(business_status='pending_review', result_refs=refs)
-        elif action == 'accept_close':
-            if state != 'pending_review': _error('invalid_transition','请先核对当前版本提交，再作验收')
-            if task['completion_rule']['kind']=='human_review':
-                proof=task.get('review_evidence') or {}
-                if (payload.get('review_event_id')!=proof.get('event_id') or
-                        payload.get('review_hash')!=proof.get('content_hash')):
-                    _error('version_conflict','人工确认必须绑定当前要求版的完整 Review 事件')
-                matches=[e for e in await asyncio.to_thread(backends.get_backend().list_events)
-                         if e.get('id')==proof.get('event_id')]
-                if (len(matches)!=1 or central.digest(matches[0].get('body',''))!=proof.get('content_hash')
-                        or central.digest(backends.payload(matches[0]))!=proof.get('event_hash')
-                        or proof.get('requirements_version')!=task['requirements_version']):
-                    _error('write_uncertain','Review 原文未从协作记录表独立核对，不得验收')
-                chosen={'review_event_id':proof['event_id'],'review_hash':proof['content_hash']}
-            elif task['completion_rule']['kind']=='human' and task.get('submission_evidence'):
-                proof=task['submission_evidence']
-                if (payload.get('submission_event_id')!=proof.get('event_id') or
-                        payload.get('submission_hash')!=proof.get('content_hash') or
-                        task.get('submission_event_id')!=proof.get('event_id')):
-                    _error('version_conflict','人工确认必须绑定当前要求版的完整提交回执')
-                matches=[e for e in await asyncio.to_thread(backends.get_backend().list_events)
-                         if e.get('id')==proof.get('event_id')]
-                if (len(matches)!=1 or central.digest(matches[0].get('body',''))!=proof.get('content_hash')
-                        or central.digest(backends.payload(matches[0]))!=proof.get('event_hash')
-                        or proof.get('requirements_version')!=task['requirements_version']):
-                    _error('write_uncertain','提交回执原文未从协作记录表独立核对，不得验收')
-                chosen={'submission_event_id':proof['event_id'],'submission_hash':proof['content_hash']}
-            else:
-                refs = task.get('result_refs',[])
-                chosen = {'document_id':payload.get('artifact_id'), 'revision':payload.get('artifact_revision'), 'content_hash':payload.get('artifact_hash')}
-                if not any(all(str(ref.get(k))==str(chosen.get(k)) for k in ('document_id','revision','content_hash')) for ref in refs):
-                    _error('version_conflict','人工确认必须绑定已提交的具体产物版本')
-                await _verify_refs([chosen],task,True)
-            task.update(business_status='closed',close_reason='completed', quality_status='accepted', decision={'actor_id':user['id'],**chosen,'at':db.utc_now()},
+            task.update(business_status='closed', close_reason='completed', result_refs=refs)
+        elif action == 'manual_complete':
+            if request_authorization is not None:
+                _error('authorization_failed', '人工标记完成只能由管理员在任务页面办理')
+            if set(payload) - {'note'} or ('note' in payload and not isinstance(payload['note'], str)):
+                _error('invalid_fields', '完成备注须为文字')
+            task.update(business_status='closed', close_reason='manual_completed',
+                        close_note=payload.get('note', '').strip(),
+                        manual_completion={'actor_id':user['id'], 'at':db.utc_now(), 'source':'authenticated_panel'},
                         stop_receipt='本地结束情况待节点确认')
         elif action == 'cancel':
             if not str(payload.get('reason') or '').strip(): _error('invalid_action','取消需要说明原因')
             reason=payload.get('close_reason','cancelled')
             if reason not in ('cancelled','superseded','replaced'):_error('invalid_action','取消原因只能为取消或被替代')
             task.update(business_status='closed',close_reason='superseded' if reason=='replaced' else reason,close_note=payload['reason'],stop_receipt='本地停止情况待节点确认')
+    for field in ('quality_status','decision','review_evidence'):
+        task.pop(field,None)
     task.update(record_revision=(current['record_revision'] if current else 0)+1,updated_at=db.utc_now())
     event = _event(task, operation_id + ':event', 'task_change', action + '：' + str(payload.get('reason') or task.get('change_reason') or ''), _principal(user), refs=task.get('result_refs'))
     if request_authorization is not None:
@@ -592,6 +566,12 @@ async def apply_task_action(task_id, action, payload, actor, operation_id,
                 _error('authorization_failed', '参与节点已变化，请重新确认任务')
         live = await _read_task(task_id,False)
         _check_expected(live,expected_revision,expected_requirements_version)
+        if action in ('start','update'):
+            latest = local.get('draft', payload.get('draft_id',''))
+            if not latest or latest.get('status') != 'draft' or latest.get('draft_hash') != payload.get('expected_hash'):
+                _error('version_conflict', '草稿已变化或删除，未发布')
+        if live and any(live.get(field) is not None for field in ('quality_status','decision','review_evidence')):
+            local.immutable('task_quality_history',task_id+'@'+str(live['record_revision']), {'task':live})
         result = await _commit_task(task,event,operation_id,lambda:ops.mark_dispatched(operation_id))
         if action in ('start','update'):
             local.put('grant',task_id+'@'+str(task['requirements_version']),{'operation_id':operation_id,'requirements_hash':task['requirements_hash'],'owner_id':user['id']})
@@ -613,7 +593,7 @@ async def _grant(task_id, version, actor, *, allow_ended=False):
     if task['requirements_version'] != version or node['node_id'] not in task['executor_node_ids']:
         _error('authorization_failed','节点未获当前任务版本授权')
     if not allow_ended and task['business_status'] != 'active':
-        _error('task_not_active','任务已暂停、待验收或结束，不再派发工作')
+        _error('task_not_active','任务已暂停、待迁移或结束，不再派发工作')
     if not allow_ended:
         projects.require_active(task['project_id'])
         if node['node_id'] not in _node_ids(task['project_id']) and task.get('dispatch_source') != 'peer':
@@ -850,8 +830,7 @@ async def _derive_submission(event,task):
     if local.get('archived_event',event.get('id','')):return
     if task['business_status']!='active' or event.get('claimed_node_id') not in task['executor_node_ids']:return
     if not any(r.get('task_id')==task['task_id'] and r.get('requirements_version')==task['requirements_version'] for r in event.get('task_refs',[])):return
-    review_task = rules.task_type(task) == 'review'
-    if review_task != (event.get('event_type') == 'review'):return
+    if event.get('event_type') not in ('submission','review','check_result'):return
     try:
         result_period = rules.valid_result_period(event, task)
     except rules.RuleViolation as exc:
@@ -871,82 +850,48 @@ async def _derive_submission(event,task):
     opid='phase3-receipt:'+central.digest([event['id'],task['task_id'],task['requirements_version']])[:32]
     async def work(mark):
         live,grant=await _grant(task['task_id'],task['requirements_version'],node)
-        kind=live['completion_rule']['kind']
-        record_proof=None
+        kind=rules.completion_kind(live)
+        if live.get('completion_rule',{}).get('kind') in ('human','human_review') or live.get('task_type')=='review':
+            _error('legacy_migration_required','旧任务完成规则需要先迁移，原成果和回执保留')
         result_status = event.get('result_status')
-        if result_status in ('partial','blocked'):
-            rules.validate_result(event, live)
-            record_proof = await _readback_event(event)
-            record_proof['requirements_version'] = live['requirements_version']
-            registrar=getattr(backends.get_backend(),'register_event_document',None)
-            if registrar:
-                for reference in event.get('artifact_refs',[]):
-                    await asyncio.to_thread(registrar,event,live,reference)
-            refs=await _verify_refs(event.get('artifact_refs',[]),live,True,event['claimed_node_id'])
-            state = 'active'
-        elif kind == 'receipt_recorded':
-            result_status = rules.validate_result(event, live)
-            record_proof = await _readback_event(event)
-            record_proof['requirements_version'] = live['requirements_version']
-            if review_task and result_status == 'completed':
-                await _verify_refs(live['input_refs'])
-            registrar=getattr(backends.get_backend(),'register_event_document',None)
-            if registrar:
-                for reference in event.get('artifact_refs',[]):
-                    await asyncio.to_thread(registrar,event,live,reference)
-            refs=await _verify_refs(event.get('artifact_refs',[]),live,True,event['claimed_node_id'])
-            state = 'active' if result_period else 'closed' if result_status == 'completed' else 'active'
-        elif kind=='source_versions_match' and event['event_type']=='check_result':
-            if not live['input_refs']:_error('invalid_rule','资料核对任务必须预先指定版本依据')
+        if kind == 'receipt_recorded' or result_status in ('partial','blocked'):
+            result_status=rules.validate_result(event,live)
+            if event.get('review_of') is not None:
+                await _verify_refs([rules.review_target(event,live)])
+        elif kind == 'source_versions_match':
+            if event['event_type']!='check_result' or not live['input_refs']:
+                _error('invalid_rule','资料核对任务须提交指定版本的核对结果')
             await _verify_refs(live['input_refs'])
-            record_proof = await _readback_event(event)
-            refs=[];state='closed'
-        elif review_task and event['event_type']=='review':
-            if not event.get('body','').strip():
-                _error('invalid_event','Agent Review 正文必须完整写在协作记录表')
-            if event.get('artifact_refs'):
-                _error('invalid_artifact','Agent Review 不以文档协作代替表内正文')
-            record_proof=await _readback_event(event)
-            record_proof['requirements_version']=live['requirements_version']
-            refs=[];state='pending_review'
-        elif (kind=='human' and live['output_zone']=='agent' and
-              event['event_type']=='submission' and not event.get('artifact_refs')):
-            if not event.get('body','').strip():
-                _error('invalid_event','表内提交回执必须有完整正文')
-            record_proof=await _readback_event(event)
-            record_proof['requirements_version']=live['requirements_version']
-            refs=[];state='pending_review'
+            result_status=result_status or 'completed'
+        elif kind == 'artifact_present':
+            result_status=result_status or 'completed'
         else:
-            registrar=getattr(backends.get_backend(),'register_event_document',None)
-            if registrar:
-                for reference in event.get('artifact_refs',[]):
-                    await asyncio.to_thread(registrar,event,live,reference)
-            refs=await _verify_refs(event.get('artifact_refs',[]),live,True,event['claimed_node_id'])
-            if not refs:_error('invalid_artifact','提交事件缺少实际可读产物')
-            record_proof=await _readback_event(event)
-            state='closed' if kind=='artifact_present' else 'pending_review'
+            _error('invalid_rule','任务完成规则不支持')
+        record_proof=await _readback_event(event)
+        record_proof['requirements_version']=live['requirements_version']
+        registrar=getattr(backends.get_backend(),'register_event_document',None)
+        if registrar:
+            for reference in event.get('artifact_refs',[]):
+                await asyncio.to_thread(registrar,event,live,reference)
+        refs=await _verify_refs(event.get('artifact_refs',[]),live,True,event['claimed_node_id'])
+        if kind=='artifact_present' and result_status=='completed' and not refs:
+            _error('invalid_artifact','提交事件缺少实际可读产物')
+        state='closed' if result_status=='completed' and not result_period else 'active'
         changed={**live,'business_status':state,'record_revision':live['record_revision']+1,'result_refs':refs,
-                 'submission_event_id':event['id'],'receipt_status':'verified',
-                 'quality_status':'pending_human' if state=='pending_review' else 'not_evaluated',
-                 'updated_at':db.utc_now()}
-        if result_status:
-            changed.update(result_status=result_status, execution_result={
-                'result_status':result_status,'event_id':event['id'],'summary':_event_summary(event),
-                'requirements_version':live['requirements_version'],'verified_at':db.utc_now(),
-                **({'period_key': result_period} if result_period else {})})
-        if review_task:
-            changed['review_evidence']=record_proof
-        elif kind=='human' and record_proof and not refs:
-            changed['submission_evidence']=record_proof
+                 'submission_event_id':event['id'],'submission_evidence':record_proof,'receipt_status':'verified',
+                 'updated_at':db.utc_now(), 'result_status':result_status,
+                 'execution_result':{'result_status':result_status,'event_id':event['id'],'summary':_event_summary(event),
+                     'requirements_version':live['requirements_version'],'verified_at':db.utc_now(),
+                     **({'period_key': result_period} if result_period else {})}}
+        for field in ('quality_status','decision','review_evidence'):
+            changed.pop(field,None)
         if state=='closed':
             changed.update(close_reason='completed',completion_evidence={
                 'kind':kind,'event_id':event['id'],'grant_operation_id':grant['operation_id'],
                 'event_hash':record_proof['event_hash'],'requirements_version':live['requirements_version']},
                 stop_receipt='本地结束情况待节点确认')
-            if review_task:
-                changed['completion_evidence']['reviewed_ref']=copy.deepcopy(rules.review_target(event,live))
         receipt=_event(changed,opid+':event','task_change',
-                       '执行结果已核对并记录。' if state!='pending_review' else '已核对提交，等待约定的质量验收。',
+                       '执行结果已核对并记录。',
                        _principal(node),refs=refs)
         committed = await _commit_task(changed,receipt,opid,lambda:mark(live,grant))
         if result_period and result_status == 'completed':
@@ -1014,7 +959,7 @@ async def migrate_receipt_completion(task_id, event_id, actor, operation_id,
           'requirements_hash':central.digest(normalized),'record_revision':expected_revision+1,
           'business_status':'closed','close_reason':'completed','updated_at':db.utc_now(),
           'grant_operation_id':operation_id,'result_status':'completed','receipt_status':'verified',
-          'quality_status':'not_evaluated','decision':None,'change_reason':'配置任务按已核对的执行回执收尾',
+          'change_reason':'配置任务按已核对的执行回执收尾',
           'execution_result':{'result_status':'completed','event_id':event_id,'summary':'定时配置已完成并核对；实际周期运行单独观察。',
                               'requirements_version':expected_requirements_version,'verified_at':db.utc_now()},
           'completion_evidence':{'kind':'receipt_recorded','event_id':event_id,'event_hash':proof['event_hash'],
@@ -1135,6 +1080,10 @@ async def _refresh_project(actor,operation_id,project_id,*,task_records=None,eve
         'error':'','mode':registry.get('mode','unknown')}
     local.replace_cache(valid,documents,refresh_record,project_id=project_id)
     local.put('state','scope',registry)
+    # Valid node-generated setup proofs are completed by the service itself;
+    # ordinary task actions and observations cannot grant this capability.
+    registration=await peer_tasks.register_enrollments(project_id)
+    issues+=registration['issue_count']
     for event in ingested:
         if event.get('event_type') not in ('submission','review','check_result'):continue
         for ref in event.get('task_refs',[]):
@@ -1212,7 +1161,7 @@ def _verified_action_result(task):
 
 
 def _verified_action_event(event):
-    if event.get('event_type') not in ('submission','check_result') or not event.get('task_refs'):
+    if event.get('event_type') not in ('submission','check_result','review') or not event.get('task_refs'):
         return False
     for ref in event['task_refs']:
         if not isinstance(ref,dict):return False
@@ -1265,8 +1214,8 @@ def business_event(event):
 
 def business_task(task):
     keys=TASK_FIELDS+('id','task_id','project_id','requirements_version','requirements_hash','record_revision',
-                     'business_status','result_refs','result_status','receipt_status','quality_status','close_reason',
-                     'close_note','submission_event_id','execution_result','completion_evidence','decision',
+                     'business_status','result_refs','result_status','receipt_status','close_reason',
+                     'close_note','manual_completion','submission_event_id','execution_result','completion_evidence',
                      'submission_evidence','review_evidence','updated_at','summary_stale','input_refs_stale',
                      'stop_receipt','resume_status','change_reason','integrity_error')
     value={key:copy.deepcopy(task[key]) for key in keys if key in task}
@@ -1275,6 +1224,8 @@ def business_task(task):
         value['execution_result']['summary'] = _event_summary(evidence or {'result_status':value['execution_result'].get('result_status')})
     value['owner_name']=(central.user(task.get('owner_id','')) or {}).get('display_name','负责人')
     value['task_type']=rules.task_type(task)
+    value['completion_rule']={'kind':rules.completion_kind(task)}
+    if value.get('business_status')=='pending_review':value['business_status']='active'
     value.setdefault('deliverable_audience',['admin','project_members'])
     reference_keys=('document_id','id','revision','content_hash','source_url','title')
     for field in ('input_refs','result_refs'):
@@ -1286,7 +1237,7 @@ def business_task(task):
         'completion_evidence':('kind','event_id','event_hash','requirements_version','source_requirements_version','migrated','reviewed_ref'),
         'submission_evidence':('event_id','content_hash','event_hash','requirements_version'),
         'review_evidence':('event_id','content_hash','event_hash','requirements_version'),
-        'decision':('actor_id','at','document_id','revision','content_hash','review_event_id','review_hash','submission_event_id','submission_hash')}
+        'manual_completion':('actor_id','at','source')}
     for field,fields in nested_keys.items():
         if isinstance(value.get(field),dict):
             value[field]={key:value[field][key] for key in fields if key in value[field]}
@@ -1317,7 +1268,7 @@ def business_task(task):
 
 
 def business_draft(draft):
-    keys=('id','task_id','project_id','base_revision','base_requirements_version','change_reason','created_at','draft_hash','status')
+    keys=('id','task_id','project_id','base_revision','base_requirements_version','change_reason','created_at','draft_hash','status','deleted_at','deleted_by')
     return {**{key:copy.deepcopy(draft[key]) for key in keys if key in draft},
             'payload':{**{key:copy.deepcopy(draft['payload'][key]) for key in TASK_FIELDS if key in draft.get('payload',{})},
                        'owner_name':(central.user(draft.get('payload',{}).get('owner_id','')) or {}).get('display_name','负责人')}}
@@ -1337,7 +1288,8 @@ def business_workspace(actor,project_id=PROJECT_ID):
             'nodes':[{key:node[key] for key in ('node_id','public_id','label','display_name','member_id') if key in node}
                      for node in data['nodes']],
             'tasks':[business_task(task) for task in data['tasks']],
-            'drafts':[business_draft(draft) for draft in data['drafts']],
+            'drafts':[business_draft(draft) for draft in data['drafts'] if draft.get('status')!='deleted'],
+            'deleted_drafts':[business_draft(draft) for draft in data['drafts'] if draft.get('status')=='deleted'],
             'events':[business_event(event) for event in data['events'] if event['id'] not in archived
                       and event.get('event_type') not in {'node_registry_snapshot','peer_capability_ack','peer_enrollment_request'}],
             'documents':[{key:doc[key] for key in document_keys if key in doc} for doc in data['documents']
@@ -1444,3 +1396,65 @@ workspace=overview
 history=task_history
 task_action=apply_task_action
 sync=refresh
+
+
+async def migrate_legacy_quality_task(task_id, actor, operation_id, expected_revision, expected_requirements_version):
+    """Explicit, versioned business migration; does not infer professional approval."""
+    from server.central_service import WRITE_LOCK
+    user=_admin(actor)
+    request={'task_id':task_id,'actor_id':user['id'],'expected_revision':expected_revision,
+             'expected_requirements_version':expected_requirements_version}
+    op=central.operation(operation_id,'phase3_task:migrate_completion',request)
+    if op.get('authorization'):
+        async def replay():
+            return await _commit_task(op['planned_task'],op['planned_event'],operation_id,
+                                      lambda:ops.mark_dispatched(operation_id))
+        return await ops.run_write(operation_id,WRITE_LOCK,replay,reconcile=lambda:_reconcile_task(operation_id))
+    current=await _read_task(task_id)
+    _check_expected(current,expected_revision,expected_requirements_version)
+    legacy_kind=current.get('completion_rule',{}).get('kind')
+    if (legacy_kind not in ('human','human_review') and current.get('task_type')!='review'
+            and current.get('business_status')!='pending_review'):
+        _error('invalid_transition','任务已采用当前完成规则，无需迁移')
+    if current['business_status']=='closed':
+        _error('task_closed','已结束任务保留原始历史，不迁移')
+    fields=_normalize_fields({'task_type':rules.task_type(current),
+                             'completion_rule':{'kind':rules.completion_kind(current)}},current,current['project_id'])
+    task={**current,**fields,'requirements_version':expected_requirements_version+1,
+          'record_revision':expected_revision+1,'requirements_hash':central.digest(fields),
+          'business_status':'paused' if current['business_status']=='paused' else 'active',
+          'grant_operation_id':operation_id,'change_reason':'移除质量审阅门槛；工作目标、责任、旧成果和回执保持不变',
+          'updated_at':db.utc_now(),'workflow_version':2}
+    for field in ('quality_status','decision','review_evidence'):
+        task.pop(field,None)
+    if task.get('resume_status')=='pending_review':task['resume_status']='active'
+    proof=current.get('submission_evidence') or current.get('review_evidence') or {}
+    source_id=proof.get('event_id') or (current.get('execution_result') or {}).get('event_id')
+    if source_id:
+        matches=[e for e in await asyncio.to_thread(backends.get_backend().list_events) if e.get('id')==source_id]
+        if len(matches)==1:
+            event=matches[0]
+            valid=(event.get('result_status')=='completed' and event.get('claimed_node_id') in current['executor_node_ids']
+                   and any(ref.get('task_id')==task_id and ref.get('requirements_version')==expected_requirements_version for ref in event.get('task_refs',[]))
+                   and (not proof.get('event_hash') or proof['event_hash']==central.digest(backends.payload(event))))
+            if valid:
+                await _verify_refs(event.get('artifact_refs',[]),current,True,event['claimed_node_id'])
+                task.update(result_status='completed',receipt_status='verified',
+                    completion_evidence={'kind':'receipt_recorded','event_id':source_id,
+                        'event_hash':central.digest(backends.payload(event)),'migrated':True,
+                        'source_requirements_version':expected_requirements_version,
+                        'requirements_version':task['requirements_version'],'grant_operation_id':operation_id})
+                if not task.get('periodicity'):
+                    task.update(business_status='closed',close_reason='completed')
+    event=_event(task,operation_id+':event','task_change',task['change_reason'],_principal(user))
+    op.update(planned_task=task,planned_event=event)
+    central.put('operation',operation_id,op)
+    ops.bind_confirmation(op,actor=user,project_id=current['project_id'],target_kind='phase3_task',target_id=task_id,
+        draft_hash=central.digest(request),base={'record_revision':expected_revision,'requirements_version':expected_requirements_version},input_fields=request)
+    async def work():
+        live=await _read_task(task_id)
+        _check_expected(live,expected_revision,expected_requirements_version)
+        local.immutable('task_workflow_history',task_id+'@'+str(expected_revision),
+                        {'task':current,'migration_operation_id':operation_id,'at':db.utc_now()})
+        return await _commit_task(task,event,operation_id,lambda:ops.mark_dispatched(operation_id))
+    return await ops.run_write(operation_id,WRITE_LOCK,work,reconcile=lambda:_reconcile_task(operation_id))

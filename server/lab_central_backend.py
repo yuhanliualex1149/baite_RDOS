@@ -340,6 +340,20 @@ def tool_message(name: str, arguments: dict, call_id: str = "local_mock_call") -
         "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}]}
 
 
+def model_stage_content(message: dict) -> str:
+    """Inspect only the trusted stage block in the complete system message.
+
+    This is a deterministic provider fixture adapter, not an authorization
+    parser. User materials cannot become a stage by containing this marker.
+    """
+    if message.get('role') != 'system' or not isinstance(message.get('content'), str):
+        return ''
+    text = message['content']
+    if '<current_stage>\n' in text and text.endswith('\n</current_stage>'):
+        return text.rsplit('<current_stage>\n', 1)[1].rsplit('\n</current_stage>', 1)[0]
+    return text
+
+
 class _LocalModelTransport(httpx.AsyncBaseTransport):
     def __init__(self, script: list | None, key: object):
         if key is not _KEY:
@@ -351,7 +365,7 @@ class _LocalModelTransport(httpx.AsyncBaseTransport):
         if str(request.url) != "http://local-mock.invalid/chat/completions" or request.method != "POST":
             deny("untrusted_local_model_request")
         payload = json.loads(request.content)
-        if (self.script is None and any(m.get('role') == 'system' and str(m.get('content', '')).startswith('RDOS_REQUEST_INTERPRETER_V1')
+        if (self.script is None and any(model_stage_content(m).startswith('RDOS_REQUEST_INTERPRETER_V1')
                                        for m in payload.get('messages', []))):
             # A separate deterministic provider response, not a business-loop
             # step. It grants no task action and must not consume that script.
@@ -376,12 +390,12 @@ class _LocalModelTransport(httpx.AsyncBaseTransport):
 
     def _default(self, payload: dict) -> dict | str:
         messages = payload.get("messages", [])
-        if any(m.get('role') == 'system' and str(m.get('content', '')).startswith('RDOS_REQUEST_INTERPRETER_V1') for m in messages):
+        if any(model_stage_content(m).startswith('RDOS_REQUEST_INTERPRETER_V1') for m in messages):
             return json.dumps({'purpose': 'discuss', 'task_actions': [], 'memory_changes': []})
         context: dict = {}
         trusted_context: dict = {}
         for message in messages:
-            text = message.get("content", "")
+            text = model_stage_content(message) if message.get('role') == 'system' else message.get("content", "")
             if message.get("role") in {"system", "user"} and isinstance(text, str):
                 start = text.find("{")
                 if start >= 0:

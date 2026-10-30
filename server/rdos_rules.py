@@ -9,11 +9,11 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
-RULES_VERSION = '1.0.0'
-TASK_TYPES = ('action', 'deliverable', 'review')
+RULES_VERSION = '1.1.0'
+TASK_TYPES = ('action', 'deliverable')
 RESULT_STATUSES = ('completed', 'partial', 'blocked')
 AUDIENCES = ('admin', 'project_members', 'researcher')
-COMPLETION_KINDS = ('receipt_recorded', 'human', 'human_review', 'artifact_present', 'source_versions_match')
+COMPLETION_KINDS = ('receipt_recorded', 'artifact_present', 'source_versions_match')
 LEGACY_TASK_FIELDS = ('title', 'goal', 'owner_id', 'executor_node_ids', 'input_refs', 'deliverable',
                      'output_zone', 'dispatch_to', 'return_to', 'completion_rule', 'due_at', 'editable_document_ids')
 BUSINESS_TASK_FIELDS = ('task_type', 'deliverable_audience', 'periodicity')
@@ -71,13 +71,15 @@ def requirements(task):
 
 
 def task_type(task):
-    # Legacy review rules identify review tasks only when task_type was absent.
-    return task.get('task_type') or ('review' if completion_kind(task) == 'human_review' else 'action')
+    # Historical Review records remain readable as ordinary work.
+    value = task.get('task_type') or 'action'
+    return 'action' if value == 'review' else value
 
 
 def completion_kind(task):
     rule=task.get('completion_rule')
-    return rule.get('kind') if isinstance(rule,dict) else None
+    value = rule.get('kind') if isinstance(rule,dict) else None
+    return 'receipt_recorded' if value in ('human', 'human_review') else value
 
 
 def review_target(event,task):
@@ -97,16 +99,12 @@ def validate_result(event, task):
     if not isinstance(event.get('body'), str) or not event['body'].strip():
         raise RuleViolation('invalid_result', '执行结果必须包含实际完成内容或阻塞说明')
     kind = task_type(task)
-    expected = ('review',) if kind == 'review' else ('submission', 'check_result') if kind == 'action' else ('submission',)
+    expected = ('submission', 'check_result', 'review') if kind == 'action' else ('submission',)
     if event.get('event_type') not in expected:
         raise RuleViolation('invalid_result', '结果类型与任务类别不匹配')
-    if kind == 'review' and event.get('artifact_refs'):
-        raise RuleViolation('invalid_result', 'Review 正文须提交到协作记录表，成果版本列在审阅输入中')
     if status == 'completed' and kind == 'deliverable' and not event.get('artifact_refs'):
         raise RuleViolation('invalid_result', '成果任务完成时必须引用确切产物版本')
-    if status == 'completed' and kind == 'review' and not task.get('input_refs'):
-        raise RuleViolation('invalid_result', 'Review 任务须绑定明确的被审阅成果版本')
-    if status == 'completed' and kind == 'review':
+    if event.get('review_of') is not None:
         review_target(event,task)
     return status
 
@@ -128,7 +126,6 @@ def execution_plan(task, node_id, checkpoint=None, *, now=None):
         missing.append('record_revision')
     if task_type(task) not in TASK_TYPES: missing.append('task_type')
     if completion_kind(task) not in COMPLETION_KINDS: missing.append('completion_rule')
-    if task_type(task) == 'review' and not task.get('input_refs'): missing.append('review_input_version')
     if completion_kind(task)=='source_versions_match' and not task.get('input_refs'):missing.append('source_versions_input')
     nodes=task.get('executor_node_ids')
     if not isinstance(nodes,list):missing.append('executor_node_ids')
@@ -152,7 +149,7 @@ def execution_plan(task, node_id, checkpoint=None, *, now=None):
         allowed = ['stop_new_work', 'report_paused_ack' if state == 'paused' else 'report_closed_ack',
                    'archive_late_result', 'correct_previous_record']
     elif state == 'pending_review':
-        reason = 'awaiting_quality_decision'
+        reason = 'awaiting_legacy_migration'
         allowed = ['read_status', 'correct_previous_record']
     elif state != 'active':
         reason = 'not_active'

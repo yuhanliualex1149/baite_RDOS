@@ -203,7 +203,7 @@ async def scenario():
     final=result['tasks'][0]
     assert final['business_status']=='closed',final
     assert final['record_revision']==5 and peer.validate_task(backend3.read_task(final['task_id']))
-    assert final.get('decision') is None and final['quality_status']=='not_evaluated'
+    assert final.get('decision') is None and 'quality_status' not in final
 asyncio.run(scenario())
 ''')
 

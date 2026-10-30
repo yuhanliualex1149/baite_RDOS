@@ -68,7 +68,7 @@ async def main():
  before=len(captured)
  two=await chat('汇报应怎样写？','recall',purpose())
  assert two['status']=='succeeded',two
- assert material(captured[before+1])['memory'][0]['content']=='先说结论，再给必要依据。'
+ assert '先说结论，再给必要依据。' in next(m['content'] for m in captured[before+1]['messages'] if '<central_memory>' in str(m.get('content','')))
  forget='忘掉汇报表达这条约定。'
  three=await chat(forget,'forget',purpose('memory',memory_changes=[memory_change('forget',evidence_quote=forget)]),thread=one['thread_id'])
  assert '忘记' in three['result'],three

@@ -57,7 +57,7 @@
             <nav class="sidebar-nav" aria-label="协作与任务">
               <button class="subnav-item active" data-collaboration-view-select="tasks" type="button">任务管理</button>
               <button class="subnav-item" data-collaboration-view-select="events" type="button">协作管理</button>
-              <button class="subnav-item" data-collaboration-view-select="review" type="button">待审阅内容</button>
+              <button class="subnav-item" data-collaboration-view-select="review" type="button">草稿与成果</button>
             </nav>
             <div id="phase3-summary" class="phase3-summary sidebar-summary"></div>
             <p id="phase3-sync-last" class="small-note" role="status"></p>
@@ -186,7 +186,7 @@
             <section class="panel phase3-section"><div class="section-title"><h2>协作记录</h2></div><div id="phase3-events" class="item-list"></div></section>
           </div>
           <div data-collaboration-view="review" class="hidden">
-            <section class="panel phase3-section admin-only"><div class="section-title"><h2>待审阅草稿</h2></div><div id="phase3-drafts" class="item-list"></div></section>
+            <section class="panel phase3-section admin-only"><div class="section-title"><h2>待确认草稿</h2></div><div id="phase3-drafts" class="item-list"></div></section>
             <section class="panel phase3-section admin-only"><div class="section-title"><h2>需要处理</h2></div><div id="phase3-decisions" class="item-list"></div></section>
             <section class="panel phase3-section"><div class="section-title"><h2>产出物</h2></div><div id="phase3-documents" class="item-list"></div></section>
           </div>
@@ -317,10 +317,10 @@
         <label>交付要求<textarea id="phase3-task-deliverable" rows="3" required maxlength="12000"></textarea></label>
         <div class="form-grid"><label>执行节点<select id="phase3-task-node" required></select></label><label>产物位置<select id="phase3-task-zone"><option value="project">项目协作区</option><option value="agent">Agent 协作区</option></select></label></div>
         <div class="form-grid"><label>下发对象<select id="phase3-task-dispatch"><option value="agent">Agent</option><option value="both">人＋Agent</option></select></label><label>回传对象<select id="phase3-task-return"><option value="both">人＋Agent</option><option value="agent">仅 Agent</option><option value="human">人（含最小执行回执）</option></select></label></div>
-        <div class="form-grid"><label>任务类别<select id="phase3-task-type"><option value="action">执行动作</option><option value="deliverable">制作成果</option><option value="review">审阅成果（Agent Review）</option></select></label><label>成果面向谁<select id="phase3-task-audience"><option value="admin,project_members">管理员及项目成员</option><option value="researcher">对应研发人员</option><option value="admin">管理员</option><option value="project_members">项目成员</option></select></label></div>
+        <div class="form-grid"><label>任务类别<select id="phase3-task-type"><option value="action">执行动作</option><option value="deliverable">制作成果</option></select></label><label>成果面向谁<select id="phase3-task-audience"><option value="admin,project_members">管理员及项目成员</option><option value="researcher">对应研发人员</option><option value="admin">管理员</option><option value="project_members">项目成员</option></select></label></div>
         <label>输入依据（从已登记资料选取，可多选）<select id="phase3-task-input" multiple size="4"></select></label>
         <label>允许局部修改的文档（可选，可多选）<select id="phase3-task-editable" multiple size="3"></select></label>
-        <label>完成方式<select id="phase3-task-completion"><option value="receipt_recorded">有效完成结果写回并核对后结束</option><option value="human">需要管理员审阅成果质量后验收</option><option value="artifact_present">程序核验指定产物及版本后结束</option><option value="source_versions_match">程序核验指定输入资料版本后结束</option></select></label><p class="small-note">执行完成与成果质量分别记录。Agent Review 属于任务类别，不等同于管理员批准。</p>
+        <label>完成方式<select id="phase3-task-completion"><option value="receipt_recorded">有效完成结果写回并核对后结束</option><option value="artifact_present">程序核验指定产物及版本后结束</option><option value="source_versions_match">程序核验指定输入资料版本后结束</option></select></label>
         <label id="phase3-task-change-label" class="hidden">调整原因、旧成果处理与是否重做<textarea id="phase3-task-change" rows="3"></textarea></label>
         <p class="small-note">新任务沿用项目负责人。确认草稿后任务生效；一般执行结果核对后自动收尾。</p>
         <p id="phase3-task-form-error" class="form-error" role="alert"></p>
@@ -333,7 +333,7 @@
         <div class="dialog-heading"><h2 id="phase3-action-heading">核对任务动作</h2><button class="quiet" data-close="phase3-action-dialog" aria-label="关闭任务动作" type="button">✕</button></div>
         <div id="phase3-action-preview"></div>
         <label id="phase3-action-reason-label">说明<textarea id="phase3-action-reason" rows="3" maxlength="4000"></textarea></label>
-        <fieldset id="phase3-acceptance-fields" class="hidden stack-form"><legend>验收绑定的真实产物版本</legend><label>已登记产物<select id="phase3-acceptance-artifact"></select></label><p id="phase3-acceptance-version" class="small-note"></p><label class="check-label"><input id="phase3-acceptance-reviewed" type="checkbox" />我已打开原文并审阅上述具体版本，同意按本任务完成规则验收。</label></fieldset>
+
         <p id="phase3-action-error" class="form-error" role="alert"></p>
         <div class="dialog-actions"><button class="secondary" data-close="phase3-action-dialog" type="button">取消</button><button id="phase3-action-submit" class="primary" type="submit">确认</button></div>
       </form>

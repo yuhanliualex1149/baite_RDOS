@@ -34,18 +34,21 @@ async function fixture(role='admin',viewport={width:1440,height:1080}){
     {id:'thread_beta',project_id:'project_beta',title:'共享 Skill 范围',created_at:at},
     {id:'thread_organization',project_id:'',title:'机构讨论',created_at:at}
   ];
+  const taskStates=new Map(),draftStates=new Map();
+  const draft=projectId=>({id:projectId+'_draft',task_id:projectId+'_draft_task',status:draftStates.get(projectId)?'deleted':'draft',draft_hash:'fixture-draft-v1',payload:{...task(projectId,'draft'),title:'待确认的资料整理'}});
   const task=(projectId,suffix,status='active')=>({id:projectId+'_'+suffix,task_id:projectId+'_'+suffix,project_id:projectId,
     title:(projectId==='project_default'?'RDOS':'Shared Skill')+' '+({active:'当前工作',closed:'已关闭工作',review:'待质量审阅',blocked:'需补充输入'}[suffix]||suffix),
     owner_id:researcher.id,executor_node_ids:[node.node_id],goal:'整理已经核实的工作资料。',deliverable:'提交可阅读的结果。',task_type:'deliverable',
     requirements_version:1,record_revision:1,business_status:status,output_zone:'project',dispatch_to:['agent'],return_to:['agent'],input_refs:[],
     completion_rule:{kind:suffix==='review'?'human_review':'receipt_recorded'},
     ...(suffix==='closed'?{close_reason:'completed',result_status:'completed',receipt_status:'verified'}:{}),
-    ...(suffix==='blocked'?{result_status:'blocked',execution_result:{summary:'还缺一份项目输入。'}}:{})});
+    ...(suffix==='blocked'?{result_status:'blocked',execution_result:{summary:'还缺一份项目输入。'}}:{}),...(taskStates.get(projectId+'_'+suffix)||{})});
   const phase3=projectId=>({project:clone(allProjects.find(p=>p.id===projectId)),nodes:[clone(node)],last_refresh:{at,complete:true},
     scope:{zones:{project:{source_url:'https://scn33386s7ui.feishu.cn/drive/folder/'+(projectId==='project_default'?'FixtureDefault':'FixtureBeta')},agent:{source_url:'https://scn33386s7ui.feishu.cn/drive/folder/FixtureAgent'}},
       task_table_url:'https://scn33386s7ui.feishu.cn/base/FixtureBase?table=FixtureTasks',event_table_url:'https://scn33386s7ui.feishu.cn/base/FixtureBase?table=FixtureEvents'},
     tasks:[task(projectId,'active'),task(projectId,'closed','closed'),task(projectId,'review','pending_review'),task(projectId,'blocked')],
-    drafts:role==='admin'?[{id:projectId+'_draft',task_id:projectId+'_draft_task',status:'draft',payload:{...task(projectId,'draft'),title:'待确认的资料整理'}}]:[],
+    drafts:role==='admin'&&!draftStates.get(projectId)?[draft(projectId)]:[],
+    deleted_drafts:role==='admin'&&draftStates.get(projectId)?[draft(projectId)]:[],
     documents:[{id:projectId+'_document',title:projectId==='project_default'?'工作资料简报':'Shared Skill 版本说明',zone:'project',revision:3,source_url:'https://scn33386s7ui.feishu.cn/docx/'+(projectId==='project_default'?'FixtureReport':'FixtureSkillReport')}],
     events:[{id:projectId+'_progress',project_id:projectId,event_type:'progress',claimed_node_id:node.node_id,summary:projectId==='project_default'?'已整理三份工作资料。':'已整理一份 Skill 说明。',created_at:at,
       task_refs:[{task_id:projectId+'_active',requirements_version:1}],content:'INTERNAL_PROTOCOL_PAYLOAD_DO_NOT_PROJECT'},
@@ -79,6 +82,13 @@ async function fixture(role='admin',viewport={width:1440,height:1080}){
     if(p==='/api/central/workspace')return send(workspace(url.searchParams.get('project_id')));
     if(p==='/api/central/overview')return send({user:clone(user),users:[clone(admin),clone(researcher)],messages:[],runs:[],tasks:[],runtime:{paused:false}});
     if(p==='/api/central/phase3/workspace')return send(phase3(url.searchParams.get('project_id')));
+    if(method==='POST'&&/^\/api\/central\/phase3\/drafts\/[^/]+\/(delete|restore)$/.test(p)){
+      const body=req.postDataJSON(),pid=url.searchParams.get('project_id');posted.push({path:p,body});assert(body.operation_id);assert.equal(body.expected_hash,'fixture-draft-v1');draftStates.set(pid,p.endsWith('/delete'));return send({item:draft(pid)});
+    }
+    if(method==='POST'&&p.endsWith('/actions/manual_complete')){
+      const body=req.postDataJSON(),id=p.split('/').at(-3);posted.push({path:p,body});assert(body.operation_id);assert.equal(body.expected_requirements_version,1);assert.equal(body.expected_revision,1);taskStates.set(id,{business_status:'closed',close_reason:'manual_completed',record_revision:2});return send({item:{task_id:id,...taskStates.get(id)}});
+    }
+
     if(p==='/api/central/knowledge')return send(clone(knowledge));
     if(p==='/api/central/knowledge/items/skill_package')return send({item:clone(skill),version:skill.version,entrypoint_id:skillMain.id,files:[clone(skillMain),clone(skillRef)],content:'# 说人话\n保留事实，先把结果说清楚。'});
     if(p==='/api/central/knowledge/items/skill_reference')return send({item:clone(skillRef),version:skillRef.version,content:'# 示例\n把实际变化告诉读者。'});
@@ -214,6 +224,22 @@ async function checkOnlyGroup(page,attribute,wanted){
   assert.match(await page.locator('#phase3-documents').innerText(),/工作资料简报/);
   pass('Collaboration partitions tasks, readable collaboration records and review items; closed tasks are hidden initially');
   await page.screenshot({path:path.join(dir,'desktop-review.png'),fullPage:true});
+  await page.click('[data-collaboration-view-select="tasks"]');
+  await page.click('[data-phase3-action="manual_complete"][data-phase3-id="project_default_active"]');
+  assert.match(await page.locator('#phase3-action-preview').innerText(),/节点执行和回执保留实际记录/);
+  assert.equal(await page.locator('#phase3-acceptance-fields').count(),0);
+  await page.click('#phase3-action-submit');await until(async()=>await page.locator('[data-key="phase3-task:project_default_active"]').count()===0);
+  await page.check('#phase3-show-closed');assert.match(await page.locator('[data-key="phase3-task:project_default_active"]').innerText(),/管理员已标记完成/);await page.uncheck('#phase3-show-closed');
+  await page.click('[data-collaboration-view-select="review"]');
+  await page.click('[data-draft-lifecycle="delete"][data-draft-id="project_default_draft"]');await page.click('#confirm-action');
+  await until(async()=>await page.locator('[data-phase3-draft="project_default_draft"]').count()===0);
+  await page.locator('#phase3-drafts .deleted-drafts summary').click();
+  await page.click('[data-draft-lifecycle="restore"][data-draft-id="project_default_draft"]');await page.click('#confirm-action');
+  await until(async()=>await page.locator('[data-phase3-draft="project_default_draft"]').count()===1);
+  assert.doesNotMatch(await page.locator('#phase3-tasks').innerText(),/质量：|质量验收|审阅质量/);
+  await page.screenshot({path:path.join(dir,'next-version-draft-restored.png'),fullPage:true});
+  pass('Manual completion records administrator provenance; draft deletion and restore work without any quality acceptance form');
+
   await page.selectOption('#phase3-project','project_beta');await until(async()=>/Shared Skill 版本说明/.test(await page.locator('#phase3-documents').innerText()));
   assert.doesNotMatch(await page.locator('#phase3-documents').innerText(),/工作资料简报/);
   await page.click('[data-collaboration-view-select="tasks"]');
@@ -305,12 +331,12 @@ async function checkOnlyGroup(page,attribute,wanted){
   pass('Researcher navigation preserves project scope and excludes central/admin screens, management buttons and administrator API reads');
 
   assert.deepEqual(report.errors,[]);assert.deepEqual(report.external_requests,[]);assert.deepEqual(report.unknown_requests,[]);
-  assert.deepEqual([...new Set(f.posted.map(p=>p.path))].sort(),['/api/central/chat','/api/central/threads']);
+  assert.deepEqual([...new Set(f.posted.map(p=>p.path))].sort(),['/api/central/chat','/api/central/phase3/drafts/project_default_draft/delete','/api/central/phase3/drafts/project_default_draft/restore','/api/central/phase3/tasks/project_default_active/actions/manual_complete','/api/central/threads']);
   assert.equal(f.posted.filter(p=>p.path==='/api/central/threads').length,1);assert.equal(f.posted.filter(p=>p.path==='/api/central/chat').length,1);
   assert.equal(research.posted.length,0);
   report.fixture_writes=f.posted.map(p=>({path:p.path,project_id:p.body.project_id||'',thread_id:p.body.thread_id||''}));
   report.request_count=f.requests.length+research.requests.length;
-  pass('No browser exceptions, unknown APIs or external connections; only the intended conversation and message were created in memory');
+  pass('No browser exceptions, unknown APIs or external connections; only intended conversation, manual completion and reversible draft actions occurred in memory');
 })().catch(async error=>{report.failure=error.stack;console.error(error);process.exitCode=1;if(lastPage)await lastPage.screenshot({path:path.join(dir,'failure.png'),fullPage:true}).catch(()=>{});}).finally(async()=>{
   report.finished_at=new Date().toISOString();fs.writeFileSync(path.join(dir,'report.json'),JSON.stringify(report,null,2),{mode:0o600});
   if(browser)await browser.close();console.log('Evidence: '+dir);

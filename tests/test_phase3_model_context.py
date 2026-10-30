@@ -17,7 +17,7 @@ MODEL_SCRIPT=['已查看当前项目记录。']
 original=backend._LocalModelTransport.handle_async_request
 async def capture(self,request):
     payload=json.loads(request.content)
-    if any(m.get('role')=='system' and m.get('content','').startswith('RDOS_REQUEST_INTERPRETER_V1') for m in payload['messages']):
+    if any(backend.model_stage_content(m).startswith('RDOS_REQUEST_INTERPRETER_V1') for m in payload['messages']):
         import httpx
         interpretation_requests.append(payload)
         return httpx.Response(200,json={'model':'local-interpretation-fixture','choices':[{'message':{'role':'assistant','content':json.dumps({'purpose':'discuss','task_actions':[],'memory_changes':[]})},'finish_reason':'stop'}]},request=request)
@@ -165,7 +165,7 @@ async def scenario():
     def trusted_scope(payload):
         for message in payload['messages']:
             if message['role']!='system':continue
-            content=message['content'];start=content.find('{')
+            content=backend.model_stage_content(message);start=content.find('{')
             if start<0:continue
             try:value=json.loads(content[start:])
             except ValueError:continue

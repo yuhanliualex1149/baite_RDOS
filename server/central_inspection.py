@@ -32,7 +32,7 @@ _TABLES = {'central_records', 'phase3_local', 'phase3_history', 'phase3_event_in
 _FIELDS = {
     'projects': ('id', 'name', 'description', 'status', 'revision', 'is_default', 'owner_id', 'node_ids'),
     'tasks': ('id', 'task_id', 'project_id', 'title', 'business_status', 'requirements_version', 'record_revision',
-              'result_status', 'receipt_status', 'quality_status', 'result_refs', 'updated_at', 'integrity_error'),
+              'result_status', 'receipt_status', 'result_refs', 'updated_at', 'integrity_error'),
     'events': ('id', 'project_id', 'event_type', 'task_refs', 'artifact_refs', 'claimed_node_id', 'result_status',
                'created_at', 'sequence', 'late_or_inactive', 'correction_of', 'body'),
     'task_history': ('task_id', 'requirements_version', 'version', 'payload_hash', 'title', 'goal', 'deliverable',
@@ -524,8 +524,7 @@ def _task_fact(task):
                                  for ref in task.get('result_refs', []) if isinstance(ref, dict)]
     value['execution_reported'] = task.get('result_status')
     value['technical_verification'] = task.get('receipt_status') or 'not_observed'
-    value['quality_evaluation'] = task.get('quality_status') or 'not_evaluated'
-    value['evidence_boundary'] = '成果引用、技术读回和质量判断分别记录；引用存在不等于本次已读取成果正文。'
+    value['evidence_boundary'] = '成果引用与技术读回分别记录；引用存在不等于本次已读取成果正文。'
     return value
 
 

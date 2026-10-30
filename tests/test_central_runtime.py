@@ -409,7 +409,7 @@ async def scenario():
 asyncio.run(scenario())
 ''')
 
-    def test_model_history_excludes_failed_attempts_and_current_retry_message(self):
+    def test_model_history_keeps_failed_turns_without_duplicating_current_retry(self):
         self.check('''
 async def scenario():
     global MODEL_SCRIPT
@@ -426,15 +426,20 @@ async def scenario():
                 "role": role, "content": key.upper() + "_SENTINEL", "created_at": runtime.now()})
     MODEL_SCRIPT = [backend.tool_message("read_feedback", {}), {"http_status": 401}]
     current = await chat(project_id, thread, "history-retry", "CURRENT_RETRY_REQUEST")
-    # A stored failed response remains reviewable, but cannot enter conversation history.
+    # Prior failed turns remain available. This same running request is supplied
+    # exactly once, with its retry evidence in the current run materials.
     store.put("message", current["id"] + ":assistant", {"run_id": current["id"], "thread_id": thread["id"],
         "role": "assistant", "content": "CURRENT_FAILED_RESPONSE_SENTINEL", "created_at": runtime.now()})
     MODEL_SCRIPT = ["续试完成。"]
     before = len(captured)
     retry = await service.retry_run(current["id"], admin)
     await service.ACTIVE_RUN_TASKS[retry["id"]]
-    conversation = [m["content"] for m in captured[before]["messages"] if "<materials>" not in m.get("content", "") and m["role"] != "system"]
-    assert conversation == ["SUCCESSFUL_REQUEST", "SUCCESSFUL_RESPONSE", "CURRENT_RETRY_REQUEST"], conversation
+    conversation = [m["content"] for m in captured[before]["messages"] if "<materials>" not in m.get("content", "") and '<central_memory>' not in m.get('content','') and m["role"] != "system"]
+    assert conversation.count('CURRENT_RETRY_REQUEST')==1,conversation
+    for retained in ('SUCCESSFUL_REQUEST','SUCCESSFUL_RESPONSE','FAILED_SENTINEL','INTERRUPTED_SENTINEL','UNFINISHED_SENTINEL'):
+        assert retained in conversation,conversation
+    assert 'OLD-GENERATION_SENTINEL' not in conversation
+    assert 'CURRENT_FAILED_RESPONSE_SENTINEL' not in conversation
     assert store.get("message", "failed:assistant")["content"] == "FAILED_SENTINEL"
 asyncio.run(scenario())
 ''')

@@ -18,19 +18,19 @@ TASK_SCHEMA = {'type':'object','additionalProperties':False,'properties':{
  'task_id':{'type':'string','description':'调整现有任务时填写；新任务省略。'},
  'title':{'type':'string'},'goal':{'type':'string'},'deliverable':{'type':'string'},
  'change_reason':{'type':'string','description':'调整目标或交付条件时说明变更原因及旧成果处理。'},
- 'task_type':{'type':'string','enum':list(rules.TASK_TYPES),'description':'动作、成果制作或Agent审阅。默认action。'},
+ 'task_type':{'type':'string','enum':list(rules.TASK_TYPES),'description':'执行动作或成果制作。提交审阅意见也作为普通执行任务。默认action。'},
  'owner_id':{'type':'string'},
  'executor_node_ids':{'type':'array','items':{'type':'string'},'description':'使用workspace登记的节点标识。'},
  'deliverable_audience':{'type':'array','items':{'type':'string','enum':list(rules.AUDIENCES)}},
  'input_refs':{'type':'array','items':{'type':'object','properties':{
      'document_id':{'type':'string'},'revision':{'type':['integer','string']},'content_hash':{'type':'string'}},
-     'required':['document_id','revision','content_hash']},'description':'Review须绑定指定被审阅成果版本。'},
+     'required':['document_id','revision','content_hash']},'description':'需要时绑定输入资料的具体版本。'},
  'output_zone':{'type':'string','enum':['project','agent']},
  'dispatch_to':{'type':'array','items':{'type':'string','enum':['agent','human']}},
  'return_to':{'type':'array','items':{'type':'string','enum':['agent','human']}},
  'completion_rule':{'type':'object','properties':{'kind':{'type':'string','enum':list(rules.COMPLETION_KINDS)}},
      'additionalProperties':False,'required':['kind'],
-     'description':'默认receipt_recorded：完成执行与回执核对即收尾。只有明确要求人判断质量才选human；review任务类别本身不要求人工验收。'},
+     'description':'默认receipt_recorded：完成执行与回执核对即收尾；RDOS不办理质量验收。'},
  'due_at':{'type':'string'},'editable_document_ids':{'type':'array','items':{'type':'string'}}}}
 
 MUTATIONS = {'phase3_apply_task_action','phase3_start_task','phase3_update_task','phase3_pause_task',

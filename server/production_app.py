@@ -39,6 +39,8 @@ async def lifespan(_: FastAPI):
     _sync_registered_projects()
     central_memory.initialize()
     central_settings.initialize()
+    from server import next_release_migration
+    next_release_migration.initialize()
     await central_maintenance.start(enabled=os.environ.get('RDOS_MAINTENANCE_ENABLED') == '1')
     try:
         yield
