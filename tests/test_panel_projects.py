@@ -115,11 +115,35 @@ assert changed['folder_url']==legacy_url and changed['folder_id']=='LegacyFinanc
 assert changed['node_ids']==[node['node_id'],other['node_id']] and changed['revision']==2
 assert projects.update_project(second['id'],{'description':'只编辑说明'},admin,'legacy-description',2)['folder_url']==legacy_url
 denied('invalid_project',lambda:projects.update_project(second['id'],
-    {'folder_url':'https://shbebetter.feishu.cn/drive/folder/AnotherFolder'},admin,'different-legacy-folder',3))
-denied('invalid_project',lambda:create_project('new-legacy-folder',folder_url=legacy_url))
-denied('invalid_project',lambda:projects.update_project(second['id'],
     {'folder_url':'https://shbebetter.feishu.cn.evil.invalid/drive/folder/LegacyFinance123'},admin,'foreign-folder',3))
 assert projects.get_project(second['id'])['folder_url']==legacy_url
+''')
+
+    def test_authorized_project_folders_preserve_tenant_and_reject_other_hosts(self):
+        self.check('''
+for index,host in enumerate(('scn33386s7ui.feishu.cn','shbebetter.feishu.cn')):
+    url='https://'+host+'/drive/folder/ProjectFolder'+str(index)
+    project=create_project('authorized-folder-'+str(index),folder_url=url+'/?from=copy')
+    assert project['folder_url']==url and project['resolved_folder_url']==url
+    assert projects.resource_scope(project['id'],backend3.registry())['zones']['project']['source_url']==url
+    assert create_project('authorized-folder-'+str(index),folder_url=url+'/?from=copy')==project
+    moved_url='https://shbebetter.feishu.cn/drive/folder/ChangedFolder'+str(index)
+    moved=projects.update_project(project['id'],{'folder_url':moved_url},admin,'move-authorized-'+str(index),1)
+    assert moved['folder_url']==moved_url and moved['resolved_folder_url']==moved_url
+    assert projects.get_project(project['id'])['folder_url']==moved_url
+before=projects.list_projects(admin,True)
+for index,url in enumerate((
+    'https://other.feishu.cn/drive/folder/ForeignFolder',
+    'https://shbebetter.feishu.cn.evil.invalid/drive/folder/ForeignFolder',
+    'https://shbebetter.feishu.cn@evil.invalid/drive/folder/ForeignFolder',
+    'https://user@shbebetter.feishu.cn/drive/folder/ForeignFolder',
+    'https://shbebetter.feishu.cn:443/drive/folder/ForeignFolder',
+    'http://shbebetter.feishu.cn/drive/folder/ForeignFolder',
+    'https://shbebetter.feishu.cn/docx/NotAFolder',
+    'https://shbebetter.feishu.cn/drive/folder/ForeignFolder#fragment',
+)):
+    denied('invalid_project',lambda:create_project('rejected-folder-'+str(index),folder_url=url))
+assert projects.list_projects(admin,True)==before
 ''')
 
     def test_deactivation_pauses_before_inactive_and_reenable_does_not_resume(self):

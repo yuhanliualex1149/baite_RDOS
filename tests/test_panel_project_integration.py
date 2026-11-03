@@ -10,6 +10,54 @@ class PanelProjectIntegrationTest(unittest.TestCase):
         result = run_guarded(PROJECT_SETUP + '\n' + body)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_project_api_registers_authorized_secondary_tenant_folder(self):
+        self.check('''
+from server.main import app
+from server import central_api
+import httpx
+async def scenario():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://127.0.0.1:18761',
+        headers={'Origin':'http://127.0.0.1:18761'}) as client:
+        client.cookies.set(central_api.COOKIE,central.login(admin_username,admin_password)['token'])
+        url='https://shbebetter.feishu.cn/drive/folder/NewProjectFolder'
+        body={'operation_id':'secondary-tenant-project','name':'项目目录登记','description':'项目说明',
+            'node_ids':['node_workbuddy'],'folder_url':url+'?from=copy'}
+        response=await client.post('/api/central/projects',json=body)
+        assert response.status_code==200,response.text
+        project=response.json()['item'];pid=project['id']
+        assert project['folder_url']==url and project['resolved_folder_url']==url
+        assert (await client.post('/api/central/projects',json=body)).json()==response.json()
+        replacement='https://shbebetter.feishu.cn/drive/folder/ReplacementFolder'
+        edited=await client.patch('/api/central/projects/'+pid,json={
+            'operation_id':'secondary-tenant-folder-change','expected_revision':1,'folder_url':replacement})
+        assert edited.status_code==200,edited.text
+        assert edited.json()['item']['resolved_folder_url']==replacement
+        listing=await client.get('/api/central/projects')
+        saved=next(p for p in listing.json()['items'] if p['id']==pid)
+        assert saved['folder_url']==replacement
+        scope=projects.resource_scope(pid,backend3.registry())
+        assert scope['zones']['project']['folder_id']=='ReplacementFolder'
+        assert scope['zones']['project']['source_url']==replacement
+asyncio.run(scenario())
+''')
+
+    def test_project_source_snapshots_use_the_registered_folder_domain(self):
+        self.check('''
+from server import shared_knowledge as knowledge
+project=create_project('source-tenant',folder_url='https://shbebetter.feishu.cn/drive/folder/ProjectSourceFolder')
+class ProjectSource:
+    def read_project_files(self,project_id):
+        assert project_id==project['id']
+        return [{'token':'ProjectSourceDoc','type':'docx','name':'项目资料','path':'项目资料',
+            'content_status':'full_text','content':'项目事实','source_revision':'1',
+            'source_url':'https://untrusted.invalid/docx/ProjectSourceDoc'}]
+result=knowledge.sync_project_files(ProjectSource(),project['id'],admin,'source-domain-sync')
+assert result['status']=='succeeded' and result['item_count']==1
+saved=central.items('central_project_source')
+assert len(saved)==1 and saved[0]['source_url']=='https://shbebetter.feishu.cn/docx/ProjectSourceDoc'
+assert saved[0]['project_id']==project['id'] and saved[0]['content_status']=='full_text'
+''')
+
     def test_real_api_project_create_edit_and_scoped_task_authority(self):
         self.check('''
 from server.main import app

@@ -67,6 +67,68 @@ with patch.object(fs.subprocess,'run',side_effect=remote):
   [cfg['phase3']['cli_path'],'auth','status'],str(root/'runtime'),{}))
 ''')
 
+    def test_project_domain_survives_registration_discovery_and_document_delivery(self):
+        self.check('''
+origin='https://shbebetter.feishu.cn'
+projects[1]['resolved_folder_url']=origin+'/drive/folder/'+second_root
+backend.register_projects(projects)
+saved=config.read_json(backend.path)
+assert next(p for p in saved['projects'] if p['id']==second)['folder_url']==projects[1]['resolved_folder_url']
+ref=candidate()
+nested='folderNestedProject'
+folders[second_root].append({'token':nested,'name':'子目录','type':'folder','parent_token':second_root})
+folders[nested]=[{'token':'fileProjectPdf','name':'参考.pdf','type':'file','parent_token':nested}]
+for folder in fs.KNOWLEDGE_ROOTS.values():
+ folders[folder]=[{'token':'folderInstitutionSkill','name':'机构方法','type':'folder','parent_token':folder}]
+with patch.object(fs.subprocess,'run',side_effect=remote):
+ files=backend.read_project_files(second)
+ assert {f['source_url'] for f in files}=={origin+'/docx/'+ref['document_id'],origin+'/drive/folder/'+nested,origin+'/file/fileProjectPdf'}
+ backend.refresh_registry()
+ registered=backend.register_event_document(event_for(),task_for(),ref)
+ assert registered['source_url']==origin+'/docx/'+ref['document_id']
+ created=backend.create_document('project','项目成果','原始项目正文','domain-create',project_id=second)
+ assert created['source_url']==origin+'/docx/'+created['id']
+ agent=backend.create_document('agent','共享成果','共享正文','domain-agent-create',project_id=second)
+ assert agent['source_url']==fs.TENANT+'/docx/'+agent['id']
+ skills=backend.list_skill_folders()
+ assert skills[0]['source_url']==fs.TENANT+'/drive/folder/folderInstitutionSkill'
+ reopened=fs.FeishuBackend(cfg,config.read_json(backend.path),backend.executor)
+ assert reopened.read_document(created['id'])['source_url']==created['source_url']
+ views={d['id']:d for d in reopened.registry()['documents']}
+ assert views[created['id']]['source_url']==created['source_url']
+ assert views[agent['id']]['source_url']==agent['source_url']
+ assert reopened.registry()['task_table_url'].startswith(fs.TENANT+'/base/')
+ before=len(calls)
+ denied(lambda:reopened.executor.list_root('unregisteredDomainFolder'))
+ assert len(calls)==before
+''')
+
+    def test_project_domain_switch_updates_registered_root_without_granting_old_root(self):
+        self.check('''
+projects[1]['resolved_folder_url']='https://shbebetter.feishu.cn/drive/folder/'+second_root
+backend.register_projects(projects)
+next_root='folderReplacementProject'
+folders[next_root]=[{'token':'docReplacementSource','name':'当前资料','type':'docx','parent_token':next_root}]
+documents['docReplacementSource']={'title':'当前资料','content':'当前目录正文','revision_id':2}
+projects[1].update(folder_id=next_root,resolved_folder_id=next_root,
+                   resolved_folder_url=fs.TENANT+'/drive/folder/'+next_root)
+backend.register_projects(projects)
+with patch.object(fs.subprocess,'run',side_effect=remote):
+ current=backend.read_project_files(second)
+ assert len(current)==1 and current[0]['source_url']==fs.TENANT+'/docx/docReplacementSource'
+ before=len(calls)
+ denied(lambda:backend.executor.list_root(second_root))
+ assert len(calls)==before
+for url in ('https://foreign.feishu.cn/drive/folder/'+next_root,
+            'https://shbebetter.feishu.cn.evil.invalid/drive/folder/'+next_root,
+            'https://shbebetter.feishu.cn/drive/folder/otherFolder',
+            'https://user@shbebetter.feishu.cn/drive/folder/'+next_root):
+ invalid=[dict(p) for p in projects]
+ invalid[1]['resolved_folder_url']=url
+ denied(lambda:backend.register_projects(invalid))
+ assert next(p for p in backend.resources['projects'] if p['id']==second)['folder_id']==next_root
+''')
+
     def test_default_and_two_projects_roundtrip_same_tables_in_v2(self):
         self.check('''
 with patch.object(fs.subprocess,'run',side_effect=remote):

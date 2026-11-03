@@ -12,6 +12,7 @@ import hashlib
 import re
 import threading
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -169,7 +170,7 @@ def _source_status(path):
     return '来源目录版本，未推定机构发布状态'
 
 
-def _normalize(category, raw):
+def _normalize(category, raw, *, source_origin=TENANT):
     if not isinstance(raw, list):
         _error('incomplete_knowledge', '知识来源没有返回完整文件清单')
     output, tokens, total = [], set(), 0
@@ -200,7 +201,7 @@ def _normalize(category, raw):
         item = {'id': identifier, 'category': category, 'name': name, 'path': path, 'type': kind,
             'source_token': token, 'parent_token': value.get('parent_token', ''),
             'path_segments': list(value.get('path_segments', [path])),
-            'source_url': TENANT + ('/drive/folder/' if kind == 'folder' else '/docx/' if kind == 'docx' else '/file/') + token,
+            'source_url': source_origin + ('/drive/folder/' if kind == 'folder' else '/docx/' if kind == 'docx' else '/file/') + token,
             'version': version, 'source_revision': revision, 'content_hash': content_hash,
             'content_status': status, 'available': True, 'modified_time': value.get('modified_time', ''),
             'source_marker': value.get('source_marker', ''), 'cache_reused': bool(value.get('cache_reused')),
@@ -215,7 +216,7 @@ def sync_project_files(backend, project_id, actor, operation_id):
     from server.central_maintenance import permits
     if not permits(actor, 'sync', project_id):
         _actor(actor, admin=True)
-    rdos_projects.get_project(project_id)
+    project = rdos_projects.get_project(project_id)
     category = 'project:' + project_id
     reader = getattr(backend, 'read_project_files', None)
     if reader:
@@ -232,7 +233,10 @@ def sync_project_files(backend, project_id, actor, operation_id):
                         'source_revision': str(doc['revision'])})
     else:
         _error('project_source_unavailable', '项目目录读取能力尚未配置', 503)
-    values = _normalize(category, raw)
+    root = urlsplit(project.get('resolved_folder_url', ''))
+    source_origin = ('https://' + root.netloc if root.scheme == 'https'
+                     and root.netloc in rdos_projects.PROJECT_FOLDER_HOSTS else TENANT)
+    values = _normalize(category, raw, source_origin=source_origin)
     now = db.utc_now()
     with db.connection() as conn:
         conn.execute('BEGIN IMMEDIATE')

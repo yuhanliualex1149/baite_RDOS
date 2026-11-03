@@ -18,6 +18,7 @@ import threading
 import tempfile
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from server import rdos_contract
 
 from lab import config
@@ -175,6 +176,37 @@ def _project_folder(registry, project_id):
     if not item:
         _fail('out_of_scope', '项目未登记')
     return _identifier(item['folder_id'])
+
+
+def _registered_folder_url(project, folder):
+    """Keep the administrator-approved location, with old registries defaulting locally."""
+    if folder in {HUMAN_FOLDER, AGENT_FOLDER}:
+        return TENANT + '/drive/folder/' + folder
+    value = project.get('resolved_folder_url') or project.get('folder_url') or TENANT + '/drive/folder/' + folder
+    if not isinstance(value, str):
+        _fail('invalid_registry', '项目文件夹链接无效')
+    parsed = urlsplit(value.strip())
+    # Match project registration without coupling the CLI guard to database services.
+    if (parsed.scheme != 'https'
+            or parsed.netloc.lower() not in {'scn33386s7ui.feishu.cn', 'shbebetter.feishu.cn'}
+            or parsed.path.rstrip('/') != '/drive/folder/' + folder or parsed.fragment):
+        _fail('invalid_registry', '项目文件夹链接与登记对象不一致')
+    return 'https://' + parsed.netloc.lower() + '/drive/folder/' + folder
+
+
+def _folder_origin(registry, folder, project_id):
+    if folder in {HUMAN_FOLDER, AGENT_FOLDER}:
+        return TENANT
+    project = next((p for p in registry.get('projects', [])
+                    if p['id'] == project_id and p.get('folder_id') == folder), None)
+    if not project:
+        _fail('out_of_scope', '项目文件夹未登记在当前项目')
+    return _registered_folder_url(project, folder).split('/drive/folder/', 1)[0]
+
+
+def _document_url(registry, document):
+    origin = _folder_origin(registry, document['folder_id'], document.get('project_id', PROJECT_ID))
+    return origin + '/docx/' + document['id']
 
 
 def _validate_registry(value, cfg, *, ready=True):
@@ -547,8 +579,10 @@ class _CLIExecutor:
             if project_id not in _project_ids(self.registry):
                 _fail("out_of_scope", "项目工作目录未登记")
             root_token = _project_folder(self.registry, project_id)
+            origin = _folder_origin(self.registry, root_token, project_id)
         elif category in KNOWLEDGE_ROOTS:
             root_token = KNOWLEDGE_ROOTS[category]
+            origin = TENANT
         else:
             _fail("out_of_scope", "知识来源未登记")
         if getattr(self._pending, "knowledge", None) is not None:
@@ -611,7 +645,7 @@ class _CLIExecutor:
                     # Do not traverse or fetch any body while discovering the
                     # complete list of top-level Skill units.
                     output.extend({**item, "content_status": "folder",
-                                   "source_url": TENANT + "/drive/folder/" + item["token"]}
+                                   "source_url": origin + "/drive/folder/" + item["token"]}
                                   for item in children if item["type"] == "folder")
                     return
                 if depth == 0 and folder_token is not None:
@@ -627,7 +661,7 @@ class _CLIExecutor:
                     value = dict(item)
                     kind, token, name = item["type"], item["token"], item["name"]
                     scan["reading"] = item
-                    value["source_url"] = TENANT + ("/drive/folder/" if kind == "folder" else "/docx/" if kind == "docx" else "/file/") + token
+                    value["source_url"] = origin + ("/drive/folder/" if kind == "folder" else "/docx/" if kind == "docx" else "/file/") + token
                     value["content_status"] = "folder" if kind == "folder" else "attachment_only"
                     if kind == "folder":
                         scan["folders"].add(token)
@@ -694,7 +728,7 @@ class _CLIExecutor:
             token, kind = current.get("token", root_token), current.get("type", "folder")
             exc.knowledge_source = {"category": category, "name": current.get("name", category),
                 "path": current.get("path", ""),
-                "source_url": TENANT + ("/drive/folder/" if kind == "folder" else "/docx/" if kind == "docx" else "/file/") + token}
+                "source_url": origin + ("/drive/folder/" if kind == "folder" else "/docx/" if kind == "docx" else "/file/") + token}
             raise
         finally:
             self._pending.knowledge = None
@@ -849,7 +883,7 @@ class FeishuBackend:
                             "agent": {"folder_id": AGENT_FOLDER, "url": TENANT + "/drive/folder/" + AGENT_FOLDER, "source_url": TENANT + "/drive/folder/" + AGENT_FOLDER}},
                      task_table_url=TENANT + "/base/" + value["base_token"] + "?table=" + value["tasks_table"],
                      event_table_url=TENANT + "/base/" + value["base_token"] + "?table=" + value["events_table"])
-        value["documents"] = [{**d, "object_id": d["id"], "source_url": TENANT + "/docx/" + d["id"]} for d in value["documents"]]
+        value["documents"] = [{**d, "object_id": d["id"], "source_url": _document_url(value, d)} for d in value["documents"]]
         return value
 
     def register_projects(self, projects, *, persist=True):
@@ -858,11 +892,12 @@ class FeishuBackend:
         for project in projects:
             if project.get('merged_into'):
                 continue
+            folder = _identifier(project.get('resolved_folder_id') or project['folder_id'])
             values.append({'id': _identifier(project['id']),
                 'public_id': rdos_contract.public_view(project['id']),
                 'name': project['name'], 'status': project['status'],
                 'node_ids': list(project.get('node_ids', [])),
-                'folder_id': _identifier(project.get('resolved_folder_id') or project['folder_id'])})
+                'folder_id': folder, 'folder_url': _registered_folder_url(project, folder)})
         with _LOCK:
             self.resources['projects'] = values
             if persist:
@@ -1239,7 +1274,7 @@ class FeishuBackend:
                     "body_content": _body(content, item["title"]), "body_content_hash": _hash(_body(content, item["title"])),
                     "folder_id": item["folder_id"], "zone": "agent" if item["folder_id"] == AGENT_FOLDER else "project",
                     "operation_id": item["operation_id"], "project_id": item.get('project_id', PROJECT_ID),
-                    "source_url": TENANT + "/docx/" + identifier,
+                    "source_url": _document_url(self.resources, item),
                     "source_environment": "feishu_production" if _FORMAL else "feishu_test", "readback_verified": True}
 
     def create_document(self, zone, title, content, opid, *, project_id=PROJECT_ID):

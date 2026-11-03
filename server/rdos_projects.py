@@ -14,7 +14,7 @@ from server import central_store as central, phase3_store as local, db
 
 DEFAULT_PROJECT_ID = local.PROJECT_ID
 PROJECT_FIELDS = {'name', 'description', 'node_ids', 'folder_url'}
-TENANT = 'https://scn33386s7ui.feishu.cn'
+PROJECT_FOLDER_HOSTS = frozenset({'scn33386s7ui.feishu.cn', 'shbebetter.feishu.cn'})
 _ACTIVE_DEACTIVATIONS = set()
 
 
@@ -232,7 +232,8 @@ def resource_scope(project_id, registry, *, published_tasks=None):
     result = copy.deepcopy(registry)
     result['project_id'] = project_id
     project_zone = result.setdefault('zones', {}).setdefault('project', {})
-    project_zone.update(folder_id=project['resolved_folder_id'], source_url=project['resolved_folder_url'], name='项目工作文件夹')
+    project_zone.update(folder_id=project['resolved_folder_id'], url=project['resolved_folder_url'],
+                        source_url=project['resolved_folder_url'], name='项目工作文件夹')
     tasks = local.items('task_cache') if published_tasks is None else published_tasks
     referenced_ids = {reference.get('document_id', reference.get('id'))
         for task in tasks if task.get('project_id') == project_id and not task.get('integrity_error')
@@ -258,10 +259,10 @@ def _folder(value, previous=None):
             and re.fullmatch(r'[A-Za-z0-9-]+\.feishu\.cn', parsed.netloc)
             and match[1] == previous.get('folder_id')):
         return previous['folder_url'], previous['folder_id']
-    if (parsed.scheme != 'https' or parsed.netloc != 'scn33386s7ui.feishu.cn'
+    if (parsed.scheme != 'https' or parsed.netloc not in PROJECT_FOLDER_HOSTS
             or not match or parsed.fragment):
-        _error('invalid_project', '请使用当前飞书空间的项目文件夹链接', 422)
-    return TENANT + '/drive/folder/' + match[1], match[1]
+        _error('invalid_project', '请使用已授权飞书空间的项目文件夹链接', 422)
+    return 'https://' + parsed.netloc + '/drive/folder/' + match[1], match[1]
 
 
 def _fields(payload, previous=None):
