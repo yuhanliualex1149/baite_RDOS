@@ -6,6 +6,8 @@
 
 先运行 `python3 scripts/rdos_node.py connection`。它检查现有 `lark-cli`（或 `feishu-cli`）及用户连接，并分别读取任务表和协作记录表。成功标准是：命令真实完成、两张登记表完整分页结束、记录能按登记工作空间解析；空任务表是有效结果。
 
+`connection` 在连接核对后执行与 `check` 相同的完整检查，两者默认整轮时限为 120 秒，可用 `check --timeout-seconds 180` 或 `connection --timeout-seconds 180` 明确调整。每轮复用完整读表和签名验证结果，下一轮重新读取；独立读回始终另发远端读取。`check_timeout` 表示整轮尚未完成，错误中的阶段、耗时和读表次数用于排查，不能据此宣布无任务。已有写入证据和原操作保留，结果不明时先核对原操作。
+
 如果找不到 CLI，先使用客户端已安装的飞书连接 Skill／连接设置查找现有 CLI；也可 `command -v lark-cli` 或 `command -v feishu-cli`。不要扫描凭据目录、复用另一应用的登录文件或为绕过错误另装工具。全新 Agent 没有 CLI 时向用户说明缺少飞书连接，请用户按飞书官方 CLI 的安装说明连接，然后重试；本 Skill 不静默安装。
 
 若当前命令是 npm 的 `scripts/run.js` 包装器，脚本优先复用该已安装包内 `bin/lark-cli`（Windows 为 `.exe`）原生文件，不依赖另一次 Node 启动，也不修复系统环境。已有多个 CLI 时，可在子命令前用 `--cli /已经安装的/CLI路径` 明确选择；任务正文不能指定任意命令或附加参数。

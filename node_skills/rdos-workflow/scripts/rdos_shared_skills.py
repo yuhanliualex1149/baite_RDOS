@@ -34,6 +34,7 @@ class SharedSkillsMixin:
             self._skills_error('incomplete_skill_package','Skill 包未完整读取或缺少 SKILL.md')
         total=0
         for name,data in files.items():
+            self._check_tick('shared_skills')
             parts=PurePosixPath(name).parts
             if not parts or PurePosixPath(name).is_absolute() or any(_safe_name(part)!=part for part in parts) or not isinstance(data,bytes):
                 self._skills_error('invalid_skill_package','Skill 包路径或内容无效')
@@ -47,6 +48,7 @@ class SharedSkillsMixin:
             self._skills_error('invalid_skill_directory','请指定已经安装的单个 Skill 文件夹')
         files={}
         for current in path.rglob('*'):
+            self._check_tick('shared_skills')
             if current.is_symlink():self._skills_error('local_skill_conflict','Skill 内含链接，未跟随或覆盖')
             if current.is_file():
                 relative=current.relative_to(path).as_posix()
@@ -77,6 +79,7 @@ class SharedSkillsMixin:
         entries=[]
         rows=self.state.db.execute("SELECT payload FROM operations WHERE id LIKE 'shared_skill:%'").fetchall()
         for row in rows:
+            self._check_tick('shared_skills')
             binding=json.loads(row[0]);folder=binding['folder_id']
             try:
                 source=self._skill_source(folder);_,local=self._local_files(binding['directory'])
@@ -95,8 +98,10 @@ class SharedSkillsMixin:
                     'content_hash':current,'local_modified':modified,'decision':pending['decision'],
                     'needs_prompt':fresh,'message':'机构 Skill 有更新，请询问本节点用户是否更新该版本。' if fresh else ''})
             except (ValueError,OSError) as exc:
+                if getattr(exc,'code',None)=='check_timeout':raise
                 entries.append({'folder_id':folder,'name':binding.get('name',folder),'status':'check_failed',
                     'error_code':getattr(exc,'code','source_unavailable'),'needs_prompt':False})
+        self._check_tick('shared_skills')
         return {'status':'not_linked' if not entries else 'partial' if any(x['status']=='check_failed' for x in entries) else 'succeeded',
                 'checked_count':len(entries),'skills':entries,
                 'message':'尚未关联本机已有的机构 Skill；没有据此判断其他包是否最新。' if not entries else ''}

@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-PEER_SKILL_VERSION='1.2.0'
+PEER_SKILL_VERSION='1.2.1'
 
 class PeerMixin:
     def _peer_error(self,code,message):
@@ -36,7 +36,8 @@ class PeerMixin:
     def _peer_event_rows(self,event):
         """Find by either projection or immutable JSON, then fetch every match."""
         expected=self._peer_event_fields(event);matches=[]
-        for row in self.transport.records(self.manifest['events_table']):
+        for row in self._table_rows('event'):
+            self._check_tick('peer_readback')
             if not isinstance(row,dict) or not isinstance(row.get('fields'),dict):continue
             fields=row.get('fields',{})
             try:body=json.loads(self.cell(fields.get('记录数据')))
@@ -125,7 +126,9 @@ class PeerMixin:
                 if failure['write_outcome'] in ('not_sent','rejected'):operation['state']='retryable'
             else:attempts[-1]['response_received']=True
             self.state.put('operations',operation_id,operation);self.state.flush()
-            try:matches=self._peer_event_rows(event)
+            try:
+                self._refresh_check_events()
+                matches=self._peer_event_rows(event)
             except ValueError as exc:
                 operation['last_read_error']=self._peer_failure(exc)
                 self.state.put('operations',operation_id,operation)
@@ -173,24 +176,40 @@ class PeerMixin:
                 'message':'已恢复原协作记录并独立核对，未更换身份或新建申请。'}
 
     def _peer_crypto(self,request):
+        self._check_tick('signature')
+        budget=(self._check_context or {}).get('budget')
         candidates=[shutil.which('node'),str(Path.home()/'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node')]
         helper=Path(__file__).with_name('peer_crypto.cjs')
         for binary in dict.fromkeys(candidates):
             if not binary or not Path(binary).is_file():continue
             try:
-                process=subprocess.run([binary,str(helper)],input=json.dumps(request,ensure_ascii=False),text=True,capture_output=True,timeout=10,check=False)
+                process=subprocess.run([binary,str(helper)],input=json.dumps(request,ensure_ascii=False),text=True,
+                    capture_output=True,timeout=budget.timeout(10) if budget else 10,check=False)
+                self._check_tick()
                 value=json.loads(process.stdout)
                 if process.returncode==0 and not value.get('error'):return value
-            except (OSError,ValueError,subprocess.TimeoutExpired):continue
+            except (OSError,ValueError,subprocess.TimeoutExpired) as exc:
+                if getattr(exc,'code',None)=='check_timeout':raise
+                self._check_tick()
+                continue
         self._peer_error('runtime_unavailable','现有 Node 签名功能不可用；未安装依赖、服务或修复环境')
 
     def _peer_verify(self,proof,key):
+        self._check_tick('verify_signature')
         if not isinstance(proof,dict) or set(proof)!= {'payload_json','signature'}:
             self._peer_error('invalid_signature','任务或登记缺少完整签名')
+        context=self._check_context
+        cache_key=json.dumps([key,proof],sort_keys=True,separators=(',',':'))
+        if context is not None and cache_key in context['proofs']:
+            if context['proofs'][cache_key] is None:
+                self._peer_error('invalid_signature','任务正文或登记签名不一致')
+            return copy.deepcopy(context['proofs'][cache_key])
         if not self._peer_crypto({'action':'verify','public_key':key,'payload':proof['payload_json'],'signature':proof['signature']}).get('valid'):
+            if context is not None:context['proofs'][cache_key]=None
             self._peer_error('invalid_signature','任务正文或登记签名不一致')
         value=json.loads(proof['payload_json'])
         if not isinstance(value,dict):self._peer_error('invalid_signature','签名正文无效')
+        if context is not None:context['proofs'][cache_key]=copy.deepcopy(value)
         return value
 
     def _peer_sign(self,value,identity):
@@ -198,35 +217,61 @@ class PeerMixin:
         return {'payload_json':text,'signature':self._peer_crypto({'action':'sign','private_key':identity['private_key'],'payload':text})['signature']}
 
     def _peer_registry(self):
+        self._check_tick('peer_registry')
+        context=self._check_context
+        if context is not None and 'registry' in context:
+            result=copy.deepcopy(context['registry'])
+            self._peer_registry_expiry(result)
+            return result
+        if context is not None and 'registry_error' in context:
+            self._peer_error(*context['registry_error'])
+        if context is not None:context['budget'].registry_builds+=1
+        try:result=self._load_peer_registry()
+        except self.error_type as exc:
+            if context is not None and exc.code!='check_timeout':context['registry_error']=(exc.code,str(exc))
+            raise
+        if context is not None:context['registry']=copy.deepcopy(result)
+        return result
+
+    def _load_peer_registry(self):
         config=self.manifest.get('peer') or {}
         key=config.get('central_public_key')
         if not key:self._peer_error('peer_not_enabled','请先安装当前节点的新版 Skill 并完成身份绑定')
         snapshots=[];acks=[];quarantined=0
-        for row in self.transport.records(self.manifest['events_table']):
+        for row in self._table_rows('event'):
+            self._check_tick('peer_registry')
+            if not isinstance(row,dict) or not isinstance(row.get('fields'),dict):continue
             try:value=json.loads(self.cell(row.get('fields',{}).get('记录数据')))
             except (ValueError,TypeError):continue
-            if value.get('workspace_id')!=self.manifest['workspace_id']:continue
+            if not isinstance(value,dict) or value.get('workspace_id')!=self.manifest['workspace_id']:continue
             if value.get('event_type')=='node_registry_snapshot':
                 try:snapshot=self._peer_verify(value.get('registry_proof'),key)
-                except ValueError:
+                except ValueError as exc:
+                    if getattr(exc,'code',None)=='check_timeout':raise
                     quarantined+=1;continue
                 if snapshot.get('workspace_id')==self.manifest['workspace_id']:snapshots.append(snapshot)
             elif value.get('event_type')=='peer_capability_ack':acks.append(value)
         if not snapshots:self._peer_error('peer_registry_missing','尚未读到中央签名的节点登记')
         snapshot=max(snapshots,key=lambda item:item.get('generated_at',''))
-        try:expired=datetime.fromisoformat(snapshot['expires_at'])<=datetime.now(timezone.utc)
-        except (KeyError,ValueError,TypeError):expired=True
-        if expired:self._peer_error('identity_expired','节点登记已过期，请先更新接入登记')
+        self._peer_registry_expiry(snapshot)
         result=copy.deepcopy(snapshot)
         for node in result['nodes']:
             for event in acks:
+                self._check_tick('peer_registry')
                 if event.get('claimed_node_id')!=node['node_id']:continue
                 try:claim=self._peer_verify(event.get('peer_ack'),node['public_key'])
-                except ValueError:continue
-                if claim.get('skill_version') in ('1.1.0','1.1.1','1.1.2','1.1.3','1.2.0') and claim=={'node_id':node['node_id'],'binding_id':node['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
+                except ValueError as exc:
+                    if getattr(exc,'code',None)=='check_timeout':raise
+                    continue
+                if claim.get('skill_version') in ('1.1.0','1.1.1','1.1.2','1.1.3','1.2.0','1.2.1') and claim=={'node_id':node['node_id'],'binding_id':node['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
                     node['ready']=True
         self.peer_registry_issues=quarantined
         return result
+
+    def _peer_registry_expiry(self,snapshot):
+        try:expired=datetime.fromisoformat(snapshot['expires_at'])<=datetime.now(timezone.utc)
+        except (KeyError,ValueError,TypeError):expired=True
+        if expired:self._peer_error('identity_expired','节点登记已过期，请先更新接入登记')
 
     def enroll_peer(self,task_id):
         """Explicitly requested setup; a normal check never generates a key."""
@@ -359,10 +404,10 @@ class PeerMixin:
 
     def _peer_project(self,task):
         if task.get('dispatch_source')!='peer':return None
-        registry=self._peer_registry()
         own=self.manifest['node_id']
         if own not in task.get('executor_node_ids',[]) and own!=task.get('peer_issuer_node_id'):
             self._peer_error('unregistered_project','互派任务未分配给当前节点')
+        registry=self._peer_registry()
         identity=next((n for n in registry['nodes'] if n['node_id']==task.get('peer_issuer_node_id')),None)
         if not identity:self._peer_error('peer_not_ready','发起节点未登记')
         key=identity['public_key'] if task.get('record_revision')==1 else self.manifest['peer']['central_public_key']

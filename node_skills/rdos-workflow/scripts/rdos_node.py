@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import contextmanager
 import hashlib
 import html
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -15,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 
 try:
     import rdos_rules as rules
@@ -33,6 +36,33 @@ class WorkflowError(ValueError):
 
 def fail(code, message):
     raise WorkflowError(code, message)
+
+
+class CheckBudget:
+    """One monotonic deadline, shared by nested reads and signature processes."""
+    def __init__(self, seconds):
+        if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds <= 0:
+            fail("invalid_input", "检查时限须为正数秒")
+        self.seconds, self.started = seconds, time.monotonic()
+        self.phase = "start"
+        self.table_reads = {"task": 0, "event": 0}
+        self.registry_builds = 0
+
+    def tick(self, phase=None):
+        if phase is not None: self.phase = phase
+        remaining = self.seconds - (time.monotonic() - self.started)
+        if remaining <= 0:
+            raise WorkflowError("check_timeout", "本轮检查超时，检查未完成；保留原操作后重新核对",
+                write_outcome="unknown", details=self.diagnostics())
+        return remaining
+
+    def timeout(self, maximum, phase=None):
+        return min(maximum, self.tick(phase))
+
+    def diagnostics(self):
+        return {"phase": self.phase, "elapsed_ms": round((time.monotonic() - self.started) * 1000),
+                "timeout_seconds": self.seconds, "table_reads": dict(self.table_reads),
+                "registry_builds": self.registry_builds}
 
 
 def canonical(value):
@@ -120,18 +150,21 @@ class Feishu:
         self.peer_folders = set()
 
     def run(self, args, content=None):
+        budget = getattr(self, "check_budget", None)
         try:
             completed = subprocess.run([self.binary, *args], input=content, text=True,
-                capture_output=True, timeout=60, check=False)
+                capture_output=True, timeout=budget.timeout(60) if budget else 60, check=False)
         except (FileNotFoundError, PermissionError) as exc:
             raise WorkflowError("connection_failed", "飞书 CLI 未能启动；修复现有连接后可恢复原操作",
                 write_outcome="not_sent", details={"category":"cli_not_started", "errno":exc.errno}) from None
         except subprocess.TimeoutExpired:
+            if budget: budget.tick()
             raise WorkflowError("connection_failed", "飞书操作超时；先核对原操作，不直接重发",
                 write_outcome="unknown", details={"category":"timeout"}) from None
         except OSError:
             raise WorkflowError("connection_failed", "飞书操作中断；先核对原操作，不直接重发",
                 write_outcome="unknown", details={"category":"process_io_error"}) from None
+        if budget: budget.tick()
         try:
             response = json.loads(completed.stdout)
         except ValueError:
@@ -283,8 +316,12 @@ class Feishu:
                         destination=Path(temporary)/"content"
                         try:
                             result=subprocess.run([self.binary,"drive","+download","--as","user","--file-token",current,
-                                "--output",str(destination),"--overwrite"],capture_output=True,text=True,timeout=60,check=False)
-                        except (OSError,subprocess.TimeoutExpired):fail("connection_failed","Skill 文件下载未完成")
+                                "--output",str(destination),"--overwrite"],capture_output=True,text=True,
+                                timeout=self.check_budget.timeout(60) if getattr(self,"check_budget",None) else 60,check=False)
+                        except (OSError,subprocess.TimeoutExpired):
+                            if getattr(self,"check_budget",None):self.check_budget.tick()
+                            fail("connection_failed","Skill 文件下载未完成")
+                        if getattr(self,"check_budget",None):self.check_budget.tick()
                         if result.returncode or destination.is_symlink() or not destination.is_file() or destination.stat().st_size>8_000_000:
                             fail("incomplete_skill_package","Skill 文件未完整下载")
                         files[path]=destination.read_bytes()
@@ -314,13 +351,25 @@ class State:
 
     @contextmanager
     def locked(self):
-        self.db.execute("BEGIN IMMEDIATE")
+        budget = getattr(self, "check_budget", None)
+        previous = self.db.execute("PRAGMA busy_timeout").fetchone()[0] if budget else None
+        if budget: self.db.execute("PRAGMA busy_timeout=" + str(max(1, math.ceil(budget.timeout(70, "checkpoint_lock") * 1000))))
         try:
+            self.db.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            if budget:
+                self.db.execute("PRAGMA busy_timeout=" + str(previous))
+                budget.tick()
+            raise
+        try:
+            if budget: budget.tick()
             yield
         except BaseException:
             self.db.commit()  # preserve dispatched evidence, including exceptions
             raise
         else: self.db.commit()
+        finally:
+            if budget: self.db.execute("PRAGMA busy_timeout=" + str(previous))
 
     def get(self, table, key):
         row = self.db.execute("SELECT payload FROM " + table + " WHERE id=?", (key,)).fetchone()
@@ -348,6 +397,33 @@ class Workflow(PeerMixin, SharedSkillsMixin):
     error_type = WorkflowError
     def __init__(self, manifest, transport, state):
         self.manifest, self.transport, self.state = manifest_value(manifest), transport, state
+        self._check_context = None
+
+    def _check_tick(self, phase=None):
+        if self._check_context is not None:
+            return self._check_context["budget"].tick(phase)
+
+    def _table_rows(self, kind, *, refresh=False):
+        context = self._check_context
+        self._check_tick("read_" + kind)
+        table = self.manifest["tasks_table" if kind == "task" else "events_table"]
+        if context is None: return self.transport.records(table)
+        if refresh or kind not in context["raw"]:
+            context["budget"].table_reads[kind] += 1
+            rows = self.transport.records(table)  # Cache only after complete pagination.
+            self._check_tick()
+            context["raw"][kind] = rows
+            context["decoded"].pop(kind, None)
+            context.pop("task_index", None)
+            context.pop("event_index", None)
+            if kind == "event":
+                context.pop("registry", None)
+                context.pop("registry_error", None)
+                context["decoded"].clear()  # Task grants also depend on the registry.
+        return context["raw"][kind]
+
+    def _refresh_check_events(self):
+        if self._check_context is not None: self._table_rows("event", refresh=True)
 
     def project(self, project_id):
         project = next((p for p in project_entries(self.manifest) if p["id"] == project_id
@@ -356,6 +432,7 @@ class Workflow(PeerMixin, SharedSkillsMixin):
         return project
 
     def scope(self, value):
+        self._check_tick("scope")
         if (not isinstance(value, dict) or value.get("protocol_version") != 2
             or value.get("workspace_id") != self.manifest["workspace_id"]):
             fail("out_of_scope", "记录不属于当前登记工作空间和协议")
@@ -426,6 +503,7 @@ class Workflow(PeerMixin, SharedSkillsMixin):
             if (not isinstance(refs, list) or any(not isinstance(ref, dict) for ref in refs)
                 or not isinstance(value.get("event_type"), str) or not isinstance(value.get("claimed_node_id"), str)):
                 fail("invalid_record", "协作事件字段格式无效")
+            for ref in refs: identifier(ref.get("task_id"))
             identifier(value.get("id"))
             expected.update({"事件ID": value.get("id", ""), "类型": value.get("event_type", ""),
                 "自报节点": value.get("claimed_node_id", ""), "任务引用": canonical(value.get("task_refs", []))})
@@ -437,18 +515,36 @@ class Workflow(PeerMixin, SharedSkillsMixin):
         return value, row.get("record_id")
 
     def read_rows(self, kind):
-        table = self.manifest["tasks_table" if kind == "task" else "events_table"]
+        context = self._check_context
+        self._check_tick("decode_" + kind)
+        if context is not None and kind in context["decoded"]:
+            return copy.deepcopy(context["decoded"][kind])
         valid, invalid = [], []
-        for row in self.transport.records(table):
+        for row in self._table_rows(kind):
+            self._check_tick("decode_" + kind)
             try: valid.append(self.decode(row, kind))
             except WorkflowError as exc:
+                if exc.code == "check_timeout": raise
                 if exc.code != "unregistered_project":
                     invalid.append({"record_id": row.get("record_id") if isinstance(row, dict) else None, "code": exc.code})
+        if context is not None: context["decoded"][kind] = copy.deepcopy((valid, invalid))
         return valid, invalid
 
     def task(self, task_id):
-        rows, invalid = self.read_rows("task")
-        matches = [v for v, rid in rows if v.get("task_id") == task_id]
+        identifier(task_id)
+        self._check_tick("task_lookup")
+        context = self._check_context
+        if context is not None:
+            if "task_index" not in context:
+                index = {}
+                for value, rid in self.read_rows("task")[0]:
+                    self._check_tick("task_index")
+                    index.setdefault(value["task_id"], []).append(value)
+                context["task_index"] = index
+            matches = copy.deepcopy(context["task_index"].get(task_id, []))
+        else:
+            rows, invalid = self.read_rows("task")
+            matches = [v for v, rid in rows if v.get("task_id") == task_id]
         if not matches:
             fail("task_unavailable", "当前任务不可用；无有效任务不执行")
         try:task = rules.select_verified_task_versions(matches)
@@ -474,7 +570,18 @@ class Workflow(PeerMixin, SharedSkillsMixin):
             point["completed_steps"] = old.get("completed_steps", [])
             point["uncertain_operations"] = old.get("uncertain_operations", [])
         events, invalid = self.read_rows("event")
+        context = self._check_context
+        if context is not None:
+            if "event_index" not in context:
+                index = {}
+                for event, rid in events:
+                    self._check_tick("event_index")
+                    for ref in event.get("task_refs", []):
+                        index.setdefault(ref.get("task_id"), []).append((event, rid))
+                context["event_index"] = index
+            events = context["event_index"].get(key, [])
         for event, rid in events:
+            self._check_tick("checkpoint")
             if (event.get("project_id") == task["project_id"] and event.get("claimed_node_id") == self.manifest["node_id"]
                 and {"task_id": key, "requirements_version": task["requirements_version"]} in event.get("task_refs", [])
                 and (period is None or event.get('period_key') == period)
@@ -485,6 +592,7 @@ class Workflow(PeerMixin, SharedSkillsMixin):
                     if actual != event: fail("readback_mismatch", "结果记录独立读回已变化")
                     self.completion_evidence(event, task)
                 except (rules.RuleViolation, WorkflowError) as exc:
+                    if exc.code == "check_timeout": raise
                     point["uncertain_operations"] = sorted(set(point["uncertain_operations"] + [event.get("operation_id", "")]))
                     invalid.append({"record_id": rid, "code": exc.code})
                     continue
@@ -506,15 +614,38 @@ class Workflow(PeerMixin, SharedSkillsMixin):
             self.state.put("checkpoints", task_id, point)
             return {"task": task, "plan": plan, "materials": materials, "quarantined_records": invalid}
 
-    def check(self):
+    def check(self, timeout_seconds=120, *, authenticate=False):
+        budget = CheckBudget(timeout_seconds)
+        context = {"budget": budget, "raw": {}, "decoded": {}, "proofs": {}}
+        previous = [(obj, getattr(obj, "check_budget", None)) for obj in (self.transport, self.state)]
+        self._check_context = context
+        for obj, old in previous: obj.check_budget = budget
+        try:
+            if authenticate:
+                self._check_tick("authentication")
+                self.transport.run(["auth", "status"])
+            # A partial scan must never advance any task checkpoint or send an ACK.
+            self._table_rows("task")
+            self._table_rows("event")
+            result = self._check()
+            self._check_tick("complete")
+            result["diagnostics"] = budget.diagnostics()
+            return result
+        finally:
+            self._check_context = None
+            for obj, old in previous: obj.check_budget = old
+
+    def _check(self):
         try:enrollment=self.continue_peer_enrollment()
         except ValueError as exc:
+            if getattr(exc,"code",None)=="check_timeout":raise
             enrollment={"status":"recovery_pending","error_code":getattr(exc,"code","peer_recovery_failed"),
                         "message":"节点登记尚待核对，普通工作检查继续。"}
         rows, invalid = self.read_rows("task")
         events, event_invalid = self.read_rows("event")  # fail incomplete reads before processing any task
         unique = {}
         for task, rid in rows:
+            self._check_tick("select_tasks")
             task_id = task.get("task_id")
             try:unique[task_id] = rules.select_verified_task_versions([unique[task_id],task]) if task_id in unique else task
             except rules.RuleViolation as exc:fail(exc.code,str(exc))
@@ -525,6 +656,7 @@ class Workflow(PeerMixin, SharedSkillsMixin):
         def stop_ack_verified(task, kind):
             reference = {"task_id": task["task_id"], "requirements_version": task["requirements_version"]}
             for event, rid in events:
+                self._check_tick("stop_ack")
                 if (event.get("event_type") != kind or event.get("project_id") != task["project_id"]
                     or event.get("claimed_node_id") != self.manifest["node_id"]
                     or reference not in event.get("task_refs", [])):
@@ -534,6 +666,7 @@ class Workflow(PeerMixin, SharedSkillsMixin):
                     return True
             return False
         for task_id, task in unique.items():
+            self._check_tick("prepare_tasks")
             if self.manifest["node_id"] not in task.get("executor_node_ids", []):
                 continue
             current = self.prepare(task_id, False)
@@ -888,8 +1021,10 @@ def main(argv=None):
     parser.add_argument("--state")
     parser.add_argument("--cli", help="明确选择已经安装的飞书 CLI 路径，不安装或修复运行环境")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("connection")
-    sub.add_parser("check")
+    for command in ("connection", "check"):
+        bounded = sub.add_parser(command)
+        bounded.add_argument("--timeout-seconds", type=float, default=120,
+            help="整轮检查时限（秒），默认 120；超时不视为检查完成")
     link=sub.add_parser("skills-link");link.add_argument("folder_id");link.add_argument("directory")
     sub.add_parser("skills-check")
     decide=sub.add_parser("skills-decide");decide.add_argument("folder_id");decide.add_argument("content_hash");decide.add_argument("--decision",choices=("approve","decline"),required=True)
@@ -920,8 +1055,7 @@ def main(argv=None):
         path = args.state or Path.cwd() / ".rdos" / manifest["workspace_id"] / manifest["node_id"] / "state.sqlite3"
         workflow = Workflow(manifest, Feishu(manifest, args.cli), State(path))
         if args.command in ("connection", "check"):
-            if args.command == "connection": workflow.transport.run(["auth", "status"])
-            result = workflow.check()
+            result = workflow.check(args.timeout_seconds, authenticate=args.command == "connection")
         elif args.command == "skills-link":result=workflow.link_shared_skill(args.folder_id,args.directory)
         elif args.command == "skills-check":result=workflow.check_shared_skills()
         elif args.command == "skills-decide":result=workflow.decide_shared_skill(args.folder_id,args.content_hash,args.decision)

@@ -12,6 +12,7 @@ MODULES = list(dict.fromkeys(EXISTING + [
     'tests.test_peer_auto_enrollment', 'tests.test_auto_enrollment_presentations',
     'tests.test_shared_skill_updates', 'tests.test_node_onboarding',
     'tests.test_periodic_tasks',
+    'tests.test_node_check_budget',
 ]))
 
 if __name__ == '__main__':
