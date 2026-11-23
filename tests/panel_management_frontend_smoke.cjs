@@ -19,11 +19,12 @@ let browser;
   const other = {id:'member',display_name:'同事',username:'member',roles:['researcher']};
   const folder = 'https://scn33386s7ui.feishu.cn/drive/folder/DefaultFolder';
   const nodes = [{node_id:'node_codex',public_id:'node_codex',display_name:'Codex',member_id:'admin'}, {node_id:'node_workbuddy',public_id:'node_workbuddy',display_name:'WorkBuddy',member_id:'member'}];
+  const third = {node_id:'other_node',public_id:'other_node',display_name:'仅其他项目可用的节点',member_id:'outside'};
   const projects = [
     {id:'default',name:'RDOS建设',is_default:true,status:'active',revision:1,node_ids:nodes.map(node=>node.node_id),folder_url:folder,resolved_folder_url:folder,folder_source:'explicit'},
     {id:'second',name:'第二项目',status:'active',revision:1,node_ids:['node_workbuddy'],folder_url:'',resolved_folder_url:folder,folder_source:'default'},
   ];
-  const calls = []; let synced = 0, syncFailure = false, syncIssues = 0, delayDefault = false;
+  const calls = [], drafts = []; let synced = 0, syncFailure = false, syncIssues = 0, delayDefault = false;
   await page.route('**/*', async route => {
     const request=route.request(), url=new URL(request.url()), pathname=url.pathname;
     calls.push({path:pathname,query:url.search,method:request.method(),body:request.postDataJSON()});
@@ -41,7 +42,7 @@ let browser;
         const body=request.postDataJSON();projects.push({...body,id:'new',revision:1,status:'active',resolved_folder_url:body.folder_url||folder,folder_source:body.folder_url?'explicit':'default'});
         return send({item:projects.at(-1)});
       }
-      return send({items:projects.filter(project=>url.searchParams.get('include_inactive')==='true'||project.status!=='inactive'),nodes,default_folder_url:folder});
+      return send({items:projects.filter(project=>url.searchParams.get('include_inactive')==='true'||project.status!=='inactive'),nodes:[...nodes,third],default_folder_url:folder});
     }
     if(pathname.endsWith('/threads'))return send({items:[]});
     if(pathname.endsWith('/overview'))return send({users:[user,other]});
@@ -50,13 +51,26 @@ let browser;
     if(pathname.endsWith('/phase3/workspace')){
       const project=projects.find(project=>project.id===url.searchParams.get('project_id'));
       if(project?.id==='default'&&delayDefault)await new Promise(resolve=>setTimeout(resolve,400));
-      return send({project,tasks:[],drafts:[],documents:[{id:'shared_rule',title:'RDOS 执行规范',zone:'agent',project_id:'default',revision:3}],events:[],nodes,scope:{zones:{}},last_refresh:synced?{at:'2026-10-22T01:00:00Z',complete:!syncFailure,error:syncFailure?'资料读取暂时失败。':'',issue_count:syncIssues,issue_summary:syncIssues?syncIssues+' 项记录待核对；有效进展已同步。':''}:null});
+      return send({project,tasks:[],drafts:drafts.filter(d=>d.project_id===project?.id&&d.status==='draft'),documents:[{id:'shared_rule',title:'RDOS 执行规范',zone:'agent',project_id:'default',revision:3}],events:[],nodes:[...nodes,third],scope:{zones:{}},last_refresh:synced?{at:'2026-10-22T01:00:00Z',complete:!syncFailure,error:syncFailure?'资料读取暂时失败。':'',issue_count:syncIssues,issue_summary:syncIssues?syncIssues+' 项记录待核对；有效进展已同步。':''}:null});
     }
     if(pathname.endsWith('/phase3/sync')){
       if(syncFailure)return send({detail:{message:'资料读取暂时失败。',code:'source_unavailable'}},'application/json',503);
       synced++;return send({complete:true});
     }
-    if(pathname.endsWith('/phase3/drafts'))return send({item:{id:'draft',status:'draft'}});
+    if(pathname.endsWith('/phase3/drafts')){
+      const draft={id:'draft-'+drafts.length,task_id:'task-'+drafts.length,status:'draft',payload:request.postDataJSON().payload,draft_hash:'a'.repeat(64),project_id:url.searchParams.get('project_id')};
+      drafts.push(draft);return send({item:draft});
+    }
+    if(pathname.includes('/phase3/drafts/')&&pathname.endsWith('/edit')){
+      const draft=drafts.find(d=>d.id===pathname.split('/').at(-2));
+      if(!draft||request.postDataJSON().expected_hash!==draft.draft_hash)return send({detail:'草稿已变化'},'application/json',409);
+      draft.payload=request.postDataJSON().payload;draft.draft_hash='b'.repeat(64);return send({item:draft});
+    }
+    if(pathname.includes('/phase3/tasks/')&&pathname.endsWith('/actions/start')){
+      const draft=drafts.find(d=>d.id===request.postDataJSON().payload.draft_id);
+      if(!draft||request.postDataJSON().payload.expected_hash!==draft.draft_hash)return send({detail:'草稿已变化'},'application/json',409);
+      draft.status='published';return send({item:{...draft.payload,task_id:draft.task_id}});
+    }
     if(pathname.endsWith('/deactivation-preview'))return send({project_id:'second',revision:projects[1].revision,status:projects[1].status,
       ...(projects[1].deactivation?{resume_operation:{operation_id:projects[1].deactivation.operation_id,expected_revision:projects[1].deactivation.expected_revision}}:{}),
       tasks:[{task_id:'t',title:'需暂停的工作',business_status:'active'}]});
@@ -99,14 +113,47 @@ let browser;
   record('Shared project selection and cache-only refresh');
 
   await page.click('#phase3-new');
-  assert.equal(await page.locator('#phase3-task-node option').count(),1);
-  assert.equal(await page.locator('#phase3-task-node').inputValue(),'node_workbuddy');
+  assert.equal(await page.locator('#phase3-task-node input[type=checkbox]').count(),1);
+  assert.equal(await page.locator('#phase3-task-node input:checked').inputValue(),'node_workbuddy');
   await page.fill('#phase3-task-title','仅供隔离浏览器检查');await page.fill('#phase3-task-goal','检查项目范围');await page.fill('#phase3-task-deliverable','操作结果');
   await page.click('#phase3-task-save');await page.waitForSelector('#phase3-task-dialog',{state:'hidden'});
-  const draftCall=calls.find(call=>call.path==='/api/central/phase3/drafts');assert.equal(draftCall.query,'?project_id=second');assert.equal(draftCall.body.payload.project_id,undefined);
+  const draftCall=calls.find(call=>call.path==='/api/central/phase3/drafts');assert.equal(draftCall.query,'?project_id=second');assert.equal(draftCall.body.payload.project_id,undefined);assert.deepEqual(draftCall.body.payload.executor_node_ids,['node_workbuddy']);
   await page.click('#phase3-sync');await page.waitForFunction(()=>document.querySelector('#phase3-sync-status').textContent.includes('已同步'));
   assert.equal(synced,1);assert(calls.some(call=>call.path==='/api/central/phase3/sync'&&call.query==='?project_id=second'));
   record('Only assigned nodes selectable; draft and sync use project query');
+
+  await page.selectOption('#phase3-project','default');
+  await page.waitForFunction(()=>document.querySelector('#phase3-summary').textContent.includes('RDOS建设'));
+  await page.click('#phase3-new');
+  const nodeChoices=page.locator('#phase3-task-node input[type=checkbox]');
+  assert.equal(await nodeChoices.count(),2);
+  assert.equal(await page.locator('#phase3-task-node input:checked').count(),0);
+  assert.equal(await page.locator('#phase3-task-node input[value=other_node]').count(),0);
+  await page.fill('#phase3-task-title','多节点课题');await page.fill('#phase3-task-goal','测试两位接收人');await page.fill('#phase3-task-deliverable','一份共享成果');
+  await page.click('#phase3-task-save');await page.waitForSelector('#phase3-task-form-error:not(.hidden)');
+  assert.match(await page.locator('#phase3-task-form-error').innerText(),/请至少选择一个执行节点/);
+  assert.equal(calls.filter(call=>call.method==='POST'&&call.path.endsWith('/phase3/drafts')).length,1);
+  assert(await nodeChoices.first().evaluate(node=>node===document.activeElement));
+  await nodeChoices.nth(0).check();await nodeChoices.nth(1).check();
+  await page.click('#phase3-task-save');await page.waitForSelector('#phase3-task-dialog',{state:'hidden'});
+  await page.waitForSelector('[data-phase3-edit-draft="draft-1"]');
+  const multiDraft=calls.find(call=>call.path.endsWith('/phase3/drafts')&&call.query==='?project_id=default');
+  assert.deepEqual(multiDraft.body.payload.executor_node_ids,['node_codex','node_workbuddy']);
+  await page.click('[data-phase3-edit-draft="draft-1"]');
+  assert.deepEqual(await page.locator('#phase3-task-node input:checked').evaluateAll(nodes=>nodes.map(node=>node.value)),['node_codex','node_workbuddy']);
+  await page.fill('#phase3-task-goal','修改正文，保留选中节点');
+  await page.click('#phase3-task-save');await page.waitForSelector('#phase3-task-dialog',{state:'hidden'});
+  assert.deepEqual(calls.find(call=>call.path.endsWith('/draft-1/edit')).body.payload.executor_node_ids,['node_codex','node_workbuddy']);
+  await page.click('[data-phase3-draft="draft-1"]');
+  assert.match(await page.locator('#phase3-action-preview').innerText(),/Codex、WorkBuddy/);
+  await page.click('#phase3-action-submit');await page.waitForSelector('#phase3-action-dialog',{state:'hidden'});
+  const startCall=calls.filter(call=>call.path.endsWith('/phase3/tasks/task-1/actions/start'));
+  assert.equal(startCall.length,1);assert.equal(startCall[0].body.payload.expected_hash,'b'.repeat(64));
+  assert.equal(startCall[0].query,'?project_id=default');
+  record('Batch selection is explicit and project-scoped; edit and confirmation retain all selected nodes');
+  await page.selectOption('#phase3-project','second');
+  await page.waitForFunction(()=>document.querySelector('#phase3-summary').textContent.includes('第二项目'));
+
 
   syncFailure=true;await page.click('#phase3-sync');await page.waitForFunction(()=>document.querySelector('#phase3-sync-status').textContent.includes('同步未完成'));
   await page.click('#refresh-workspace');await page.waitForFunction(()=>document.querySelector('#phase3-sync-last').textContent.includes('资料读取暂时失败'));

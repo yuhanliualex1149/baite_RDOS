@@ -1178,9 +1178,15 @@
     const changedInputs=list(p.input_refs).some(ref=>{const current=phase3Documents().find(d=>d.id===ref.document_id||d.object_id===ref.document_id);return current&&(String(current.revision)!==String(ref.revision)||current.content_hash!==ref.content_hash);});
     if(changedInputs)setText('phase3-task-baseline',$('phase3-task-baseline').textContent+' 输入资料已有新版本；保存的草稿将引用当前选中的资料版本，请审阅差异。');
     $('phase3-task-title').value=p.title||'';$('phase3-task-goal').value=p.goal||'';$('phase3-task-deliverable').value=p.deliverable||'';
-    put('phase3-task-node',phase3Nodes().map(node=>'<option value="'+esc(phase3NodeId(node))+'">'+esc(node.display_name||node.label||phase3NodeId(node))+'</option>').join(''));
-    const assigned=phase3Nodes().find(node=>list(p.executor_node_ids).some(id=>[node.public_id,node.node_id,node.id].includes(id)));
-    $('phase3-task-node').value=phase3NodeId(assigned||phase3Nodes()[0]);$('phase3-task-zone').value=p.output_zone||'project';
+    const available=phase3Nodes(),assigned=list(p.executor_node_ids);
+    const matches=(node,id)=>[node.public_id,node.node_id,node.id].includes(id);
+    const unavailable=assigned.filter(id=>!available.some(node=>matches(node,id)));
+    put('phase3-task-node',available.map(node=>{
+      const checked=assigned.some(id=>matches(node,id))||(!task&&!draft&&available.length===1);
+      return '<label class="check-label"><input type="checkbox" value="'+esc(phase3NodeId(node))+'"'+(checked?' checked':'')+' />'+esc(node.display_name||node.label||phase3NodeId(node))+'</label>';
+    }).join('')||'<p class="small-note">本项目暂无可选节点。</p>');
+    errorAt('phase3-task-node-warning',unavailable.length?'原执行节点已不在可选列表：'+unavailable.map(phase3NodeName).join('、')+'。保存前请核对新的执行节点。':'');
+    $('phase3-task-zone').value=p.output_zone||'project';
     $('phase3-task-dispatch').value=list(p.dispatch_to).includes('human')?'both':'agent';$('phase3-task-return').value=list(p.return_to).length>1?'both':list(p.return_to)[0]||'both';
     $('phase3-task-completion').value=['artifact_present','source_versions_match'].includes(p.completion_rule?.kind)?p.completion_rule.kind:'receipt_recorded';
     $('phase3-task-type').value=p.task_type==='deliverable'?'deliverable':'action';$('phase3-task-audience').value=list(p.deliverable_audience||['admin','project_members']).join(',');
@@ -1221,16 +1227,23 @@
   },'phase3-error'));
 
   $('phase3-new').addEventListener('click',()=>showPhase3Task());
-  $('phase3-task-form').addEventListener('submit',e=>{e.preventDefault();formAction('phase3-task-dialog','phase3-task-form-error',async c=>{
-    const selections=[...$('phase3-task-input').selectedOptions].map(o=>o.value),selected=phase3Documents().filter(d=>selections.includes(d.id||d.object_id)),task=phase3.task,draft=phase3.draft;
-    const audience=value=>value==='both'?['agent','human']:[value];
-    const payload={task_type:$('phase3-task-type').value,deliverable_audience:$('phase3-task-audience').value.split(','),title:$('phase3-task-title').value.trim(),goal:$('phase3-task-goal').value.trim(),deliverable:$('phase3-task-deliverable').value.trim(),owner_id:(draft?.payload||task)?.owner_id||phase3.data?.project?.owner_id||state.user.id,executor_node_ids:[$('phase3-task-node').value],input_refs:selected.map(d=>({document_id:d.id||d.object_id,revision:d.revision,content_hash:d.content_hash})),output_zone:$('phase3-task-zone').value,dispatch_to:audience($('phase3-task-dispatch').value),return_to:audience($('phase3-task-return').value),completion_rule:{kind:$('phase3-task-completion').value},due_at:(draft?.payload||task)?.due_at||''};
-    payload.editable_document_ids=[...$('phase3-task-editable').selectedOptions].map(o=>o.value);
-    if(payload.completion_rule.kind==='source_versions_match'&&!payload.input_refs.length)throw new APIError('资料版本核对任务需要先选择具体输入资料及版本。');
-    if(task){payload.task_id=phase3TaskId(task);payload.change_reason=$('phase3-task-change').value.trim();if(!payload.change_reason)throw new APIError('请说明调整原因、旧成果如何处理，以及是否需要重新执行。');}
-    const path=draft?'/phase3/drafts/'+encodeURIComponent(draft.id)+'/edit':'/phase3/drafts';
-    await api(path+phase3Query(),{method:'POST',body:draft?{payload,expected_hash:draft.draft_hash}:{payload,operation_id:phase3.taskOperation},timeout_ms:180000});if(!sameSession(c))return;close('phase3-task-dialog',true);await loadPhase3();toast('草稿已保存，请在待审阅草稿中核对完整内容后开始或应用调整。');
-  });});
+  $('phase3-task-form').addEventListener('submit',e=>{
+    e.preventDefault();
+    const nodes=$('phase3-task-node');
+    const executorNodeIds=[...nodes.querySelectorAll('input:checked')].map(input=>input.value);
+    if(!executorNodeIds.length){errorAt('phase3-task-form-error','请至少选择一个执行节点。');nodes.querySelector('input')?.focus();return;}
+    formAction('phase3-task-dialog','phase3-task-form-error',async c=>{
+      if(!current(c))throw new APIError('当前项目已切换，请重新打开任务表单。');
+      const selections=[...$('phase3-task-input').selectedOptions].map(o=>o.value),selected=phase3Documents().filter(d=>selections.includes(d.id||d.object_id)),task=phase3.task,draft=phase3.draft;
+      const audience=value=>value==='both'?['agent','human']:[value];
+      const payload={task_type:$('phase3-task-type').value,deliverable_audience:$('phase3-task-audience').value.split(','),title:$('phase3-task-title').value.trim(),goal:$('phase3-task-goal').value.trim(),deliverable:$('phase3-task-deliverable').value.trim(),owner_id:(draft?.payload||task)?.owner_id||phase3.data?.project?.owner_id||state.user.id,executor_node_ids:executorNodeIds,input_refs:selected.map(d=>({document_id:d.id||d.object_id,revision:d.revision,content_hash:d.content_hash})),output_zone:$('phase3-task-zone').value,dispatch_to:audience($('phase3-task-dispatch').value),return_to:audience($('phase3-task-return').value),completion_rule:{kind:$('phase3-task-completion').value},due_at:(draft?.payload||task)?.due_at||''};
+      payload.editable_document_ids=[...$('phase3-task-editable').selectedOptions].map(o=>o.value);
+      if(payload.completion_rule.kind==='source_versions_match'&&!payload.input_refs.length)throw new APIError('资料版本核对任务需要先选择具体输入资料及版本。');
+      if(task){payload.task_id=phase3TaskId(task);payload.change_reason=$('phase3-task-change').value.trim();if(!payload.change_reason)throw new APIError('请说明调整原因、旧成果如何处理，以及是否需要重新执行。');}
+      const path=draft?'/phase3/drafts/'+encodeURIComponent(draft.id)+'/edit':'/phase3/drafts';
+      await api(path+phase3Query(),{method:'POST',body:draft?{payload,expected_hash:draft.draft_hash}:{payload,operation_id:phase3.taskOperation},timeout_ms:180000});if(!sameSession(c))return;close('phase3-task-dialog',true);await loadPhase3();toast('草稿已保存，请在待审阅草稿中核对完整内容后开始或应用调整。');
+    });
+  });
   $('phase3-action-form').addEventListener('submit',e=>{e.preventDefault();formAction('phase3-action-dialog','phase3-action-error',async c=>{
     const {task,action,draft,operation_id}=phase3.action;
     const payload=draft?{draft_id:draft.id,expected_hash:draft.draft_hash}:{reason:$('phase3-action-reason').value.trim()};
