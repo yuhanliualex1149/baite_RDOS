@@ -95,6 +95,46 @@ async def check():
 asyncio.run(check())
 ''')
 
+    def test_admin_task_dispatch_preserves_selected_nodes(self):
+        self.guarded('''
+from server.main import app
+from server import central_api, phase3_backend, phase3_service as service
+import httpx
+service.initialize()
+selected = ['node_lab_phase3_codex', 'node_lab_phase3_workbuddy']
+
+async def check():
+    token = store.login(admin_username, admin_password)['token']
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://127.0.0.1:18761',
+            headers={'Origin':'http://127.0.0.1:18761'},cookies={central_api.COOKIE:token}) as client:
+        draft_url = '/api/central/phase3/drafts'
+        body = {'title':'多节点任务', 'goal':'两人可读同一任务', 'deliverable':'一项共享成果'}
+        for suffix, ids in [('empty', []), ('unknown', [*selected, 'outside'])]:
+            refused = await client.post(draft_url, json={'operation_id':'dispatch-'+suffix,
+                'payload':{**body, 'executor_node_ids':ids}})
+            assert refused.status_code == 409 and refused.json()['detail']['code'] == 'invalid_task', refused.text
+        prepared = await client.post(draft_url, json={'operation_id':'dispatch-draft',
+            'payload':{**body, 'executor_node_ids':['node_codex', 'node_workbuddy', 'node_codex']}})
+        assert prepared.status_code == 200, prepared.text
+        draft = prepared.json()['item']
+        assert draft['payload']['executor_node_ids'] == ['node_codex', 'node_workbuddy'], draft
+        start_url = '/api/central/phase3/tasks/'+draft['task_id']+'/actions/start'
+        confirmation = {'operation_id':'dispatch-start', 'expected_revision':0, 'expected_requirements_version':0,
+            'payload':{'draft_id':draft['id'], 'expected_hash':draft['draft_hash']}}
+        for _ in range(2):
+            published = await client.post(start_url, json=confirmation)
+            assert published.status_code == 200, published.text
+            item = published.json()['item']
+            assert item['executor_node_ids'] == ['node_codex', 'node_workbuddy'] and item['record_revision'] == 1, item
+        authoritative = phase3_backend.get_backend().read_task(draft['task_id'])
+        assert authoritative['executor_node_ids'] == selected, authoritative
+        for node_id in selected:
+            actor = service.make_node_actor(node_id)
+            task, _ = await service._grant(draft['task_id'], 1, actor)
+            assert task['task_id'] == draft['task_id']
+asyncio.run(check())
+''')
+
     def test_admin_identity_origin_and_strict_envelopes(self):
         self.guarded('''
 from server.main import app

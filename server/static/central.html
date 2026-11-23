@@ -8,7 +8,7 @@
     <base href="/" />
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="static/central.css?v=panel-navigation-20261024" />
-    <script src="static/central.js?v=panel-navigation-20261024" defer></script>
+    <script src="static/central.js?v=task-node-multiselect-20261123" defer></script>
   </head>
   <body class="rdos-lab">
     <aside class="lab-banner" role="status"><strong>RDOS 实验环境</strong><span id="lab-environment" class="developer-only"></span><p id="lab-capability" class="developer-only"></p></aside>
@@ -315,7 +315,13 @@
         <label>任务名称<input id="phase3-task-title" required maxlength="160" /></label>
         <label>目标与当前要求<textarea id="phase3-task-goal" rows="5" required maxlength="20000"></textarea></label>
         <label>交付要求<textarea id="phase3-task-deliverable" rows="3" required maxlength="12000"></textarea></label>
-        <div class="form-grid"><label>执行节点<select id="phase3-task-node" required></select></label><label>产物位置<select id="phase3-task-zone"><option value="project">项目协作区</option><option value="agent">Agent 协作区</option></select></label></div>
+        <fieldset aria-describedby="phase3-task-node-hint">
+          <legend>执行节点（可多选）</legend>
+          <div id="phase3-task-node" class="member-options"></div>
+          <p id="phase3-task-node-hint" class="small-note">确认后，同一任务会下达给所选节点，按下方完成方式统一收尾。</p>
+          <p id="phase3-task-node-warning" class="small-note hidden" role="status"></p>
+        </fieldset>
+        <label>产物位置<select id="phase3-task-zone"><option value="project">项目协作区</option><option value="agent">Agent 协作区</option></select></label>
         <div class="form-grid"><label>下发对象<select id="phase3-task-dispatch"><option value="agent">Agent</option><option value="both">人＋Agent</option></select></label><label>回传对象<select id="phase3-task-return"><option value="both">人＋Agent</option><option value="agent">仅 Agent</option><option value="human">人（含最小执行回执）</option></select></label></div>
         <div class="form-grid"><label>任务类别<select id="phase3-task-type"><option value="action">执行动作</option><option value="deliverable">制作成果</option></select></label><label>成果面向谁<select id="phase3-task-audience"><option value="admin,project_members">管理员及项目成员</option><option value="researcher">对应研发人员</option><option value="admin">管理员</option><option value="project_members">项目成员</option></select></label></div>
         <label>输入依据（从已登记资料选取，可多选）<select id="phase3-task-input" multiple size="4"></select></label>

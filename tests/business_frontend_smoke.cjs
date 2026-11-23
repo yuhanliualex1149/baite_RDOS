@@ -8,14 +8,15 @@ const html=fs.readFileSync(path.join(__dirname,'../server/static/central.html'),
 const script=fs.readFileSync(path.join(__dirname,'../server/static/central.js'),'utf8');
 const index=script.lastIndexOf('  (async()=>{try{');
 assert(index>0,'Disable network bootstrap before loading the test harness');
-const source=script.slice(0,index)+`globalThis.businessUI={state,phase3,renderPhase3,showPhase3Task,phase3Requirements,runContent,renderNavigation,renderMessages,renderPeople,developerMode,showPhase3Action,maintenanceCard,deletedDrafts,rodos,approvePeer,peerBindingButton,setPeerTestHooks(f){api=f;loadRodos=async()=>{};}};})();`;
+const source=script.slice(0,index)+`globalThis.businessUI={state,phase3,renderPhase3,showPhase3Task,phase3Requirements,runContent,renderNavigation,renderMessages,renderPeople,developerMode,showPhase3Action,maintenanceCard,deletedDrafts,rodos,approvePeer,peerBindingButton,setPeerTestHooks(f){api=f;loadRodos=async()=>{};},setTaskTestHooks(f){api=f;loadPhase3=async()=>{};}};})();`;
 function setup(developer=false){
   const nodes=new Map(),listeners=new Map();let clipboard='';
   class Node{
-    constructor(id){this.id=id;this.dataset={};this.value='';this.textContent='';this.disabled=false;this.checked=false;this.options=[];this.attributes=[];this.scrollTop=0;this.events={};this.classes=new Set();this.isConnected=true;this.classList={toggle:(k,on)=>on?this.classes.add(k):this.classes.delete(k),add:k=>this.classes.add(k),remove:k=>this.classes.delete(k),contains:k=>this.classes.has(k)};}
-    set innerHTML(value){this.html=value;this.options=[...value.matchAll(/<option value="([^"]*)"/g)].map(m=>({value:m[1],selected:false}));}
+    constructor(id){this.id=id;this.dataset={};this.value='';this.textContent='';this.disabled=false;this.checked=false;this.options=[];this.checkboxes=[];this.attributes=[];this.scrollTop=0;this.events={};this.classes=new Set();this.isConnected=true;this.classList={toggle:(k,on)=>on?this.classes.add(k):this.classes.delete(k),add:k=>this.classes.add(k),remove:k=>this.classes.delete(k),contains:k=>this.classes.has(k)};}
+    set innerHTML(value){this.html=value;this.options=[...value.matchAll(/<option value="([^"]*)"/g)].map(m=>({value:m[1],selected:false}));this.checkboxes=[...value.matchAll(/<input type="checkbox" value="([^"]*)"( checked)?/g)].map(m=>({value:m[1],checked:!!m[2],focus(){}}));}
     get innerHTML(){return this.html||'';}
-    addEventListener(k,f){this.events[k]=f;} querySelectorAll(){return [];} querySelector(){return null;} contains(){return false;} getAttribute(){return '';} setAttribute(){} removeAttribute(){} reset(){} showModal(){this.open=true;} close(){this.open=false;} focus(){}
+    get selectedOptions(){return this.options.filter(option=>option.selected);}
+    addEventListener(k,f){this.events[k]=f;} querySelectorAll(selector){return selector==='input:checked'?this.checkboxes.filter(input=>input.checked):[];} querySelector(selector){return selector==='input'?this.checkboxes[0]||null:null;} contains(){return false;} getAttribute(){return '';} setAttribute(){} removeAttribute(){} reset(){} showModal(){this.open=true;} close(){this.open=false;} focus(){}
   }
   const node=id=>{if(!nodes.has(id))nodes.set(id,new Node(id));return nodes.get(id);};
   const document={body:node('body'),baseURI:'http://127.0.0.1:18760/',activeElement:null,getElementById:node,querySelectorAll:()=>[],addEventListener:(k,f)=>{const previous=listeners.get(k);listeners.set(k,previous?event=>{previous(event);f(event);}:f);}};
@@ -33,7 +34,24 @@ const report={mode:'in-memory DOM/API doubles, not browser acceptance',started_a
 function test(name,fn){return Promise.resolve().then(fn).then(()=>{passed++;report.checks.push({name,passed:true});console.log('PASS '+name);}).catch(error=>{report.checks.push({name,passed:false,error:error.message});throw error;});}
 (async()=>{
   await test('normal navigation cannot open developer work',()=>{const {h,node}=setup();h.state.page='work';h.renderNavigation();assert.equal(h.state.page,'projects');assert.equal(node('page-title').textContent,'项目管理');});
-  await test('registered nodes populate associated member cards and task assignment without a two-node limit',()=>{const {h,node}=setup();h.renderPhase3();const cards=node('people-list').innerHTML.split('</article>'),third=cards.find(card=>card.includes('data-key="user:member-c"')),admin=cards.find(card=>card.includes('data-key="user:owner"'));assert.match(third,/研究节点/);assert.match(third,/data-phase3-copy="research"/);assert.doesNotMatch(admin,/data-phase3-copy=/);assert.equal((node('people-list').innerHTML.match(/data-phase3-copy=/g)||[]).length,3);assert.doesNotMatch(html,/id="phase3-nodes"/);h.showPhase3Task();assert.equal(node('phase3-task-node').options.length,3);assert.equal(node('phase3-task-node').value,'codex');});
+  await test('registered nodes populate associated member cards and task assignment without a two-node limit',()=>{const {h,node}=setup();h.renderPhase3();const cards=node('people-list').innerHTML.split('</article>'),third=cards.find(card=>card.includes('data-key="user:member-c"')),admin=cards.find(card=>card.includes('data-key="user:owner"'));assert.match(third,/研究节点/);assert.match(third,/data-phase3-copy="research"/);assert.doesNotMatch(admin,/data-phase3-copy=/);assert.equal((node('people-list').innerHTML.match(/data-phase3-copy=/g)||[]).length,3);assert.doesNotMatch(html,/id="phase3-nodes"/);h.showPhase3Task();const choices=()=>node('phase3-task-node').innerHTML;assert.equal((choices().match(/type="checkbox"/g)||[]).length,3);assert.doesNotMatch(choices(),/ checked/);h.showPhase3Task(null,{payload:{executor_node_ids:['internal-a','research']}});assert.match(choices(),/value="codex" checked/);assert.match(choices(),/value="research" checked/);assert.doesNotMatch(choices(),/value="workbuddy" checked/);});
+  await test('admin draft submit requires a scoped selection and sends one list of all selected nodes',async()=>{
+    const {h,node}=setup(),calls=[];
+    h.state.projectId='two-nodes';
+    h.state.projects=[{id:'two-nodes',name:'两节点项目',node_ids:['codex','research'],status:'active'}];
+    h.setTaskTestHooks(async (url,request)=>{calls.push({url,request});return {item:{id:'draft'}};});
+    h.showPhase3Task();
+    const choices=node('phase3-task-node').checkboxes;
+    assert.deepEqual(choices.map(input=>input.value),['codex','research']);
+    const submit=()=>node('phase3-task-form').events.submit({preventDefault(){}});
+    submit();
+    assert.match(node('phase3-task-form-error').textContent,/请至少选择一个执行节点/);
+    assert.equal(calls.length,0);
+    choices.forEach(input=>input.checked=true);
+    submit();submit();await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(calls.map(({url,request})=>[url,...request.body.payload.executor_node_ids]),[['/phase3/drafts?project_id=two-nodes','codex','research']]);
+    assert.equal(node('phase3-task-dialog').open,false);
+  });
   await test('new action defaults to automatic receipt completion and distinct audience',()=>{const {h,node}=setup();h.showPhase3Task();assert.equal(node('phase3-task-completion').value,'receipt_recorded');assert.equal(node('phase3-task-type').value,'action');assert.equal(node('phase3-task-audience').value,'admin,project_members');});
   await test('automatic completion never creates human quality acceptance',()=>{const {h,node}=setup();h.phase3.data.tasks=[{task_id:'done',title:'更新工作方式',business_status:'closed',requirements_version:2,record_revision:3,completion_rule:{kind:'receipt_recorded'},task_type:'action',result_status:'completed',receipt_status:'verified',quality_status:'not_evaluated',execution_result:{summary:'工作方式已更新。'},execution:{private_trace:'DO_NOT_RENDER'}}];node('phase3-show-closed').checked=true;node('phase3-show-closed').events.change();h.renderPhase3();assert.match(node('phase3-tasks').innerHTML,/动作完成|已写回并核对|未作质量判断/);assert.doesNotMatch(node('phase3-tasks').innerHTML,/DO_NOT_RENDER|data-phase3-action="accept_close"/);assert.match(node('phase3-decisions').innerHTML,/没有需要你处理/);});
   await test('Agent Review type alone does not create a quality approval task',()=>{const {h,node}=setup();h.phase3.data.tasks=[{task_id:'review',title:'审阅成果',task_type:'review',business_status:'pending_review',requirements_version:1,completion_rule:{kind:'receipt_recorded'}}];h.renderPhase3();assert.doesNotMatch(node('phase3-tasks').innerHTML,/data-phase3-action="accept_close"/);assert.doesNotMatch(node('phase3-decisions').innerHTML,/审阅指定版本/);});
@@ -66,4 +84,4 @@ function test(name,fn){return Promise.resolve().then(fn).then(()=>{passed++;repo
     assert.match(office,/待自动登记/);assert.doesNotMatch(office,/data-peer-approve|office-request|登记码/);
   });
   console.log(`${passed} business frontend behavior checks passed`);
-})().catch(e=>{report.failure=e.message;console.error(e);process.exitCode=1;}).finally(()=>{report.finished_at=new Date().toISOString();report.passed=passed===16;const evidence=path.resolve(__dirname,'../../evidence/members_knowledge_ui');fs.mkdirSync(evidence,{recursive:true});fs.writeFileSync(path.join(evidence,'business-dom-report.json'),JSON.stringify(report,null,2));});
+})().catch(e=>{report.failure=e.message;console.error(e);process.exitCode=1;}).finally(()=>{report.finished_at=new Date().toISOString();report.passed=passed===17;const evidence=path.resolve(__dirname,'../../evidence/members_knowledge_ui');fs.mkdirSync(evidence,{recursive:true});fs.writeFileSync(path.join(evidence,'business-dom-report.json'),JSON.stringify(report,null,2));});
