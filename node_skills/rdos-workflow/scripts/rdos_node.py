@@ -926,6 +926,33 @@ class Workflow(PeerMixin, SharedSkillsMixin):
                     break
         return bodies
 
+    @staticmethod
+    def _artifact_body_matches(expected, actual):
+        if expected == actual:
+            return True
+        original_lines = expected.split("\n")
+        readback_lines = actual.split("\n")
+        if len(readback_lines) != len(original_lines) + 1:
+            return False
+
+        difference = next((i for i, (original, readback) in
+                           enumerate(zip(original_lines, readback_lines)) if original != readback), None)
+        if difference is None or difference == 0 or readback_lines[difference] != "":
+            return False
+        parent, child = original_lines[difference - 1:difference + 1]
+        if not child.startswith("  "):
+            return False
+        list_item = r"- (?![- \t]+$|(?:[-+*]|[0-9]+[.)])(?:[ \t]|$))\S.*"
+        if not all(re.fullmatch(list_item, line) for line in (parent, child[2:])):
+            return False
+
+        # A list-looking line after block markup may belong to literal content.
+        # Keep exact comparison in that case.
+        prefix = "\n".join(original_lines[:difference + 1])
+        if re.search(r"```|~~~|<(?:[A-Za-z/!?])|\$\$", prefix):
+            return False
+        return readback_lines[difference + 1:] == original_lines[difference:]
+
     def _artifact_readback(self, operation_id, op, document_id):
         desired = op["desired"]
         identifier(document_id)
@@ -940,13 +967,13 @@ class Workflow(PeerMixin, SharedSkillsMixin):
         if (actual.get("document_id") != document_id or actual.get("revision") is None
             or not isinstance(actual.get("content"), str) or actual.get("content_hash") != sha(actual["content"])):
             fail("readback_mismatch", "成果缺少完整且一致的独立读回")
-        expected = self._artifact_expected_body(operation_id, op)
+        expected = [self._artifact_expected_body(operation_id, op)]
         suffix = "\n\n<!-- rdos-operation:" + operation_id + " -->"
         bodies = self._artifact_bodies(actual["content"], desired["title"])
-        # Old operations stored their own marker in desired content. Accept its
-        # presence or removal only; other comments and all body spacing matter.
-        if not any(body == expected or (desired["content"].endswith(suffix)
-            and body == expected + suffix) for body in bodies):
+        # Old operations may have retained their own marker in the export.
+        if desired["content"].endswith(suffix):
+            expected.append(desired["content"])
+        if not any(self._artifact_body_matches(original, body) for body in bodies for original in expected):
             fail("artifact_conflict", "成果正文与原创建记录不一致，未重复创建")
         return {k: actual[k] for k in ("document_id", "revision", "content_hash")}
 

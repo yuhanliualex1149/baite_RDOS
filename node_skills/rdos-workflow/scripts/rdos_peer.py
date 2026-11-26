@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-PEER_SKILL_VERSION='1.2.1'
+PEER_SKILL_VERSION='1.2.2'
 
 class PeerMixin:
     def _peer_error(self,code,message):
@@ -263,7 +263,7 @@ class PeerMixin:
                 except ValueError as exc:
                     if getattr(exc,'code',None)=='check_timeout':raise
                     continue
-                if claim.get('skill_version') in ('1.1.0','1.1.1','1.1.2','1.1.3','1.2.0','1.2.1') and claim=={'node_id':node['node_id'],'binding_id':node['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
+                if claim.get('skill_version') in ('1.1.0','1.1.1','1.1.2','1.1.3','1.2.0','1.2.1','1.2.2') and claim=={'node_id':node['node_id'],'binding_id':node['binding_id'],'capability':'peer_tasks_v1','skill_version':claim.get('skill_version')}:
                     node['ready']=True
         self.peer_registry_issues=quarantined
         return result

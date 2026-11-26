@@ -11,7 +11,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'node_skills' / 'rdos-workflow'
-SKILL_VERSION = '1.2.1'
+SKILL_VERSION = '1.2.2'
 
 
 def package_bytes(manifest: dict) -> tuple[bytes, dict]:

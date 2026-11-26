@@ -269,6 +269,72 @@ class NodeBusinessTests(unittest.TestCase):
         self.assertEqual(self.transport.documents['doc_created_1']['content'], '<title>业务成果</title>\n\n给成员看的正文')
         self.assertEqual(self.transport.create_count, 1)
 
+    def test_feishu_nested_list_blank_readback_allows_completion_with_original_hash(self):
+        self.transport.task_value = task(task_type='deliverable')
+        original = '已完成\n\n- 周报事项\n  - 进展\n  - 安排'
+        actual = '<title>周报</title>\n\n已完成\n\n- 周报事项\n\n  - 进展\n  - 安排'
+        self.transport.create_body_transform = lambda title, content: actual
+        result = self.workflow.create_artifact('task_example', '周报', original, 'weekly-draft')
+        self.assertTrue(result['readback_verified'])
+        reference = result['artifact_ref']
+        self.assertEqual(reference['content_hash'], node.sha(actual))
+        self.assertEqual(self.workflow.verify(result['operation_id']), result)
+        receipt = self.workflow.submit('task_example', 'completed', '周报已交付', 'complete', [reference])
+        self.assertTrue(receipt['readback_verified'])
+        self.assertEqual(self.transport.create_count, 1)
+        self.assertEqual(self.transport.append_count, 1)
+
+    def test_nested_list_readback_still_rejects_other_changes(self):
+        original = '总结\n\n- 事项\n  - 进展\n  - 安排'
+        actual = '总结\n\n- 事项\n\n  - 进展\n  - 安排'
+        changes = (
+            (original, actual.replace('进展', '进度')),
+            (original, actual.replace('\n  - 安排', '')),
+            (original, actual.replace('进展\n  - 安排', '安排\n  - 进展')),
+            (original, actual.replace('  - 进展', '    - 进展')),
+            (original, actual.replace('- 事项\n\n', '- 事项\n\n\n')),
+            (actual, original),
+            (original, original.replace('进展\n', '进展\n\n')),
+            ('第一段\n第二段', '第一段\n\n第二段'),
+            ('```markdown\n' + original + '\n```', '```markdown\n' + actual + '\n```'),
+            ('<pre>\n' + original + '\n</pre>', '<pre>\n' + actual + '\n</pre>'),
+            ('- ---\n  - 子项', '- ---\n\n  - 子项'),
+            ('- 父项\n  - ---', '- 父项\n\n  - ---'),
+        )
+        for index, (expected, readback) in enumerate(changes):
+            with self.subTest(index=index):
+                opid = self.legacy_artifact(content=expected, actual=readback)
+                with self.assertRaises(node.WorkflowError) as error:
+                    self.workflow.reconcile_artifact(opid, 'legacy_document', 3, node.sha(readback))
+                self.assertEqual(error.exception.code, 'artifact_conflict')
+        self.assertEqual(self.transport.create_count, 0)
+        self.assertEqual(self.transport.append_count, 0)
+
+    def test_closed_legacy_artifact_reconciles_nested_list_without_business_writes(self):
+        self.transport.task_value = task(task_type='deliverable', business_status='closed')
+        original = '- 事项\n  - 进展'
+        actual = '<title>原业务成果</title>\n\n- 事项\n\n  - 进展'
+        opid = self.legacy_artifact(content=original, actual=actual)
+        document = self.transport.documents['legacy_document']
+        document['content'] += '\n\n<!-- rdos-operation:' + opid + ' -->'
+        document['content_hash'] = node.sha(document['content'])
+        content_hash = document['content_hash']
+        for revision, digest in ((4, content_hash), (3, node.sha(original))):
+            with self.assertRaises(node.WorkflowError) as error:
+                self.workflow.reconcile_artifact(opid, 'legacy_document', revision, digest)
+            self.assertEqual(error.exception.code, 'version_conflict')
+        document['folder'] = 'folder_other'
+        with self.assertRaises(node.WorkflowError) as error:
+            self.workflow.reconcile_artifact(opid, 'legacy_document', 3, content_hash)
+        self.assertEqual(error.exception.code, 'out_of_scope')
+        document['folder'] = 'folder_project'
+        result = self.workflow.reconcile_artifact(opid, 'legacy_document', 3, content_hash)
+        self.assertEqual(result['artifact_ref']['content_hash'], content_hash)
+        self.assertEqual(self.workflow.verify(opid), result)
+        self.assertEqual(self.transport.task_value['business_status'], 'closed')
+        self.assertEqual(self.transport.create_count, 0)
+        self.assertEqual(self.transport.append_count, 0)
+
     def test_response_identity_does_not_adopt_other_same_title_documents(self):
         original = self.transport.create
         def create_with_other(folder, title, content):
